@@ -10,6 +10,11 @@ import org.springframework.web.reactive.function.client.WebClient;
 public class WebClientConfig {
 
 	@Bean
+	public WebClient.Builder webClientBuilder() {
+		return WebClient.builder();
+	}
+
+	@Bean
 	public WebClient binanceWebClient(BinanceProperties properties, WebClient.Builder builder) {
 		return builder
 				.baseUrl(properties.baseUrl())

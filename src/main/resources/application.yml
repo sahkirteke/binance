@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: binance-trader
+  datasource:
+    url: jdbc:postgresql://aws-1-eu-central-1.pooler.supabase.com:5432/postgres?user=postgres.qssdtvxgkxjnfvchzghw&password=N7wncMMz9asKnain
+    username: postgres
+    password: N7wncMMz9asKnain
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+binance:
+  base-url: https://api.binance.com
+  api-key:
+  secret-key:
+  recv-window-millis: 5000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
