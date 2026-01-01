@@ -14,9 +14,18 @@ spring:
 
 binance:
   base-url: https://api.binance.com
+  testnet-base-url: https://testnet.binancefuture.com
+  use-testnet: true
   api-key: ${BINANCE_API_KEY:}
   secret-key: ${BINANCE_SECRET_KEY:}
   recv-window-millis: 5000
+
+strategy:
+  symbol: ETHUSDT
+  target-price: 2500
+  notional-usd: 10
+  leverage: 10
+  poll-interval-ms: 2000
 
 management:
   endpoints:

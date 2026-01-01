@@ -9,6 +9,8 @@ import jakarta.validation.constraints.NotBlank;
 @ConfigurationProperties(prefix = "binance")
 public record BinanceProperties(
 		@NotBlank String baseUrl,
+		@NotBlank String testnetBaseUrl,
+		boolean useTestnet,
 		String apiKey,
 		String secretKey,
 		long recvWindowMillis) {

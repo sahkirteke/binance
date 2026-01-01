@@ -16,8 +16,9 @@ public class WebClientConfig {
 
 	@Bean
 	public WebClient binanceWebClient(BinanceProperties properties, WebClient.Builder builder) {
+		String baseUrl = properties.useTestnet() ? properties.testnetBaseUrl() : properties.baseUrl();
 		return builder
-				.baseUrl(properties.baseUrl())
+				.baseUrl(baseUrl)
 				.defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
 				.build();
 	}
