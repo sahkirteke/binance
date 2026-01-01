@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: binance-trader
+  datasource:
+    url: jdbc:postgresql://aws-1-eu-central-1.pooler.supabase.com:5432/postgres?user=postgres.qssdtvxgkxjnfvchzghw&password=N7wncMMz9asKnain
+    username: postgres
+    password: N7wncMMz9asKnain
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+binance:
+  base-url: https://api.binance.com
+  testnet-base-url: https://testnet.binancefuture.com
+  use-testnet: true
+  api-key: ${BINANCE_API_KEY:}
+  secret-key: ${BINANCE_SECRET_KEY:}
+  recv-window-millis: 5000
+
+strategy:
+  symbol: ETHUSDT
+  notional-usd: 20
+  market-quantity: 0.01
+  leverage: 10
+  position-side: LONG
+  enable-orders: false
+  poll-interval-ms: 2000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
