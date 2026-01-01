@@ -485,8 +485,8 @@ public class EtcEthDepthStrategyWatcher {
 						quantity,
 						takeProfit,
 						true,
-						hedgeMode ? direction.name() : ""))
-				.map(tpOrder -> new ProtectionOrders(response, stopOrder, tpOrder));
+						hedgeMode ? direction.name() : "")
+						.map(tpOrder -> new ProtectionOrders(response, stopOrder, tpOrder)));
 	}
 
 	private void closePosition(Direction direction) {
