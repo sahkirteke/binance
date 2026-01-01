@@ -66,34 +66,39 @@ public class TestnetDepthSwitchStrategyWatcher {
 
 		return orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> executeSwitch(current, desired, hedgeMode))
-				.doOnSuccess(ignored -> currentPosition.set(desired))
+				.doOnNext(success -> {
+					if (Boolean.TRUE.equals(success)) {
+						currentPosition.set(desired);
+					}
+				})
+				.then()
 				.onErrorResume(error -> {
 					LOGGER.warn("Position switch failed", error);
 					return Mono.empty();
 				});
 	}
 
-	private Mono<Void> executeSwitch(PositionSignal current, PositionSignal desired, boolean hedgeMode) {
+	private Mono<Boolean> executeSwitch(PositionSignal current, PositionSignal desired, boolean hedgeMode) {
 		LOGGER.info("Switching position from {} to {} for {}", current, desired, strategyProperties.tradeSymbol());
 		if (!strategyProperties.enableOrders()) {
 			LOGGER.warn("[TESTNET] Order placement disabled. Set strategy.enable-orders=true to send orders.");
-			return Mono.empty();
+			return Mono.just(false);
 		}
 
 		if (!hedgeMode) {
 			return placeOrderFor(desired, "")
-					.then();
+					.thenReturn(true);
 		}
 
-		Mono<Void> closeCurrent = Mono.empty();
+		Mono<com.binance.exchange.dto.OrderResponse> closeCurrent = Mono.empty();
 		if (current == PositionSignal.LONG) {
-			closeCurrent = placeOrder("SELL", strategyProperties.marketQuantity(), "LONG").then();
+			closeCurrent = placeOrder("SELL", strategyProperties.marketQuantity(), "LONG");
 		} else if (current == PositionSignal.SHORT) {
-			closeCurrent = placeOrder("BUY", strategyProperties.marketQuantity(), "SHORT").then();
+			closeCurrent = placeOrder("BUY", strategyProperties.marketQuantity(), "SHORT");
 		}
 
 		return closeCurrent.then(placeOrderFor(desired, desired.positionSide))
-				.then();
+				.thenReturn(true);
 	}
 
 	private Mono<Void> placeOrderFor(PositionSignal desired, String positionSide) {
