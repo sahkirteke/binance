@@ -428,7 +428,8 @@ public class EtcEthDepthStrategyWatcher {
 	}
 
 	private void openIfReady(long now) {
-		if (now - lastTradeTimestamp.get() < strategyProperties.cooldownMs()) {
+		int effectiveCooldownMs = Math.max(0, (int) Math.round(strategyProperties.cooldownMs() * 0.7));
+		if (now - lastTradeTimestamp.get() < effectiveCooldownMs) {
 			return;
 		}
 		if (!riskAllowed()) {
@@ -439,7 +440,8 @@ public class EtcEthDepthStrategyWatcher {
 			return;
 		}
 		BigDecimal spreadBps = latestSpreadBps.get();
-		if (spreadBps != null && spreadBps.compareTo(strategyProperties.maxSpreadBps()) > 0) {
+		if (spreadBps != null
+				&& spreadBps.compareTo(strategyProperties.maxSpreadBps().multiply(new BigDecimal("1.5"))) > 0) {
 			LOGGER.info("Spread too wide ({} bps). Skipping entry.", spreadBps);
 			return;
 		}
