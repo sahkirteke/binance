@@ -14,8 +14,8 @@ spring:
 
 binance:
   base-url: https://api.binance.com
-  api-key:
-  secret-key:
+  api-key: ${BINANCE_API_KEY:}
+  secret-key: ${BINANCE_SECRET_KEY:}
   recv-window-millis: 5000
 
 management:
