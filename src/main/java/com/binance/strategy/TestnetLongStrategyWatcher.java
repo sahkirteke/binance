@@ -1,6 +1,7 @@
 package com.binance.strategy;
 
 import java.math.BigDecimal;
+import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,7 +48,7 @@ public class TestnetLongStrategyWatcher {
 
 		LOGGER.info("Current mark price for {}: {}", strategyProperties.symbol(), markPrice);
 
-		if (strategyProperties.targetPrice()
+		if (Optional.ofNullable(strategyProperties.targetPrice())
 				.map(target -> markPrice.compareTo(target) <= 0)
 				.orElse(true)) {
 			triggered = true;
