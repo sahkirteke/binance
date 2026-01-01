@@ -381,17 +381,28 @@ public class EtcEthDepthStrategyWatcher {
 		}
 		BigDecimal obiThreshold = strategyProperties.obiEntry().multiply(new BigDecimal("0.90"));
 		BigDecimal toiThreshold = strategyProperties.toiMin().multiply(new BigDecimal("0.85"));
-		boolean longCandidate = obi.compareTo(obiThreshold) > 0
-				&& toi.compareTo(toiThreshold) > 0
-				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0;
-		boolean shortCandidate = obi.compareTo(obiThreshold.negate()) < 0
-				&& toi.compareTo(toiThreshold.negate()) < 0
-				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0;
+		BigDecimal cancelMax = strategyProperties.cancelMax();
+		boolean obiOkLong = obi.compareTo(obiThreshold) > 0;
+		boolean toiOkLong = toi.compareTo(toiThreshold) > 0;
+		boolean obiOkShort = obi.compareTo(obiThreshold.negate()) < 0;
+		boolean toiOkShort = toi.compareTo(toiThreshold.negate()) < 0;
+		boolean cancelOk = cancelRatio.compareTo(cancelMax) < 0;
+		boolean longCandidate = obiOkLong && toiOkLong && cancelOk;
+		boolean shortCandidate = obiOkShort && toiOkShort && cancelOk;
 		if (longCandidate) {
 			return Direction.LONG;
 		}
 		if (shortCandidate) {
 			return Direction.SHORT;
+		}
+		if (!obiOkLong && !obiOkShort) {
+			LOGGER.info("Gate fail: OBI value={}, threshold={}", obi, obiThreshold);
+		}
+		if (!toiOkLong && !toiOkShort) {
+			LOGGER.info("Gate fail: TOI value={}, threshold={}", toi, toiThreshold);
+		}
+		if (!cancelOk) {
+			LOGGER.info("Gate fail: CANCEL value={}, max={}", cancelRatio, cancelMax);
 		}
 		return Direction.NONE;
 	}
