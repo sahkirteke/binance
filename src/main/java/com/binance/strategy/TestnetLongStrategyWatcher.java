@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import com.binance.exchange.BinanceFuturesOrderClient;
 import com.binance.market.BinanceMarketClient;
 
 @Component
@@ -15,11 +16,15 @@ public class TestnetLongStrategyWatcher {
 	private static final Logger LOGGER = LoggerFactory.getLogger(TestnetLongStrategyWatcher.class);
 
 	private final BinanceMarketClient marketClient;
+	private final BinanceFuturesOrderClient orderClient;
 	private final StrategyProperties strategyProperties;
 	private volatile boolean triggered;
 
-	public TestnetLongStrategyWatcher(BinanceMarketClient marketClient, StrategyProperties strategyProperties) {
+	public TestnetLongStrategyWatcher(BinanceMarketClient marketClient,
+			BinanceFuturesOrderClient orderClient,
+			StrategyProperties strategyProperties) {
 		this.marketClient = marketClient;
+		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 	}
 
@@ -47,11 +52,18 @@ public class TestnetLongStrategyWatcher {
 			BigDecimal margin = strategyProperties.notionalUsd()
 					.divide(BigDecimal.valueOf(strategyProperties.leverage()));
 			LOGGER.info(
-					"[TESTNET] Triggering simulated LONG. symbol={}, notionalUsd={}, leverage={}, marginUsd={}",
+					"[TESTNET] Triggering MARKET LONG. symbol={}, notionalUsd={}, leverage={}, marginUsd={}, quantity={}",
 					strategyProperties.symbol(),
 					strategyProperties.notionalUsd(),
 					strategyProperties.leverage(),
-					margin);
+					margin,
+					strategyProperties.marketQuantity());
+			orderClient.placeMarketOrder(strategyProperties.symbol(), "BUY", strategyProperties.marketQuantity())
+					.doOnNext(response -> LOGGER.info("[TESTNET] Order placed. orderId={}, status={}",
+							response.orderId(),
+							response.status()))
+					.doOnError(error -> LOGGER.warn("[TESTNET] Order placement failed", error))
+					.subscribe();
 		}
 	}
 }
