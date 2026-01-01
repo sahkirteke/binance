@@ -545,25 +545,37 @@ public class EtcEthDepthStrategyWatcher {
 					&& notional.compareTo(strategyProperties.maxPositionUsdt()) > 0) {
 				quantity = strategyProperties.maxPositionUsdt().divide(mid, MathContext.DECIMAL64);
 			}
-			return quantity;
+			return roundDownToStep(quantity, strategyProperties.quantityStep());
 		}
-		return strategyProperties.marketQuantity();
+		return roundDownToStep(strategyProperties.marketQuantity(), strategyProperties.quantityStep());
 	}
 
 	private BigDecimal stopPrice(BigDecimal entry, Direction direction) {
 		BigDecimal bps = strategyProperties.stopLossBps().divide(new BigDecimal("10000"), MathContext.DECIMAL64);
 		if (direction == Direction.LONG) {
-			return entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+			return roundDownToStep(entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
+					strategyProperties.priceTick());
 		}
-		return entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+		return roundDownToStep(entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
+				strategyProperties.priceTick());
 	}
 
 	private BigDecimal takeProfitPrice(BigDecimal entry, Direction direction) {
 		BigDecimal bps = strategyProperties.takeProfitBps().divide(new BigDecimal("10000"), MathContext.DECIMAL64);
 		if (direction == Direction.LONG) {
-			return entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+			return roundDownToStep(entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
+					strategyProperties.priceTick());
 		}
-		return entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+		return roundDownToStep(entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
+				strategyProperties.priceTick());
+	}
+
+	private BigDecimal roundDownToStep(BigDecimal value, BigDecimal step) {
+		if (value == null || step == null || step.signum() <= 0) {
+			return value;
+		}
+		BigDecimal ratio = value.divide(step, 0, java.math.RoundingMode.DOWN);
+		return ratio.multiply(step, MathContext.DECIMAL64);
 	}
 
 	private void resyncOrderBook(String reason) {

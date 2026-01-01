@@ -32,6 +32,8 @@ public record StrategyProperties(
 		BigDecimal positionNotionalUsdt,
 		BigDecimal stopLossBps,
 		BigDecimal takeProfitBps,
+		BigDecimal quantityStep,
+		BigDecimal priceTick,
 		BigDecimal maxDailyLossUsdt,
 		int maxConsecutiveLosses,
 		BigDecimal maxPositionUsdt) {
