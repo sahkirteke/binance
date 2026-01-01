@@ -25,6 +25,7 @@ strategy:
   notional-usd: 10
   market-quantity: 0.004
   leverage: 10
+  position-side: LONG
   enable-orders: false
   poll-interval-ms: 2000
 

@@ -25,7 +25,7 @@ public class BinanceFuturesOrderClient {
 		this.signatureUtil = signatureUtil;
 	}
 
-	public Mono<OrderResponse> placeMarketOrder(String symbol, String side, BigDecimal quantity) {
+	public Mono<OrderResponse> placeMarketOrder(String symbol, String side, BigDecimal quantity, String positionSide) {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()
 				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
 			return Mono.error(new IllegalStateException(
@@ -39,6 +39,9 @@ public class BinanceFuturesOrderClient {
 				quantity.toPlainString(),
 				properties.recvWindowMillis(),
 				timestamp);
+		if (positionSide != null && !positionSide.isBlank()) {
+			payload = payload + "&positionSide=" + positionSide;
+		}
 		String signature = signatureUtil.sign(payload, properties.secretKey());
 		String signedPayload = payload + "&signature=" + signature;
 
@@ -51,6 +54,12 @@ public class BinanceFuturesOrderClient {
 				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
 				.header("X-MBX-APIKEY", properties.apiKey())
 				.retrieve()
+				.onStatus(status -> status.isError(), response -> response
+						.bodyToMono(String.class)
+						.defaultIfEmpty("<empty>")
+						.flatMap(body -> Mono.error(new IllegalStateException(
+								"Binance order failed with status=" + response.statusCode().value()
+										+ ", body=" + body))))
 				.bodyToMono(OrderResponse.class);
 	}
 }
