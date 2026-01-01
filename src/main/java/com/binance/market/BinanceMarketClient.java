@@ -2,6 +2,7 @@ package com.binance.market;
 
 import java.math.BigDecimal;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -15,9 +16,12 @@ import reactor.core.publisher.Mono;
 public class BinanceMarketClient {
 
 	private final WebClient binanceWebClient;
+	private final WebClient spotWebClient;
 
-	public BinanceMarketClient(WebClient binanceWebClient) {
+	public BinanceMarketClient(WebClient binanceWebClient,
+			@Qualifier("spotWebClient") WebClient spotWebClient) {
 		this.binanceWebClient = binanceWebClient;
+		this.spotWebClient = spotWebClient;
 	}
 
 	public Mono<BigDecimal> fetchMarkPrice(String symbol) {
@@ -45,7 +49,7 @@ public class BinanceMarketClient {
 	}
 
 	public Mono<OrderBookDepthResponse> fetchSpotOrderBookDepth(String symbol, int limit) {
-		return binanceWebClient
+		return spotWebClient
 				.get()
 				.uri(uriBuilder -> uriBuilder
 						.path("/api/v3/depth")

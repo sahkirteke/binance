@@ -26,6 +26,14 @@ public class WebClientConfig {
 	}
 
 	@Bean
+	public WebClient spotWebClient(BinanceProperties properties, WebClient.Builder builder) {
+		return builder
+				.baseUrl(properties.baseUrl())
+				.defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+				.build();
+	}
+
+	@Bean
 	public ObjectMapper objectMapper() {
 		return new ObjectMapper().findAndRegisterModules();
 	}
