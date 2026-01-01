@@ -17,5 +17,22 @@ public record StrategyProperties(
 		@Positive BigDecimal marketQuantity,
 		int leverage,
 		String positionSide,
-		boolean enableOrders) {
+		boolean enableOrders,
+		int tickIntervalMs,
+		int rollingWindowMs,
+		int depthLevels,
+		BigDecimal weightLambda,
+		BigDecimal obiEntry,
+		BigDecimal obiExit,
+		BigDecimal toiMin,
+		BigDecimal cancelMax,
+		int persistMs,
+		int cooldownMs,
+		BigDecimal maxSpreadBps,
+		BigDecimal positionNotionalUsdt,
+		BigDecimal stopLossBps,
+		BigDecimal takeProfitBps,
+		BigDecimal maxDailyLossUsdt,
+		int maxConsecutiveLosses,
+		BigDecimal maxPositionUsdt) {
 }
