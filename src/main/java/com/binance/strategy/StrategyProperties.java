@@ -36,5 +36,12 @@ public record StrategyProperties(
 		BigDecimal priceTick,
 		BigDecimal maxDailyLossUsdt,
 		int maxConsecutiveLosses,
-		BigDecimal maxPositionUsdt) {
+		BigDecimal maxPositionUsdt,
+		boolean flipEnabled,
+		int minHoldMs,
+		int flipCooldownMs,
+		BigDecimal strongObi,
+		BigDecimal strongToi,
+		int maxFlipsPer5Min,
+		BigDecimal flipSpreadMaxBps) {
 }
