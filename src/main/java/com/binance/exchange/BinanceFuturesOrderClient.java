@@ -28,7 +28,8 @@ public class BinanceFuturesOrderClient {
 	public Mono<OrderResponse> placeMarketOrder(String symbol, String side, BigDecimal quantity) {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()
 				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
-			return Mono.error(new IllegalStateException("Binance API key/secret is not configured"));
+			return Mono.error(new IllegalStateException(
+					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
 		long timestamp = Instant.now().toEpochMilli();
 		String payload = String.format(

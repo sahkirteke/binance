@@ -61,6 +61,10 @@ public class TestnetLongStrategyWatcher {
 					strategyProperties.leverage(),
 					margin,
 					strategyProperties.marketQuantity());
+			if (!strategyProperties.enableOrders()) {
+				LOGGER.warn("[TESTNET] Order placement disabled. Set strategy.enable-orders=true to send orders.");
+				return;
+			}
 			orderClient.placeMarketOrder(strategyProperties.symbol(), "BUY", strategyProperties.marketQuantity())
 					.doOnNext(response -> LOGGER.info("[TESTNET] Order placed. orderId={}, status={}",
 							response.orderId(),
