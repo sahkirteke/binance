@@ -379,11 +379,13 @@ public class EtcEthDepthStrategyWatcher {
 		if (obi == null || toi == null || cancelRatio == null) {
 			return Direction.NONE;
 		}
-		boolean longCandidate = obi.compareTo(strategyProperties.obiEntry()) > 0
-				&& toi.compareTo(strategyProperties.toiMin()) > 0
+		BigDecimal obiThreshold = strategyProperties.obiEntry().multiply(new BigDecimal("0.90"));
+		BigDecimal toiThreshold = strategyProperties.toiMin().multiply(new BigDecimal("0.85"));
+		boolean longCandidate = obi.compareTo(obiThreshold) > 0
+				&& toi.compareTo(toiThreshold) > 0
 				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0;
-		boolean shortCandidate = obi.compareTo(strategyProperties.obiEntry().negate()) < 0
-				&& toi.compareTo(strategyProperties.toiMin().negate()) < 0
+		boolean shortCandidate = obi.compareTo(obiThreshold.negate()) < 0
+				&& toi.compareTo(toiThreshold.negate()) < 0
 				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0;
 		if (longCandidate) {
 			return Direction.LONG;
