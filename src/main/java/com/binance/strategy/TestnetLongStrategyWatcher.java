@@ -15,6 +15,7 @@ import com.binance.market.BinanceMarketClient;
 public class TestnetLongStrategyWatcher {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(TestnetLongStrategyWatcher.class);
+	private static final BigDecimal MIN_NOTIONAL_USD = new BigDecimal("20");
 
 	private final BinanceMarketClient marketClient;
 	private final BinanceFuturesOrderClient orderClient;
@@ -63,6 +64,13 @@ public class TestnetLongStrategyWatcher {
 					strategyProperties.marketQuantity());
 			if (!strategyProperties.enableOrders()) {
 				LOGGER.warn("[TESTNET] Order placement disabled. Set strategy.enable-orders=true to send orders.");
+				return;
+			}
+			if (strategyProperties.notionalUsd().compareTo(MIN_NOTIONAL_USD) < 0) {
+				LOGGER.warn(
+						"[TESTNET] Order notionalUsd={} is below Binance minimum {}. Increase notional or use reduce-only.",
+						strategyProperties.notionalUsd(),
+						MIN_NOTIONAL_USD);
 				return;
 			}
 			orderClient.placeMarketOrder(strategyProperties.symbol(),

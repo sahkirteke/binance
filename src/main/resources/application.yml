@@ -22,8 +22,8 @@ binance:
 
 strategy:
   symbol: ETHUSDT
-  notional-usd: 10
-  market-quantity: 0.004
+  notional-usd: 20
+  market-quantity: 0.01
   leverage: 10
   position-side: LONG
   enable-orders: false
