@@ -372,7 +372,7 @@ public class EtcEthDepthStrategyWatcher {
 	private BigDecimal computeCancelRatio(long now) {
 		BigDecimal added = addedVol.total(now);
 		BigDecimal removed = removedVol.total(now);
-		return removed.divide(added.add(EPSILON), MathContext.DECIMAL64);
+		return removed.divide(added.add(removed).add(EPSILON), MathContext.DECIMAL64);
 	}
 
 	private Direction evaluateCandidate(BigDecimal obi, BigDecimal toi, BigDecimal cancelRatio, BigDecimal midReturn) {
