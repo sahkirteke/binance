@@ -52,6 +52,8 @@ public class TestnetDepthSwitchStrategyWatcher {
 		BigDecimal buyDepth = sumDepth(depthResponse.bids());
 		BigDecimal sellDepth = sumDepth(depthResponse.asks());
 		LOGGER.info("Depth for {} -> buy={}, sell={}", strategyProperties.referenceSymbol(), buyDepth, sellDepth);
+		LOGGER.info("Depth bids (price, qty): {}", formatDepthLevels(depthResponse.bids()));
+		LOGGER.info("Depth asks (price, qty): {}", formatDepthLevels(depthResponse.asks()));
 
 		PositionSignal desired = compareDepth(buyDepth, sellDepth);
 		if (desired == PositionSignal.NONE) {
@@ -137,6 +139,17 @@ public class TestnetDepthSwitchStrategyWatcher {
 				.filter(level -> level.size() > 1)
 				.map(level -> new BigDecimal(level.get(1)))
 				.reduce(BigDecimal.ZERO, BigDecimal::add);
+	}
+
+	private String formatDepthLevels(List<List<String>> levels) {
+		if (levels == null || levels.isEmpty()) {
+			return "<empty>";
+		}
+		return levels.stream()
+				.filter(level -> level.size() > 1)
+				.map(level -> level.get(0) + "@" + level.get(1))
+				.reduce((left, right) -> left + " | " + right)
+				.orElse("<empty>");
 	}
 
 	private enum PositionSignal {
