@@ -62,4 +62,36 @@ public class BinanceFuturesOrderClient {
 										+ ", body=" + body))))
 				.bodyToMono(OrderResponse.class);
 	}
+
+	public Mono<Boolean> fetchHedgeModeEnabled() {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()
+				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
+			return Mono.error(new IllegalStateException(
+					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
+		}
+		long timestamp = Instant.now().toEpochMilli();
+		String payload = String.format("recvWindow=%d&timestamp=%d", properties.recvWindowMillis(), timestamp);
+		String signature = signatureUtil.sign(payload, properties.secretKey());
+		String signedPayload = payload + "&signature=" + signature;
+
+		return binanceWebClient
+				.get()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/positionSide/dual")
+						.query(signedPayload)
+						.build())
+				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+				.header("X-MBX-APIKEY", properties.apiKey())
+				.retrieve()
+				.onStatus(status -> status.isError(), response -> response
+						.bodyToMono(String.class)
+						.defaultIfEmpty("<empty>")
+						.flatMap(body -> Mono.error(new IllegalStateException(
+								"Binance position mode fetch failed with status=" + response.statusCode().value()
+										+ ", body=" + body))))
+				.bodyToMono(PositionModeResponse.class)
+				.map(PositionModeResponse::dualSidePosition);
+	}
+
+	private record PositionModeResponse(boolean dualSidePosition) {}
 }

@@ -17,6 +17,6 @@ public record StrategyProperties(
 		@NotNull @DecimalMin("0.0") BigDecimal notionalUsd,
 		@NotNull @DecimalMin("0.0") BigDecimal marketQuantity,
 		int leverage,
-		@NotBlank String positionSide,
+		String positionSide,
 		boolean enableOrders) {
 }

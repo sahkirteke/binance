@@ -11,6 +11,8 @@ import org.springframework.stereotype.Component;
 import com.binance.exchange.BinanceFuturesOrderClient;
 import com.binance.market.BinanceMarketClient;
 
+import reactor.core.publisher.Mono;
+
 @Component
 public class TestnetLongStrategyWatcher {
 
@@ -73,15 +75,31 @@ public class TestnetLongStrategyWatcher {
 						MIN_NOTIONAL_USD);
 				return;
 			}
-			orderClient.placeMarketOrder(strategyProperties.symbol(),
-					"BUY",
-					strategyProperties.marketQuantity(),
-					strategyProperties.positionSide())
+			resolvePositionSide()
+					.flatMap(positionSide -> orderClient.placeMarketOrder(strategyProperties.symbol(),
+							"BUY",
+							strategyProperties.marketQuantity(),
+							positionSide))
 					.doOnNext(response -> LOGGER.info("[TESTNET] Order placed. orderId={}, status={}",
 							response.orderId(),
 							response.status()))
 					.doOnError(error -> LOGGER.warn("[TESTNET] Order placement failed", error))
 					.subscribe(null, error -> LOGGER.warn("[TESTNET] Order stream error", error));
 		}
+	}
+
+	private Mono<String> resolvePositionSide() {
+		String configuredSide = strategyProperties.positionSide();
+		return orderClient.fetchHedgeModeEnabled()
+				.map(hedgeMode -> {
+					if (Boolean.TRUE.equals(hedgeMode)) {
+						return configuredSide == null || configuredSide.isBlank() ? "LONG" : configuredSide;
+					}
+					return null;
+				})
+				.onErrorResume(error -> {
+					LOGGER.warn("[TESTNET] Failed to detect position mode, using configured position-side.", error);
+					return Mono.just(configuredSide);
+				});
 	}
 }
