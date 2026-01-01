@@ -29,6 +29,25 @@ strategy:
   position-side: LONG
   enable-orders: false
   poll-interval-ms: 2000
+  tick-interval-ms: 200
+  rolling-window-ms: 1000
+  depth-levels: 20
+  weight-lambda: 0.35
+  obi-entry: 0.12
+  obi-exit: 0.05
+  toi-min: 0.10
+  cancel-max: 0.75
+  persist-ms: 400
+  cooldown-ms: 2000
+  max-spread-bps: 3
+  position-notional-usdt: 50
+  stop-loss-bps: 30
+  take-profit-bps: 45
+  quantity-step: 0.001
+  price-tick: 0.01
+  max-daily-loss-usdt: 100
+  max-consecutive-losses: 3
+  max-position-usdt: 100
 
 management:
   endpoints:
