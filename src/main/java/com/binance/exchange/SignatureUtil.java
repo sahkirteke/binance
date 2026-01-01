@@ -11,6 +11,9 @@ import org.springframework.stereotype.Component;
 public class SignatureUtil {
 
 	public String sign(String payload, String secretKey) {
+		if (secretKey == null || secretKey.isBlank()) {
+			throw new IllegalArgumentException("Binance secret key is missing");
+		}
 		try {
 			Mac mac = Mac.getInstance("HmacSHA256");
 			mac.init(new SecretKeySpec(secretKey.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));

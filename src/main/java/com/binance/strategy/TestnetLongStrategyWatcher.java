@@ -38,7 +38,7 @@ public class TestnetLongStrategyWatcher {
 		marketClient.fetchMarkPrice(strategyProperties.symbol())
 				.doOnNext(this::maybeTrigger)
 				.doOnError(error -> LOGGER.warn("Mark price fetch failed", error))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("Mark price stream error", error));
 	}
 
 	private void maybeTrigger(BigDecimal markPrice) {
@@ -66,7 +66,7 @@ public class TestnetLongStrategyWatcher {
 							response.orderId(),
 							response.status()))
 					.doOnError(error -> LOGGER.warn("[TESTNET] Order placement failed", error))
-					.subscribe();
+					.subscribe(null, error -> LOGGER.warn("[TESTNET] Order stream error", error));
 		}
 	}
 }
