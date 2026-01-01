@@ -3,6 +3,7 @@ package com.binance.strategy;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
@@ -26,6 +27,9 @@ public class TestnetDepthSwitchStrategyWatcher {
 	private final StrategyProperties strategyProperties;
 	private final AtomicBoolean polling = new AtomicBoolean(false);
 	private final AtomicReference<PositionSignal> currentPosition = new AtomicReference<>(PositionSignal.NONE);
+	private final AtomicReference<PositionSignal> lastObservedSignal = new AtomicReference<>(PositionSignal.NONE);
+	private final AtomicInteger consecutiveSignals = new AtomicInteger(0);
+	private static final int REQUIRED_CONFIRMATIONS = 3;
 
 	public TestnetDepthSwitchStrategyWatcher(BinanceMarketClient marketClient,
 			BinanceFuturesOrderClient orderClient,
@@ -55,11 +59,24 @@ public class TestnetDepthSwitchStrategyWatcher {
 		LOGGER.info("Depth bids (price, qty): {}", formatDepthLevels(depthResponse.bids()));
 		LOGGER.info("Depth asks (price, qty): {}", formatDepthLevels(depthResponse.asks()));
 
-		PositionSignal desired = compareDepth(buyDepth, sellDepth);
-		if (desired == PositionSignal.NONE) {
+		PositionSignal rawSignal = compareDepth(buyDepth, sellDepth);
+		logDepthSignal(rawSignal);
+
+		if (rawSignal == PositionSignal.NONE) {
+			lastObservedSignal.set(PositionSignal.NONE);
+			consecutiveSignals.set(0);
 			LOGGER.info("Depth is balanced; skipping trade decision.");
 			return Mono.empty();
 		}
+
+		updateConsecutiveSignal(rawSignal);
+		if (consecutiveSignals.get() < REQUIRED_CONFIRMATIONS) {
+			LOGGER.info("Signal {} awaiting confirmation ({}/{})", rawSignal, consecutiveSignals.get(),
+					REQUIRED_CONFIRMATIONS);
+			return Mono.empty();
+		}
+
+		PositionSignal desired = rawSignal;
 		PositionSignal current = currentPosition.get();
 		if (desired == current) {
 			LOGGER.info("Desired position {} already active; no action taken.", desired);
@@ -129,6 +146,24 @@ public class TestnetDepthSwitchStrategyWatcher {
 			return PositionSignal.SHORT;
 		}
 		return PositionSignal.NONE;
+	}
+
+	private void updateConsecutiveSignal(PositionSignal signal) {
+		PositionSignal previous = lastObservedSignal.get();
+		if (signal == previous) {
+			consecutiveSignals.incrementAndGet();
+		} else {
+			lastObservedSignal.set(signal);
+			consecutiveSignals.set(1);
+		}
+	}
+
+	private void logDepthSignal(PositionSignal signal) {
+		if (signal == PositionSignal.LONG) {
+			LOGGER.info("{} BUY", strategyProperties.referenceSymbol());
+		} else if (signal == PositionSignal.SHORT) {
+			LOGGER.info("{} SELL", strategyProperties.referenceSymbol());
+		}
 	}
 
 	private BigDecimal sumDepth(List<List<String>> levels) {
