@@ -28,21 +28,21 @@ strategy:
   leverage: 10
   position-side: LONG
   enable-orders: true
-  poll-interval-ms: 2000
-  tick-interval-ms: 200
-  rolling-window-ms: 1000
-  depth-levels: 20
-  weight-lambda: 0.35
-  obi-entry: 0.12
-  obi-exit: 0.05
-  toi-min: 0.10
-  cancel-max: 0.75
-  persist-ms: 400
-  cooldown-ms: 2000
-  max-spread-bps: 3
+  poll-interval-ms: 500
+  tick-interval-ms: 100
+  rolling-window-ms: 800
+  depth-levels: 12
+  weight-lambda: 0.25
+  obi-entry: 0.055
+  obi-exit: 0.020
+  toi-min: 0.035
+  cancel-max: 0.92
+  persist-ms: 180
+  cooldown-ms: 650
+  max-spread-bps: 10
   position-notional-usdt: 50
-  stop-loss-bps: 30
-  take-profit-bps: 45
+  stop-loss-bps: 18
+  take-profit-bps: 22
   quantity-step: 0.001
   price-tick: 0.01
   max-daily-loss-usdt: 100
