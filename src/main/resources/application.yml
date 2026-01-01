@@ -21,8 +21,9 @@ binance:
   recv-window-millis: 5000
 
 strategy:
-  symbol: ETHUSDT
-  notional-usd: 20
+  reference-symbol: ETCUSDT
+  trade-symbol: ETHUSDT
+  depth-limit: 50
   market-quantity: 0.01
   leverage: 10
   position-side: LONG
