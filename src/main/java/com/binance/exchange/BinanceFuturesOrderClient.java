@@ -151,13 +151,15 @@ public class BinanceFuturesOrderClient {
 		}
 		long timestamp = Instant.now().toEpochMilli();
 		String payload = String.format(
-				"symbol=%s&side=%s&type=MARKET&quantity=%s&reduceOnly=%s&recvWindow=%d&timestamp=%d",
+				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d",
 				symbol,
 				side,
 				quantity.toPlainString(),
-				reduceOnly,
 				properties.recvWindowMillis(),
 				timestamp);
+		if (reduceOnly) {
+			payload = payload + "&reduceOnly=true";
+		}
 		if (positionSide != null && !positionSide.isBlank()) {
 			payload = payload + "&positionSide=" + positionSide;
 		}
@@ -173,15 +175,17 @@ public class BinanceFuturesOrderClient {
 		}
 		long timestamp = Instant.now().toEpochMilli();
 		String payload = String.format(
-				"symbol=%s&side=%s&type=%s&quantity=%s&stopPrice=%s&reduceOnly=%s&recvWindow=%d&timestamp=%d",
+				"symbol=%s&side=%s&type=%s&quantity=%s&stopPrice=%s&recvWindow=%d&timestamp=%d",
 				symbol,
 				side,
 				type,
 				quantity.toPlainString(),
 				stopPrice.toPlainString(),
-				reduceOnly,
 				properties.recvWindowMillis(),
 				timestamp);
+		if (reduceOnly) {
+			payload = payload + "&reduceOnly=true";
+		}
 		if (positionSide != null && !positionSide.isBlank()) {
 			payload = payload + "&positionSide=" + positionSide;
 		}

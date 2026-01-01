@@ -434,8 +434,8 @@ public class EtcEthDepthStrategyWatcher {
 						strategyProperties.tradeSymbol(),
 						side,
 						quantity,
-						hedgeMode ? direction.name() : ""))
-				.flatMap(response -> placeProtectionOrders(response, direction, quantity))
+						hedgeMode ? direction.name() : "")
+						.flatMap(response -> placeProtectionOrders(response, direction, quantity, hedgeMode)))
 				.doOnNext(response -> {
 					entryPrice.set(response.avgPrice());
 					positionState.set(direction);
@@ -448,7 +448,8 @@ public class EtcEthDepthStrategyWatcher {
 				.subscribe();
 	}
 
-	private Mono<OrderResponse> placeProtectionOrders(OrderResponse response, Direction direction, BigDecimal quantity) {
+	private Mono<OrderResponse> placeProtectionOrders(OrderResponse response, Direction direction, BigDecimal quantity,
+			boolean hedgeMode) {
 		BigDecimal entry = response.avgPrice();
 		if (entry == null) {
 			return Mono.just(response);
@@ -459,14 +460,14 @@ public class EtcEthDepthStrategyWatcher {
 				direction == Direction.LONG ? "SELL" : "BUY",
 				quantity,
 				stopPrice,
-				true,
-				direction.name())
+				hedgeMode,
+				hedgeMode ? direction.name() : "")
 				.then(orderClient.placeTakeProfitMarketOrder(strategyProperties.tradeSymbol(),
 						direction == Direction.LONG ? "SELL" : "BUY",
 						quantity,
 						takeProfit,
-						true,
-						direction.name()))
+						hedgeMode,
+						hedgeMode ? direction.name() : ""))
 				.thenReturn(response);
 	}
 
