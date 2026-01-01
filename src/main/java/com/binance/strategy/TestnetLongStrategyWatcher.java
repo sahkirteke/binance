@@ -47,7 +47,9 @@ public class TestnetLongStrategyWatcher {
 
 		LOGGER.info("Current mark price for {}: {}", strategyProperties.symbol(), markPrice);
 
-		if (markPrice.compareTo(strategyProperties.targetPrice()) <= 0) {
+		if (strategyProperties.targetPrice()
+				.map(target -> markPrice.compareTo(target) <= 0)
+				.orElse(true)) {
 			triggered = true;
 			BigDecimal margin = strategyProperties.notionalUsd()
 					.divide(BigDecimal.valueOf(strategyProperties.leverage()));

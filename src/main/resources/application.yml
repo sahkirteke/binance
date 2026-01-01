@@ -22,7 +22,6 @@ binance:
 
 strategy:
   symbol: ETHUSDT
-  target-price: 2500
   notional-usd: 10
   market-quantity: 0.004
   leverage: 10
