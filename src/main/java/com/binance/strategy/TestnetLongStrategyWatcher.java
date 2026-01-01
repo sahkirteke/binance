@@ -91,15 +91,19 @@ public class TestnetLongStrategyWatcher {
 	private Mono<String> resolvePositionSide() {
 		String configuredSide = strategyProperties.positionSide();
 		return orderClient.fetchHedgeModeEnabled()
-				.map(hedgeMode -> {
+				.flatMap(hedgeMode -> {
 					if (Boolean.TRUE.equals(hedgeMode)) {
-						return configuredSide == null || configuredSide.isBlank() ? "LONG" : configuredSide;
+						String resolved = configuredSide == null || configuredSide.isBlank() ? "LONG" : configuredSide;
+						LOGGER.info("[TESTNET] Hedge mode detected. Using positionSide={}.", resolved);
+						return Mono.just(resolved);
 					}
-					return null;
+					LOGGER.info("[TESTNET] One-way mode detected. Omitting positionSide.");
+					return Mono.just("");
 				})
 				.onErrorResume(error -> {
+					String resolved = configuredSide == null ? "" : configuredSide;
 					LOGGER.warn("[TESTNET] Failed to detect position mode, using configured position-side.", error);
-					return Mono.just(configuredSide);
+					return Mono.just(resolved);
 				});
 	}
 }
