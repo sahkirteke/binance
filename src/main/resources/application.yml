@@ -27,7 +27,7 @@ strategy:
   market-quantity: 0.01
   leverage: 10
   position-side: LONG
-  enable-orders: false
+  enable-orders: true
   poll-interval-ms: 2000
   tick-interval-ms: 200
   rolling-window-ms: 1000
