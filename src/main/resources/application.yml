@@ -25,29 +25,45 @@ strategy:
   trade-symbol: ETHUSDT
   depth-limit: 50
   market-quantity: 0.01
-  leverage: 10
+  leverage: 75
   position-side: LONG
-  enable-orders: false
-  poll-interval-ms: 2000
-  tick-interval-ms: 200
-  rolling-window-ms: 1000
-  depth-levels: 20
-  weight-lambda: 0.35
-  obi-entry: 0.12
-  obi-exit: 0.05
-  toi-min: 0.10
-  cancel-max: 0.75
-  persist-ms: 400
-  cooldown-ms: 2000
-  max-spread-bps: 3
-  position-notional-usdt: 50
-  stop-loss-bps: 30
-  take-profit-bps: 45
+  enable-orders: true
+  poll-interval-ms: 500
+  tick-interval-ms: 100
+  rolling-window-ms: 800
+  depth-levels: 12
+  weight-lambda: 0.25
+  obi-entry: 0.055
+  obi-entry-long: 0.055
+  obi-entry-short: 0.045
+  obi-exit: 0.020
+  toi-min: 0.035
+  toi-min-long: 0.035
+  toi-min-short: 0.030
+  cancel-max: 0.92
+  cancel-max-long: 0.98
+  cancel-max-short: 0.98
+  persist-ms: 180
+  exit-persist-ms: 450
+  cooldown-ms: 650
+  max-spread-bps: 10
+  position-notional-usdt: 100
+  stop-loss-bps: 18
+  take-profit-bps: 22
   quantity-step: 0.001
   price-tick: 0.01
   max-daily-loss-usdt: 100
   max-consecutive-losses: 3
   max-position-usdt: 100
+  flip-enabled: true
+  min-hold-ms: 1200
+  flip-cooldown-ms: 900
+  strong-obi: 0.085
+  strong-toi: 0.060
+  max-flips-per-5-min: 12
+  flip-spread-max-bps: 12
+  max-trades-per-5-min: 10
+  hard-trade-cooldown-ms: 2500
 
 management:
   endpoints:

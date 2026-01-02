@@ -5,8 +5,11 @@ import java.math.MathContext;
 import java.net.URI;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Deque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -69,12 +72,23 @@ public class EtcEthDepthStrategyWatcher {
 	private final AtomicLong candidateSince = new AtomicLong(0);
 	private final AtomicLong lastTradeTimestamp = new AtomicLong(0);
 	private final AtomicReference<BigDecimal> entryPrice = new AtomicReference<>();
+	private final AtomicLong entryTimestamp = new AtomicLong(0);
+	private final AtomicReference<BigDecimal> entryQty = new AtomicReference<>();
 	private final AtomicReference<BigDecimal> latestSpreadBps = new AtomicReference<>();
 	private final AtomicReference<BigDecimal> latestFuturesMid = new AtomicReference<>();
 	private final AtomicInteger consecutiveLosses = new AtomicInteger(0);
 	private final AtomicReference<BigDecimal> dailyLoss = new AtomicReference<>(BigDecimal.ZERO);
+	private final AtomicReference<BigDecimal> totalPnl = new AtomicReference<>(BigDecimal.ZERO);
 	private final AtomicReference<LocalDate> lossDay = new AtomicReference<>(LocalDate.now());
 	private final AtomicBoolean tradingLock = new AtomicBoolean(false);
+	private final AtomicBoolean pendingOpen = new AtomicBoolean(false);
+	private final AtomicLong lastFlipTimestamp = new AtomicLong(0);
+	private final AtomicLong exitSinceLong = new AtomicLong(0);
+	private final AtomicLong exitSinceShort = new AtomicLong(0);
+	private final AtomicLong lastAnyTradeTs = new AtomicLong(0);
+	private final Deque<Long> tradeHistory = new ArrayDeque<>();
+	private final Object flipLock = new Object();
+	private final Deque<Long> flipHistory = new ArrayDeque<>();
 
 	public EtcEthDepthStrategyWatcher(BinanceMarketClient marketClient,
 			BinanceFuturesOrderClient orderClient,
@@ -128,25 +142,74 @@ public class EtcEthDepthStrategyWatcher {
 		Direction candidate = evaluateCandidate(obiValue, toiValue, cancelValue, midReturn);
 		updateDesiredDirection(candidate, now);
 
+		FlipDecision flipDecision = evaluateFlipDecision(now, obiValue, toiValue, cancelValue);
+
 		LOGGER.info(
-				"ETC metrics: obi={}, toi={}, cancelRatio={}, midReturn={}, desired={}, position={}, spreadBps={}",
+				"ETC tick: obi={}, toi={}, cancelRatio={}, midReturn={}, candidate={}, desired={}, position={}, spreadBps={}, depthSynced={}, resyncCount={}, canFlip={}, flipReason={}, lastFlipTs={}, flipsInLast5Min={}",
 				obiValue,
 				toiValue,
 				cancelValue,
 				midReturn,
+				candidate,
 				desiredDirection.get(),
 				positionState.get(),
-				latestSpreadBps.get());
+				latestSpreadBps.get(),
+				depthSynced.get(),
+				resyncCount.get(),
+				flipDecision.canFlip(),
+				flipDecision.reason(),
+				lastFlipTimestamp.get(),
+				flipDecision.flipsInLast5Min());
 
 		Direction current = positionState.get();
+		if (flipDecision.shouldFlip()) {
+			flipPosition(current, flipDecision.flipDirection(), now);
+			return;
+		}
 		if (current == Direction.LONG && shouldExitLong(obiValue, toiValue, cancelValue)) {
+			Direction desired = desiredDirection.get();
+			if (desired != Direction.SHORT) {
+				LOGGER.info("Skip exit: desired not short (desired={})", desired);
+				return;
+			}
+			if (exitSinceLong.get() == 0) {
+				exitSinceLong.set(now);
+			}
+			if (now - exitSinceLong.get() < strategyProperties.exitPersistMs()) {
+				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.exitPersistMs());
+				return;
+			}
+			long entryTs = entryTimestamp.get();
+			if (entryTs > 0 && now - entryTs < strategyProperties.minHoldMs()) {
+				LOGGER.info("Skip exit: min-hold not reached ({}ms)", strategyProperties.minHoldMs());
+				return;
+			}
 			closePosition(Direction.LONG);
 			return;
 		}
+		exitSinceLong.set(0);
 		if (current == Direction.SHORT && shouldExitShort(obiValue, toiValue, cancelValue)) {
+			Direction desired = desiredDirection.get();
+			if (desired != Direction.LONG) {
+				LOGGER.info("Skip exit: desired not long (desired={})", desired);
+				return;
+			}
+			if (exitSinceShort.get() == 0) {
+				exitSinceShort.set(now);
+			}
+			if (now - exitSinceShort.get() < strategyProperties.exitPersistMs()) {
+				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.exitPersistMs());
+				return;
+			}
+			long entryTs = entryTimestamp.get();
+			if (entryTs > 0 && now - entryTs < strategyProperties.minHoldMs()) {
+				LOGGER.info("Skip exit: min-hold not reached ({}ms)", strategyProperties.minHoldMs());
+				return;
+			}
 			closePosition(Direction.SHORT);
 			return;
 		}
+		exitSinceShort.set(0);
 		if (current == Direction.FLAT) {
 			openIfReady(now);
 		}
@@ -218,13 +281,18 @@ public class EtcEthDepthStrategyWatcher {
 				return;
 			}
 			long expected = orderBook.lastUpdateId() + 1;
-			if (event.firstUpdateId() != expected) {
-				resyncOrderBook("Depth sequence broken: expected " + expected + " got " + event.firstUpdateId());
+			if (event.finalUpdateId() < expected) {
+				return;
+			}
+			if (event.firstUpdateId() > expected) {
+				resyncOrderBook("Depth gap: expected " + expected + " got U=" + event.firstUpdateId());
 				bufferDepthEvent(event);
 				return;
 			}
-			DepthDelta delta = orderBook.applyDepthUpdate(event);
-			recordDepthDelta(delta, event.eventTime());
+			if (event.firstUpdateId() <= expected && event.finalUpdateId() >= expected) {
+				DepthDelta delta = orderBook.applyDepthUpdate(event);
+				recordDepthDelta(delta, event.eventTime());
+			}
 		}
 	}
 
@@ -273,14 +341,19 @@ public class EtcEthDepthStrategyWatcher {
 					}
 				}
 				long expected = orderBook.lastUpdateId() + 1;
-				if (event.firstUpdateId() != expected) {
-					resyncOrderBook("Snapshot sync failed at update " + event.firstUpdateId());
+				if (event.finalUpdateId() < expected) {
+					continue;
+				}
+				if (event.firstUpdateId() > expected) {
+					resyncOrderBook("Snapshot sync gap: expected " + expected + " got U=" + event.firstUpdateId());
 					bufferDepthEvent(event);
 					snapshotInFlight.set(false);
 					return;
 				}
-				DepthDelta delta = orderBook.applyDepthUpdate(event);
-				recordDepthDelta(delta, event.eventTime());
+				if (event.firstUpdateId() <= expected && event.finalUpdateId() >= expected) {
+					DepthDelta delta = orderBook.applyDepthUpdate(event);
+					recordDepthDelta(delta, event.eventTime());
+				}
 			}
 
 			depthSynced.set(true);
@@ -341,26 +414,45 @@ public class EtcEthDepthStrategyWatcher {
 	private BigDecimal computeCancelRatio(long now) {
 		BigDecimal added = addedVol.total(now);
 		BigDecimal removed = removedVol.total(now);
-		return removed.divide(added.add(EPSILON), MathContext.DECIMAL64);
+		return removed.divide(added.add(removed).add(EPSILON), MathContext.DECIMAL64);
 	}
 
 	private Direction evaluateCandidate(BigDecimal obi, BigDecimal toi, BigDecimal cancelRatio, BigDecimal midReturn) {
 		if (obi == null || toi == null || cancelRatio == null) {
 			return Direction.NONE;
 		}
-		boolean longCandidate = obi.compareTo(strategyProperties.obiEntry()) > 0
-				&& toi.compareTo(strategyProperties.toiMin()) > 0
-				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0
-				&& midReturn.signum() >= 0;
-		boolean shortCandidate = obi.compareTo(strategyProperties.obiEntry().negate()) < 0
-				&& toi.compareTo(strategyProperties.toiMin().negate()) < 0
-				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0
-				&& midReturn.signum() <= 0;
+		BigDecimal obiThresholdLong = strategyProperties.obiEntryLong();
+		BigDecimal obiThresholdShort = strategyProperties.obiEntryShort();
+		BigDecimal toiThresholdLong = strategyProperties.toiMinLong();
+		BigDecimal toiThresholdShort = strategyProperties.toiMinShort();
+		BigDecimal cancelMaxLong = strategyProperties.cancelMaxLong();
+		BigDecimal cancelMaxShort = strategyProperties.cancelMaxShort();
+		boolean obiOkLong = obi.compareTo(obiThresholdLong) > 0;
+		boolean toiOkLong = toi.compareTo(toiThresholdLong) > 0;
+		boolean obiOkShort = obi.compareTo(obiThresholdShort.negate()) < 0;
+		boolean toiOkShort = toi.compareTo(toiThresholdShort.negate()) < 0;
+		boolean cancelOkLong = cancelRatio.compareTo(cancelMaxLong) < 0;
+		boolean cancelOkShort = cancelRatio.compareTo(cancelMaxShort) < 0;
+		boolean cancelOk = cancelOkLong || cancelOkShort;
+		boolean longCandidate = obiOkLong && toiOkLong && cancelOkLong;
+		boolean shortCandidate = obiOkShort && toiOkShort && cancelOkShort;
 		if (longCandidate) {
 			return Direction.LONG;
 		}
 		if (shortCandidate) {
 			return Direction.SHORT;
+		}
+		if (!obiOkLong && !obiOkShort) {
+			LOGGER.info("Gate fail: OBI value={}, thresholdLong={}, thresholdShort={}", obi, obiThresholdLong,
+					obiThresholdShort);
+		}
+		if (!toiOkLong && !toiOkShort) {
+			LOGGER.info("Gate fail: TOI value={}, thresholdLong={}, thresholdShort={}", toi, toiThresholdLong,
+					toiThresholdShort);
+		}
+		if (!cancelOk) {
+			LOGGER.info("Gate fail: CANCEL value={}, maxLong={}, maxShort={}", cancelRatio, cancelMaxLong,
+					cancelMaxShort);
 		}
 		return Direction.NONE;
 	}
@@ -399,7 +491,19 @@ public class EtcEthDepthStrategyWatcher {
 	}
 
 	private void openIfReady(long now) {
-		if (now - lastTradeTimestamp.get() < strategyProperties.cooldownMs()) {
+		if (pendingOpen.get()) {
+			return;
+		}
+		if (now - lastAnyTradeTs.get() < strategyProperties.hardTradeCooldownMs()) {
+			return;
+		}
+		int recentTrades = tradesInLast5Min(now);
+		if (recentTrades >= strategyProperties.maxTradesPer5Min()) {
+			LOGGER.info("Trade limit reached: tradesInLast5Min={}", recentTrades);
+			return;
+		}
+		int effectiveCooldownMs = Math.max(0, (int) Math.round(strategyProperties.cooldownMs() * 0.7));
+		if (now - lastTradeTimestamp.get() < effectiveCooldownMs) {
 			return;
 		}
 		if (!riskAllowed()) {
@@ -410,8 +514,13 @@ public class EtcEthDepthStrategyWatcher {
 			return;
 		}
 		BigDecimal spreadBps = latestSpreadBps.get();
-		if (spreadBps != null && spreadBps.compareTo(strategyProperties.maxSpreadBps()) > 0) {
+		if (spreadBps != null
+				&& spreadBps.compareTo(strategyProperties.maxSpreadBps().multiply(new BigDecimal("1.5"))) > 0) {
 			LOGGER.info("Spread too wide ({} bps). Skipping entry.", spreadBps);
+			return;
+		}
+		if (strategyProperties.positionNotionalUsdt() != null && latestFuturesMid.get() == null) {
+			LOGGER.info("Skip entry: futures mid not available for notional sizing");
 			return;
 		}
 		openPosition(desired);
@@ -421,13 +530,19 @@ public class EtcEthDepthStrategyWatcher {
 		if (!tradingLock.compareAndSet(false, true)) {
 			return;
 		}
+		if (positionState.get() == direction) {
+			tradingLock.set(false);
+			return;
+		}
+		pendingOpen.set(true);
 		if (!strategyProperties.enableOrders()) {
 			LOGGER.warn("[TESTNET] Order placement disabled. Set strategy.enable-orders=true to send orders.");
+			pendingOpen.set(false);
 			tradingLock.set(false);
 			return;
 		}
 
-		BigDecimal quantity = calculatePositionQuantity();
+		BigDecimal quantity = entryQty.get() != null ? entryQty.get() : calculatePositionQuantity();
 		String side = direction == Direction.LONG ? "BUY" : "SELL";
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> orderClient.placeMarketOrder(
@@ -435,40 +550,70 @@ public class EtcEthDepthStrategyWatcher {
 						side,
 						quantity,
 						hedgeMode ? direction.name() : "")
-						.flatMap(response -> placeProtectionOrders(response, direction, quantity, hedgeMode)))
+						.flatMap(response -> resolveEntryOrder(response)
+								.flatMap(resolved -> placeProtectionOrders(resolved, direction, quantity, hedgeMode))))
 				.doOnNext(response -> {
-					entryPrice.set(response.avgPrice());
+					long now = System.currentTimeMillis();
+					entryPrice.set(response.entryOrder().avgPrice());
+					entryTimestamp.set(now);
+					entryQty.set(quantity);
 					positionState.set(direction);
-					lastTradeTimestamp.set(System.currentTimeMillis());
+					lastTradeTimestamp.set(now);
+					recordTrade(now);
 					LOGGER.info("Opened {} position on {} at {}", direction, strategyProperties.tradeSymbol(),
-							response.avgPrice());
+							response.entryOrder().avgPrice());
 				})
 				.doOnError(error -> LOGGER.warn("Failed to open position", error))
-				.doFinally(signal -> tradingLock.set(false))
+				.doFinally(signal -> {
+					pendingOpen.set(false);
+					tradingLock.set(false);
+				})
 				.subscribe();
 	}
 
-	private Mono<OrderResponse> placeProtectionOrders(OrderResponse response, Direction direction, BigDecimal quantity,
+	private Mono<ProtectionOrders> placeProtectionOrders(OrderResponse response, Direction direction, BigDecimal quantity,
 			boolean hedgeMode) {
 		BigDecimal entry = response.avgPrice();
-		if (entry == null) {
-			return Mono.just(response);
+		if (entry == null || entry.signum() <= 0) {
+			return Mono.just(new ProtectionOrders(response, null, null));
 		}
 		BigDecimal stopPrice = stopPrice(entry, direction);
 		BigDecimal takeProfit = takeProfitPrice(entry, direction);
+		BigDecimal tick = strategyProperties.priceTick();
+		if (tick != null && tick.signum() > 0) {
+			if (direction == Direction.LONG) {
+				if (stopPrice.compareTo(entry) >= 0) {
+					stopPrice = clampToPriceTick(entry.subtract(tick));
+				}
+				if (takeProfit.compareTo(entry) <= 0) {
+					takeProfit = clampToPriceTick(entry.add(tick));
+				}
+			} else {
+				if (stopPrice.compareTo(entry) <= 0) {
+					stopPrice = clampToPriceTick(entry.add(tick));
+				}
+				if (takeProfit.compareTo(entry) >= 0) {
+					takeProfit = clampToPriceTick(entry.subtract(tick));
+				}
+			}
+		}
+		BigDecimal finalStopPrice = stopPrice;
+		BigDecimal finalTakeProfit = takeProfit;
+		String positionSide = hedgeMode ? direction.name() : "";
+		String closeSide = direction == Direction.LONG ? "SELL" : "BUY";
 		return orderClient.placeStopMarketOrder(strategyProperties.tradeSymbol(),
-				direction == Direction.LONG ? "SELL" : "BUY",
+				closeSide,
 				quantity,
-				stopPrice,
-				hedgeMode,
-				hedgeMode ? direction.name() : "")
-				.then(orderClient.placeTakeProfitMarketOrder(strategyProperties.tradeSymbol(),
-						direction == Direction.LONG ? "SELL" : "BUY",
+				finalStopPrice,
+				true,
+				positionSide)
+				.flatMap(stopOrder -> orderClient.placeTakeProfitMarketOrder(strategyProperties.tradeSymbol(),
+						closeSide,
 						quantity,
-						takeProfit,
-						hedgeMode,
-						hedgeMode ? direction.name() : ""))
-				.thenReturn(response);
+						finalTakeProfit,
+						true,
+						positionSide)
+						.map(tpOrder -> new ProtectionOrders(response, stopOrder, tpOrder)));
 	}
 
 	private void closePosition(Direction direction) {
@@ -481,18 +626,101 @@ public class EtcEthDepthStrategyWatcher {
 			return;
 		}
 		String side = direction == Direction.LONG ? "SELL" : "BUY";
-		BigDecimal quantity = calculatePositionQuantity();
-		orderClient.placeReduceOnlyMarketOrder(strategyProperties.tradeSymbol(), side, quantity,
-				direction.name())
-				.flatMap(response -> orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
-						.thenReturn(response))
+		BigDecimal quantity = entryQty.get() != null ? entryQty.get() : calculatePositionQuantity();
+		orderClient.fetchHedgeModeEnabled()
+				.flatMap(hedgeMode -> orderClient.placeReduceOnlyMarketOrder(strategyProperties.tradeSymbol(),
+						side,
+						quantity,
+						hedgeMode ? direction.name() : "")
+						.flatMap(response -> orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+								.thenReturn(response)))
 				.doOnNext(response -> {
+					long now = System.currentTimeMillis();
 					positionState.set(Direction.FLAT);
-					lastTradeTimestamp.set(System.currentTimeMillis());
+					entryTimestamp.set(0);
+					entryQty.set(null);
+					lastTradeTimestamp.set(now);
+					recordTrade(now);
 					updateLossTracking(response, direction);
 					LOGGER.info("Closed {} position on {}", direction, strategyProperties.tradeSymbol());
+					orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+							.doOnError(error -> LOGGER.warn("Failed to cancel open orders after close", error))
+							.subscribe();
 				})
-				.doOnError(error -> LOGGER.warn("Failed to close position", error))
+				.onErrorResume(error -> {
+					String message = error.getMessage();
+					LOGGER.warn("Failed to close position: {}", message);
+					if (message != null && message.contains("ReduceOnly Order is rejected")) {
+						positionState.set(Direction.FLAT);
+						entryTimestamp.set(0);
+						entryQty.set(null);
+						LOGGER.info("Reset position state after reduce-only rejection");
+					}
+					return orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+							.doOnError(cancelError -> LOGGER.warn("Failed to cancel open orders after close error",
+									cancelError))
+							.onErrorResume(cancelError -> Mono.empty())
+							.then(Mono.empty());
+				})
+				.doFinally(signal -> tradingLock.set(false))
+				.subscribe();
+	}
+
+	private void flipPosition(Direction from, Direction to, long now) {
+		if (!tradingLock.compareAndSet(false, true)) {
+			return;
+		}
+		if (!strategyProperties.enableOrders()) {
+			LOGGER.warn("[TESTNET] Order placement disabled. Set strategy.enable-orders=true to send orders.");
+			tradingLock.set(false);
+			return;
+		}
+		String closeSide = from == Direction.LONG ? "SELL" : "BUY";
+		String openSide = to == Direction.LONG ? "BUY" : "SELL";
+		BigDecimal quantity = entryQty.get() != null ? entryQty.get() : calculatePositionQuantity();
+		orderClient.fetchHedgeModeEnabled()
+				.flatMap(hedgeMode -> orderClient.placeReduceOnlyMarketOrder(strategyProperties.tradeSymbol(),
+						closeSide,
+						quantity,
+						hedgeMode ? from.name() : "")
+						.flatMap(closeResponse -> orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+								.thenReturn(new CloseContext(closeResponse, hedgeMode))))
+				.retryWhen(Retry.backoff(3, Duration.ofMillis(200)))
+				.flatMap(context -> orderClient.placeMarketOrder(
+						strategyProperties.tradeSymbol(),
+						openSide,
+						quantity,
+						context.hedgeMode() ? to.name() : "")
+						.flatMap(openResponse -> resolveEntryOrder(openResponse)
+								.flatMap(resolved -> placeProtectionOrders(resolved, to, quantity, context.hedgeMode())
+										.map(protection -> new FlipOrders(context.closeOrder(), protection)))))
+				.doOnNext(flipOrders -> {
+					ProtectionOrders protection = flipOrders.protectionOrders();
+					updateLossTracking(flipOrders.closeOrder(), from);
+					entryPrice.set(protection.entryOrder().avgPrice());
+					entryTimestamp.set(now);
+					entryQty.set(quantity);
+					positionState.set(to);
+					lastTradeTimestamp.set(now);
+					lastFlipTimestamp.set(now);
+					recordTrade(now);
+					recordFlip(now);
+					LOGGER.info("Flip executed: oldPos={}, newPos={}, closeOrderId={}, openOrderId={}, slOrderId={}, tpOrderId={}",
+							from,
+							to,
+							flipOrders.closeOrder().orderId(),
+							protection.entryOrder().orderId(),
+							protection.stopOrder() != null ? protection.stopOrder().orderId() : null,
+							protection.takeProfitOrder() != null ? protection.takeProfitOrder().orderId() : null);
+				})
+				.onErrorResume(error -> {
+					LOGGER.warn("Flip failed during close/open sequence: {}", error.getMessage());
+					return orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+							.doOnError(cancelError -> LOGGER.warn("Failed to cancel open orders after flip error",
+									cancelError))
+							.onErrorResume(cancelError -> Mono.empty())
+							.then(Mono.empty());
+				})
 				.doFinally(signal -> tradingLock.set(false))
 				.subscribe();
 	}
@@ -503,13 +731,15 @@ public class EtcEthDepthStrategyWatcher {
 		if (exitPrice == null || entry == null) {
 			return;
 		}
-		BigDecimal quantity = calculatePositionQuantity();
+		BigDecimal quantity = entryQty.get() != null ? entryQty.get() : calculatePositionQuantity();
 		BigDecimal pnl;
 		if (direction == Direction.LONG) {
 			pnl = exitPrice.subtract(entry).multiply(quantity);
 		} else {
 			pnl = entry.subtract(exitPrice).multiply(quantity);
 		}
+		BigDecimal total = totalPnl.updateAndGet(current -> current.add(pnl));
+		LOGGER.info("PnL closed: direction={}, pnl={}, totalPnl={}", direction, pnl, total);
 		LocalDate today = LocalDate.now();
 		if (!today.equals(lossDay.get())) {
 			lossDay.set(today);
@@ -526,15 +756,145 @@ public class EtcEthDepthStrategyWatcher {
 	}
 
 	private boolean riskAllowed() {
-		if (dailyLoss.get().compareTo(strategyProperties.maxDailyLossUsdt()) >= 0) {
-			LOGGER.warn("Daily loss limit exceeded: {}", dailyLoss.get());
-			return false;
-		}
 		if (consecutiveLosses.get() >= strategyProperties.maxConsecutiveLosses()) {
 			LOGGER.warn("Max consecutive losses reached: {}", consecutiveLosses.get());
 			return false;
 		}
 		return true;
+	}
+
+	private FlipDecision evaluateFlipDecision(long now, BigDecimal obi, BigDecimal toi, BigDecimal cancelRatio) {
+		if (tradesInLast5Min(now) >= strategyProperties.maxTradesPer5Min()) {
+			return new FlipDecision(false, false, Direction.NONE, "trade-limit", flipsInLast5Min(now));
+		}
+		if (now - lastAnyTradeTs.get() < strategyProperties.hardTradeCooldownMs()) {
+			return new FlipDecision(false, false, Direction.NONE, "trade-cooldown", flipsInLast5Min(now));
+		}
+		Direction current = positionState.get();
+		if (current == Direction.FLAT || current == Direction.NONE) {
+			return new FlipDecision(false, false, Direction.NONE, "no-position", flipsInLast5Min(now));
+		}
+		if (!strategyProperties.flipEnabled()) {
+			return new FlipDecision(false, false, Direction.NONE, "flip-disabled", flipsInLast5Min(now));
+		}
+		boolean strongLong = isStrongLong(obi, toi, cancelRatio);
+		boolean strongShort = isStrongShort(obi, toi, cancelRatio);
+		if (current == Direction.LONG && !strongShort) {
+			return new FlipDecision(false, false, Direction.NONE, "no-strong-reversal", flipsInLast5Min(now));
+		}
+		if (current == Direction.SHORT && !strongLong) {
+			return new FlipDecision(false, false, Direction.NONE, "no-strong-reversal", flipsInLast5Min(now));
+		}
+		long entryTs = entryTimestamp.get();
+		if (entryTs > 0 && now - entryTs < strategyProperties.minHoldMs()) {
+			return new FlipDecision(false, false, Direction.NONE, "min-hold", flipsInLast5Min(now));
+		}
+		long lastFlip = lastFlipTimestamp.get();
+		if (lastFlip > 0 && now - lastFlip < strategyProperties.flipCooldownMs()) {
+			return new FlipDecision(false, false, Direction.NONE, "flip-cooldown", flipsInLast5Min(now));
+		}
+		int flips = flipsInLast5Min(now);
+		if (flips >= strategyProperties.maxFlipsPer5Min()) {
+			return new FlipDecision(false, false, Direction.NONE, "max-flips", flips);
+		}
+		BigDecimal spreadBps = latestSpreadBps.get();
+		if (spreadBps != null && spreadBps.compareTo(strategyProperties.flipSpreadMaxBps()) > 0) {
+			return new FlipDecision(false, false, Direction.NONE, "spread-too-wide", flips);
+		}
+		if (!riskAllowed()) {
+			return new FlipDecision(false, false, Direction.NONE, "risk-block", flips);
+		}
+		Direction flipTo = current == Direction.LONG ? Direction.SHORT : Direction.LONG;
+		return new FlipDecision(true, true, flipTo, "strong-reversal", flips);
+	}
+
+	private boolean isStrongLong(BigDecimal obi, BigDecimal toi, BigDecimal cancelRatio) {
+		return obi.compareTo(strategyProperties.strongObi()) > 0
+				&& toi.compareTo(strategyProperties.strongToi()) > 0
+				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0;
+	}
+
+	private boolean isStrongShort(BigDecimal obi, BigDecimal toi, BigDecimal cancelRatio) {
+		return obi.compareTo(strategyProperties.strongObi().negate()) < 0
+				&& toi.compareTo(strategyProperties.strongToi().negate()) < 0
+				&& cancelRatio.compareTo(strategyProperties.cancelMax()) < 0;
+	}
+
+	private void recordFlip(long now) {
+		synchronized (flipLock) {
+			flipHistory.addLast(now);
+			pruneFlipHistory(now);
+		}
+	}
+
+	private Mono<OrderResponse> resolveEntryOrder(OrderResponse response) {
+		if (response == null) {
+			return Mono.empty();
+		}
+		BigDecimal avgPrice = response.avgPrice();
+		if (avgPrice != null && avgPrice.signum() > 0) {
+			return Mono.just(response);
+		}
+		return orderClient.fetchOrder(strategyProperties.tradeSymbol(), response.orderId())
+				.filter(order -> order.avgPrice() != null && order.avgPrice().signum() > 0)
+				.retryWhen(Retry.backoff(5, Duration.ofMillis(200)))
+				.defaultIfEmpty(response)
+				.map(this::withResolvedAvgPrice);
+	}
+
+	private OrderResponse withResolvedAvgPrice(OrderResponse response) {
+		BigDecimal avgPrice = response.avgPrice();
+		if (avgPrice != null && avgPrice.signum() > 0) {
+			return response;
+		}
+		BigDecimal fallback = latestFuturesMid.get();
+		if (fallback != null && fallback.signum() > 0) {
+			return new OrderResponse(response.orderId(),
+					response.symbol(),
+					response.status(),
+					response.side(),
+					response.type(),
+					response.origQty(),
+					response.executedQty(),
+					fallback);
+		}
+		return response;
+	}
+
+	private void recordTrade(long now) {
+		lastAnyTradeTs.set(now);
+		synchronized (tradeHistory) {
+			tradeHistory.addLast(now);
+			pruneTradeHistory(now);
+		}
+	}
+
+	private int tradesInLast5Min(long now) {
+		synchronized (tradeHistory) {
+			pruneTradeHistory(now);
+			return tradeHistory.size();
+		}
+	}
+
+	private void pruneTradeHistory(long now) {
+		long cutoff = now - Duration.ofMinutes(5).toMillis();
+		while (!tradeHistory.isEmpty() && tradeHistory.peekFirst() < cutoff) {
+			tradeHistory.removeFirst();
+		}
+	}
+
+	private int flipsInLast5Min(long now) {
+		synchronized (flipLock) {
+			pruneFlipHistory(now);
+			return flipHistory.size();
+		}
+	}
+
+	private void pruneFlipHistory(long now) {
+		long cutoff = now - Duration.ofMinutes(5).toMillis();
+		while (!flipHistory.isEmpty() && flipHistory.peekFirst() < cutoff) {
+			flipHistory.removeFirst();
+		}
 	}
 
 	private BigDecimal calculatePositionQuantity() {
@@ -554,21 +914,21 @@ public class EtcEthDepthStrategyWatcher {
 	private BigDecimal stopPrice(BigDecimal entry, Direction direction) {
 		BigDecimal bps = strategyProperties.stopLossBps().divide(new BigDecimal("10000"), MathContext.DECIMAL64);
 		if (direction == Direction.LONG) {
-			return roundDownToStep(entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-					strategyProperties.priceTick());
+			BigDecimal price = entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+			return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 		}
-		return roundDownToStep(entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-				strategyProperties.priceTick());
+		BigDecimal price = entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+		return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 	}
 
 	private BigDecimal takeProfitPrice(BigDecimal entry, Direction direction) {
 		BigDecimal bps = strategyProperties.takeProfitBps().divide(new BigDecimal("10000"), MathContext.DECIMAL64);
 		if (direction == Direction.LONG) {
-			return roundDownToStep(entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-					strategyProperties.priceTick());
+			BigDecimal price = entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+			return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 		}
-		return roundDownToStep(entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-				strategyProperties.priceTick());
+		BigDecimal price = entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+		return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 	}
 
 	private BigDecimal roundDownToStep(BigDecimal value, BigDecimal step) {
@@ -577,6 +937,20 @@ public class EtcEthDepthStrategyWatcher {
 		}
 		BigDecimal ratio = value.divide(step, 0, java.math.RoundingMode.DOWN);
 		return ratio.multiply(step, MathContext.DECIMAL64);
+	}
+
+	private BigDecimal clampToPriceTick(BigDecimal value) {
+		BigDecimal tick = strategyProperties.priceTick();
+		if (value == null) {
+			return null;
+		}
+		if (value.signum() > 0) {
+			return value;
+		}
+		if (tick != null && tick.signum() > 0) {
+			return tick;
+		}
+		return BigDecimal.ZERO;
 	}
 
 	private void resyncOrderBook(String reason) {
@@ -593,5 +967,18 @@ public class EtcEthDepthStrategyWatcher {
 		SHORT,
 		FLAT,
 		NONE
+	}
+
+	private record ProtectionOrders(OrderResponse entryOrder, OrderResponse stopOrder, OrderResponse takeProfitOrder) {
+	}
+
+	private record FlipOrders(OrderResponse closeOrder, ProtectionOrders protectionOrders) {
+	}
+
+	private record FlipDecision(boolean shouldFlip, boolean canFlip, Direction flipDirection, String reason,
+			int flipsInLast5Min) {
+	}
+
+	private record CloseContext(OrderResponse closeOrder, boolean hedgeMode) {
 	}
 }
