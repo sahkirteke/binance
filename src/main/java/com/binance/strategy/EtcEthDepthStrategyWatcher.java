@@ -519,6 +519,10 @@ public class EtcEthDepthStrategyWatcher {
 			LOGGER.info("Spread too wide ({} bps). Skipping entry.", spreadBps);
 			return;
 		}
+		if (strategyProperties.positionNotionalUsdt() != null && latestFuturesMid.get() == null) {
+			LOGGER.info("Skip entry: futures mid not available for notional sizing");
+			return;
+		}
 		openPosition(desired);
 	}
 
