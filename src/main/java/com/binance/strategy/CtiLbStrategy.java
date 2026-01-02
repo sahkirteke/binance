@@ -1,6 +1,7 @@
 package com.binance.strategy;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
 import java.math.RoundingMode;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -60,6 +61,7 @@ public class CtiLbStrategy {
 
 		executeFlip(target, close)
 				.doOnError(error -> LOGGER.warn("Failed to execute CTI LB flip to {}: {}", target, error.getMessage()))
+				.onErrorResume(error -> Mono.empty())
 				.subscribe();
 	}
 
@@ -96,9 +98,22 @@ public class CtiLbStrategy {
 		BigDecimal notional = strategyProperties.positionNotionalUsdt();
 		if (notional != null && notional.signum() > 0 && close > 0) {
 			BigDecimal price = BigDecimal.valueOf(close);
-			return notional.divide(price, 8, RoundingMode.DOWN);
+			if (strategyProperties.maxPositionUsdt() != null
+					&& notional.compareTo(strategyProperties.maxPositionUsdt()) > 0) {
+				notional = strategyProperties.maxPositionUsdt();
+			}
+			BigDecimal quantity = notional.divide(price, MathContext.DECIMAL64);
+			return roundDownToStep(quantity, strategyProperties.quantityStep());
 		}
-		return strategyProperties.marketQuantity();
+		return roundDownToStep(strategyProperties.marketQuantity(), strategyProperties.quantityStep());
+	}
+
+	private BigDecimal roundDownToStep(BigDecimal value, BigDecimal step) {
+		if (value == null || step == null || step.signum() <= 0) {
+			return value;
+		}
+		BigDecimal ratio = value.divide(step, 0, RoundingMode.DOWN);
+		return ratio.multiply(step, MathContext.DECIMAL64);
 	}
 
 	private void logSignal(TrendSignal signal, double close, String action) {
