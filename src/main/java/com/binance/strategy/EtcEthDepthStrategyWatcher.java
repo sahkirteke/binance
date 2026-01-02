@@ -538,7 +538,7 @@ public class EtcEthDepthStrategyWatcher {
 			return;
 		}
 
-		BigDecimal quantity = calculatePositionQuantity();
+		BigDecimal quantity = entryQty.get() != null ? entryQty.get() : calculatePositionQuantity();
 		String side = direction == Direction.LONG ? "BUY" : "SELL";
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> orderClient.placeMarketOrder(
@@ -546,7 +546,8 @@ public class EtcEthDepthStrategyWatcher {
 						side,
 						quantity,
 						hedgeMode ? direction.name() : "")
-						.flatMap(response -> placeProtectionOrders(response, direction, quantity, hedgeMode)))
+						.flatMap(response -> resolveEntryOrder(response)
+								.flatMap(resolved -> placeProtectionOrders(resolved, direction, quantity, hedgeMode))))
 				.doOnNext(response -> {
 					long now = System.currentTimeMillis();
 					entryPrice.set(response.entryOrder().avgPrice());
@@ -647,8 +648,9 @@ public class EtcEthDepthStrategyWatcher {
 						openSide,
 						quantity,
 						context.hedgeMode() ? to.name() : "")
-						.flatMap(openResponse -> placeProtectionOrders(openResponse, to, quantity, context.hedgeMode())
-								.map(protection -> new FlipOrders(context.closeOrder(), protection))))
+						.flatMap(openResponse -> resolveEntryOrder(openResponse)
+								.flatMap(resolved -> placeProtectionOrders(resolved, to, quantity, context.hedgeMode())
+										.map(protection -> new FlipOrders(context.closeOrder(), protection)))))
 				.doOnNext(flipOrders -> {
 					ProtectionOrders protection = flipOrders.protectionOrders();
 					updateLossTracking(flipOrders.closeOrder(), from);
@@ -679,7 +681,7 @@ public class EtcEthDepthStrategyWatcher {
 		if (exitPrice == null || entry == null) {
 			return;
 		}
-		BigDecimal quantity = calculatePositionQuantity();
+		BigDecimal quantity = entryQty.get() != null ? entryQty.get() : calculatePositionQuantity();
 		BigDecimal pnl;
 		if (direction == Direction.LONG) {
 			pnl = exitPrice.subtract(entry).multiply(quantity);
@@ -777,6 +779,40 @@ public class EtcEthDepthStrategyWatcher {
 			flipHistory.addLast(now);
 			pruneFlipHistory(now);
 		}
+	}
+
+	private Mono<OrderResponse> resolveEntryOrder(OrderResponse response) {
+		if (response == null) {
+			return Mono.empty();
+		}
+		BigDecimal avgPrice = response.avgPrice();
+		if (avgPrice != null && avgPrice.signum() > 0) {
+			return Mono.just(response);
+		}
+		return orderClient.fetchOrder(strategyProperties.tradeSymbol(), response.orderId())
+				.filter(order -> order.avgPrice() != null && order.avgPrice().signum() > 0)
+				.retryWhen(Retry.backoff(5, Duration.ofMillis(200)))
+				.defaultIfEmpty(response)
+				.map(this::withResolvedAvgPrice);
+	}
+
+	private OrderResponse withResolvedAvgPrice(OrderResponse response) {
+		BigDecimal avgPrice = response.avgPrice();
+		if (avgPrice != null && avgPrice.signum() > 0) {
+			return response;
+		}
+		BigDecimal fallback = latestFuturesMid.get();
+		if (fallback != null && fallback.signum() > 0) {
+			return new OrderResponse(response.orderId(),
+					response.symbol(),
+					response.status(),
+					response.side(),
+					response.type(),
+					response.origQty(),
+					response.executedQty(),
+					fallback);
+		}
+		return response;
 	}
 
 	private void recordTrade(long now) {

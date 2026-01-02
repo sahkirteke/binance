@@ -110,6 +110,42 @@ public class BinanceFuturesOrderClient {
 				.bodyToMono(Void.class);
 	}
 
+	public Mono<OrderResponse> fetchOrder(String symbol, Long orderId) {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()
+				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
+			return Mono.error(new IllegalStateException(
+					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
+		}
+		if (orderId == null) {
+			return Mono.error(new IllegalArgumentException("orderId is required"));
+		}
+		long timestamp = Instant.now().toEpochMilli();
+		String payload = String.format("symbol=%s&orderId=%d&recvWindow=%d&timestamp=%d",
+				symbol,
+				orderId,
+				properties.recvWindowMillis(),
+				timestamp);
+		String signature = signatureUtil.sign(payload, properties.secretKey());
+		String signedPayload = payload + "&signature=" + signature;
+
+		return binanceWebClient
+				.get()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/order")
+						.query(signedPayload)
+						.build())
+				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+				.header("X-MBX-APIKEY", properties.apiKey())
+				.retrieve()
+				.onStatus(status -> status.isError(), response -> response
+						.bodyToMono(String.class)
+						.defaultIfEmpty("<empty>")
+						.flatMap(body -> Mono.error(new IllegalStateException(
+								"Binance order fetch failed with status=" + response.statusCode().value()
+										+ ", body=" + body))))
+				.bodyToMono(OrderResponse.class);
+	}
+
 	public Mono<Boolean> fetchHedgeModeEnabled() {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()
 				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
