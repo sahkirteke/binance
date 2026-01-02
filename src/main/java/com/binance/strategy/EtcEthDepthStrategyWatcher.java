@@ -164,6 +164,11 @@ public class EtcEthDepthStrategyWatcher {
 			return;
 		}
 		if (current == Direction.LONG && shouldExitLong(obiValue, toiValue, cancelValue)) {
+			Direction desired = desiredDirection.get();
+			if (desired != Direction.SHORT) {
+				LOGGER.info("Skip exit: desired not short (desired={})", desired);
+				return;
+			}
 			if (exitSinceLong.get() == 0) {
 				exitSinceLong.set(now);
 			}
@@ -181,6 +186,11 @@ public class EtcEthDepthStrategyWatcher {
 		}
 		exitSinceLong.set(0);
 		if (current == Direction.SHORT && shouldExitShort(obiValue, toiValue, cancelValue)) {
+			Direction desired = desiredDirection.get();
+			if (desired != Direction.LONG) {
+				LOGGER.info("Skip exit: desired not long (desired={})", desired);
+				return;
+			}
 			if (exitSinceShort.get() == 0) {
 				exitSinceShort.set(now);
 			}
