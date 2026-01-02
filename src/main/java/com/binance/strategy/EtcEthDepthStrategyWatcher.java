@@ -692,8 +692,10 @@ public class EtcEthDepthStrategyWatcher {
 							protection.stopOrder() != null ? protection.stopOrder().orderId() : null,
 							protection.takeProfitOrder() != null ? protection.takeProfitOrder().orderId() : null);
 				})
-				.doOnError(error -> LOGGER.warn("Flip failed during close/open sequence", error))
-				.onErrorResume(error -> Mono.empty())
+				.onErrorResume(error -> {
+					LOGGER.warn("Flip failed during close/open sequence: {}", error.getMessage());
+					return Mono.empty();
+				})
 				.doFinally(signal -> tradingLock.set(false))
 				.subscribe();
 	}
