@@ -477,6 +477,10 @@ public class EtcEthDepthStrategyWatcher {
 		if (!tradingLock.compareAndSet(false, true)) {
 			return;
 		}
+		if (positionState.get() == direction) {
+			tradingLock.set(false);
+			return;
+		}
 		pendingOpen.set(true);
 		if (!strategyProperties.enableOrders()) {
 			LOGGER.warn("[TESTNET] Order placement disabled. Set strategy.enable-orders=true to send orders.");
