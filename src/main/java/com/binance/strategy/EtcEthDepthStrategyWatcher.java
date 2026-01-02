@@ -640,7 +640,10 @@ public class EtcEthDepthStrategyWatcher {
 					updateLossTracking(response, direction);
 					LOGGER.info("Closed {} position on {}", direction, strategyProperties.tradeSymbol());
 				})
-				.doOnError(error -> LOGGER.warn("Failed to close position", error))
+				.onErrorResume(error -> {
+					LOGGER.warn("Failed to close position: {}", error.getMessage());
+					return Mono.empty();
+				})
 				.doFinally(signal -> tradingLock.set(false))
 				.subscribe();
 	}
