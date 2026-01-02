@@ -643,6 +643,9 @@ public class EtcEthDepthStrategyWatcher {
 					recordTrade(now);
 					updateLossTracking(response, direction);
 					LOGGER.info("Closed {} position on {}", direction, strategyProperties.tradeSymbol());
+					orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+							.doOnError(error -> LOGGER.warn("Failed to cancel open orders after close", error))
+							.subscribe();
 				})
 				.onErrorResume(error -> {
 					String message = error.getMessage();
@@ -653,7 +656,10 @@ public class EtcEthDepthStrategyWatcher {
 						entryQty.set(null);
 						LOGGER.info("Reset position state after reduce-only rejection");
 					}
-					return Mono.empty();
+					return orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+							.doOnError(cancelError -> LOGGER.warn("Failed to cancel open orders after close error",
+									cancelError))
+							.onErrorResume(cancelError -> Mono.empty());
 				})
 				.doFinally(signal -> tradingLock.set(false))
 				.subscribe();
