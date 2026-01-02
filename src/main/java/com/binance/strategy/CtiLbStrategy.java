@@ -1,6 +1,7 @@
 package com.binance.strategy;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -57,15 +58,15 @@ public class CtiLbStrategy {
 		action = "FLIP_TO_" + target;
 		logSignal(signal, close, action);
 
-		executeFlip(target)
+		executeFlip(target, close)
 				.doOnError(error -> LOGGER.warn("Failed to execute CTI LB flip to {}: {}", target, error.getMessage()))
 				.subscribe();
 	}
 
-	private Mono<Void> executeFlip(PositionState target) {
+	private Mono<Void> executeFlip(PositionState target, double close) {
 		PositionState current = positionState.get();
-		BigDecimal quantity = strategyProperties.marketQuantity();
-		if (quantity == null) {
+		BigDecimal quantity = resolveQuantity(close);
+		if (quantity == null || quantity.signum() <= 0) {
 			return Mono.empty();
 		}
 		return orderClient.fetchHedgeModeEnabled()
@@ -89,6 +90,15 @@ public class CtiLbStrategy {
 		String side = target == PositionState.LONG ? "BUY" : "SELL";
 		String positionSide = hedgeMode ? target.name() : "";
 		return orderClient.placeMarketOrder(strategyProperties.tradeSymbol(), side, quantity, positionSide);
+	}
+
+	private BigDecimal resolveQuantity(double close) {
+		BigDecimal notional = strategyProperties.positionNotionalUsdt();
+		if (notional != null && notional.signum() > 0 && close > 0) {
+			BigDecimal price = BigDecimal.valueOf(close);
+			return notional.divide(price, 8, RoundingMode.DOWN);
+		}
+		return strategyProperties.marketQuantity();
 	}
 
 	private void logSignal(TrendSignal signal, double close, String action) {

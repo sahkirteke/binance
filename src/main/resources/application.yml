@@ -22,11 +22,11 @@ binance:
 
 strategy:
   active: CTI_LB
-  reference-symbol: ETCUSDT
-  trade-symbol: ETHUSDT
+  reference-symbol: MANAUSDT
+  trade-symbol: MANAUSDT
   depth-limit: 50
   market-quantity: 0.01
-  leverage: 75
+  leverage: 2
   position-side: LONG
   enable-orders: true
   poll-interval-ms: 500
@@ -48,7 +48,7 @@ strategy:
   exit-persist-ms: 450
   cooldown-ms: 650
   max-spread-bps: 10
-  position-notional-usdt: 100
+  position-notional-usdt: 200
   stop-loss-bps: 18
   take-profit-bps: 22
   quantity-step: 0.001
