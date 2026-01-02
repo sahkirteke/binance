@@ -659,7 +659,8 @@ public class EtcEthDepthStrategyWatcher {
 					return orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
 							.doOnError(cancelError -> LOGGER.warn("Failed to cancel open orders after close error",
 									cancelError))
-							.onErrorResume(cancelError -> Mono.empty());
+							.onErrorResume(cancelError -> Mono.empty())
+							.then(Mono.empty());
 				})
 				.doFinally(signal -> tradingLock.set(false))
 				.subscribe();
