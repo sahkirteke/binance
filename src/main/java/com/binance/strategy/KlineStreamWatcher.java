@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
 
+import com.binance.config.BinanceProperties;
 import com.binance.market.dto.KlineEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -22,15 +23,18 @@ public class KlineStreamWatcher {
 	private static final Logger LOGGER = LoggerFactory.getLogger(KlineStreamWatcher.class);
 	private static final String KLINE_INTERVAL = "1m";
 
+	private final BinanceProperties binanceProperties;
 	private final StrategyProperties strategyProperties;
 	private final StrategyRouter strategyRouter;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
 
-	public KlineStreamWatcher(StrategyProperties strategyProperties,
+	public KlineStreamWatcher(BinanceProperties binanceProperties,
+			StrategyProperties strategyProperties,
 			StrategyRouter strategyRouter,
 			ObjectMapper objectMapper) {
+		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.strategyRouter = strategyRouter;
 		this.objectMapper = objectMapper;
@@ -43,7 +47,10 @@ public class KlineStreamWatcher {
 			return;
 		}
 		String symbol = strategyProperties.tradeSymbol().toLowerCase();
-		URI uri = URI.create("wss://stream.binance.com:9443/ws/" + symbol + "@kline_" + KLINE_INTERVAL);
+		String baseUrl = binanceProperties.useTestnet()
+				? "wss://stream.binancefuture.com/ws/"
+				: "wss://fstream.binance.com/ws/";
+		URI uri = URI.create(baseUrl + symbol + "@kline_" + KLINE_INTERVAL);
 		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
 				.map(message -> message.getPayloadAsText())
 				.doOnNext(this::handleKlineMessage)
