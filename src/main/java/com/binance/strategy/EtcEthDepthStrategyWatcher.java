@@ -715,7 +715,11 @@ public class EtcEthDepthStrategyWatcher {
 				})
 				.onErrorResume(error -> {
 					LOGGER.warn("Flip failed during close/open sequence: {}", error.getMessage());
-					return Mono.empty();
+					return orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
+							.doOnError(cancelError -> LOGGER.warn("Failed to cancel open orders after flip error",
+									cancelError))
+							.onErrorResume(cancelError -> Mono.empty())
+							.then(Mono.empty());
 				})
 				.doFinally(signal -> tradingLock.set(false))
 				.subscribe();
