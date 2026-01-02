@@ -21,7 +21,7 @@ binance:
   recv-window-millis: 5000
 
 strategy:
-  type: NONE
+  active: CTI_LB
   reference-symbol: ETCUSDT
   trade-symbol: ETHUSDT
   depth-limit: 50

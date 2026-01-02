@@ -116,7 +116,7 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 
 	@Override
 	public StrategyType type() {
-		return StrategyType.ETC_ETH_DEPTH;
+		return StrategyType.OLD;
 	}
 
 	@Override
@@ -282,7 +282,7 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 	}
 
 	private boolean isActive() {
-		return strategyProperties.type() == type();
+		return strategyProperties.active() == type();
 	}
 
 	private void updateSpread(BookTickerResponse ticker) {

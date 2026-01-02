@@ -12,7 +12,7 @@ import jakarta.validation.constraints.Positive;
 @Validated
 @ConfigurationProperties(prefix = "strategy")
 public record StrategyProperties(
-		@NotNull StrategyType type,
+		@NotNull StrategyType active,
 		@NotBlank String referenceSymbol,
 		@NotBlank String tradeSymbol,
 		@Positive int depthLimit,

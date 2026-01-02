@@ -1,5 +1,8 @@
 package com.binance.strategy;
 
+import org.springframework.stereotype.Component;
+
+@Component
 public class CtiLbTrendIndicator implements TrendIndicator {
 
 	private static final double SMOOTHING_PERIOD = 21.0;
