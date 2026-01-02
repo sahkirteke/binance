@@ -35,14 +35,14 @@ strategy:
   weight-lambda: 0.25
   obi-entry: 0.055
   obi-entry-long: 0.055
-  obi-entry-short: 0.040
+  obi-entry-short: 0.045
   obi-exit: 0.020
   toi-min: 0.035
   toi-min-long: 0.035
-  toi-min-short: 0.025
+  toi-min-short: 0.030
   cancel-max: 0.92
   cancel-max-long: 0.85
-  cancel-max-short: 0.92
+  cancel-max-short: 0.90
   persist-ms: 180
   cooldown-ms: 650
   max-spread-bps: 10

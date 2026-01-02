@@ -82,6 +82,8 @@ public class EtcEthDepthStrategyWatcher {
 	private final AtomicBoolean tradingLock = new AtomicBoolean(false);
 	private final AtomicBoolean pendingOpen = new AtomicBoolean(false);
 	private final AtomicLong lastFlipTimestamp = new AtomicLong(0);
+	private final AtomicLong exitSinceLong = new AtomicLong(0);
+	private final AtomicLong exitSinceShort = new AtomicLong(0);
 	private final Object flipLock = new Object();
 	private final Deque<Long> flipHistory = new ArrayDeque<>();
 
@@ -162,6 +164,13 @@ public class EtcEthDepthStrategyWatcher {
 			return;
 		}
 		if (current == Direction.LONG && shouldExitLong(obiValue, toiValue, cancelValue)) {
+			if (exitSinceLong.get() == 0) {
+				exitSinceLong.set(now);
+			}
+			if (now - exitSinceLong.get() < strategyProperties.persistMs()) {
+				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.persistMs());
+				return;
+			}
 			long entryTs = entryTimestamp.get();
 			if (entryTs > 0 && now - entryTs < strategyProperties.minHoldMs()) {
 				LOGGER.info("Skip exit: min-hold not reached ({}ms)", strategyProperties.minHoldMs());
@@ -170,7 +179,15 @@ public class EtcEthDepthStrategyWatcher {
 			closePosition(Direction.LONG);
 			return;
 		}
+		exitSinceLong.set(0);
 		if (current == Direction.SHORT && shouldExitShort(obiValue, toiValue, cancelValue)) {
+			if (exitSinceShort.get() == 0) {
+				exitSinceShort.set(now);
+			}
+			if (now - exitSinceShort.get() < strategyProperties.persistMs()) {
+				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.persistMs());
+				return;
+			}
 			long entryTs = entryTimestamp.get();
 			if (entryTs > 0 && now - entryTs < strategyProperties.minHoldMs()) {
 				LOGGER.info("Skip exit: min-hold not reached ({}ms)", strategyProperties.minHoldMs());
@@ -179,6 +196,7 @@ public class EtcEthDepthStrategyWatcher {
 			closePosition(Direction.SHORT);
 			return;
 		}
+		exitSinceShort.set(0);
 		if (current == Direction.FLAT) {
 			openIfReady(now);
 		}
