@@ -595,18 +595,20 @@ public class EtcEthDepthStrategyWatcher {
 		}
 		BigDecimal finalStopPrice = stopPrice;
 		BigDecimal finalTakeProfit = takeProfit;
+		String positionSide = hedgeMode ? direction.name() : "";
+		String closeSide = direction == Direction.LONG ? "SELL" : "BUY";
 		return orderClient.placeStopMarketOrder(strategyProperties.tradeSymbol(),
-				direction == Direction.LONG ? "SELL" : "BUY",
+				closeSide,
 				quantity,
 				finalStopPrice,
 				true,
-				hedgeMode ? direction.name() : "")
+				positionSide)
 				.flatMap(stopOrder -> orderClient.placeTakeProfitMarketOrder(strategyProperties.tradeSymbol(),
-						direction == Direction.LONG ? "SELL" : "BUY",
+						closeSide,
 						quantity,
 						finalTakeProfit,
 						true,
-						hedgeMode ? direction.name() : "")
+						positionSide)
 						.map(tpOrder -> new ProtectionOrders(response, stopOrder, tpOrder)));
 	}
 
