@@ -282,7 +282,7 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 	}
 
 	private boolean isActive() {
-		return strategyProperties.active() == type();
+		return strategyProperties.type() == type();
 	}
 
 	private void updateSpread(BookTickerResponse ticker) {
@@ -1015,10 +1015,6 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 			return tick;
 		}
 		return BigDecimal.ZERO;
-	}
-
-	private boolean isActive() {
-		return strategyProperties.active() == StrategyType.ETC_ETH_DEPTH;
 	}
 
 	private void resyncOrderBook(String reason) {

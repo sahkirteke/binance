@@ -42,6 +42,15 @@ public class StrategyManager {
 
 	public void start() {
 		StrategyType type = strategyProperties.type();
+		if (type == StrategyType.NONE) {
+			Strategy current = activeStrategy.getAndSet(null);
+			if (current != null) {
+				LOGGER.info("Stopping strategy: {}", current.type());
+				current.stop();
+			}
+			LOGGER.info("Strategy disabled (type=NONE)");
+			return;
+		}
 		Strategy selected = strategies.get(type);
 		if (selected == null) {
 			throw new IllegalStateException("No strategy registered for type " + type);
