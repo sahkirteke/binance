@@ -61,6 +61,8 @@ strategy:
   strong-toi: 0.060
   max-flips-per-5-min: 12
   flip-spread-max-bps: 12
+  max-trades-per-5-min: 10
+  hard-trade-cooldown-ms: 2500
 
 management:
   endpoints:

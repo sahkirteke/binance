@@ -85,6 +85,8 @@ public class EtcEthDepthStrategyWatcher {
 	private final AtomicLong lastFlipTimestamp = new AtomicLong(0);
 	private final AtomicLong exitSinceLong = new AtomicLong(0);
 	private final AtomicLong exitSinceShort = new AtomicLong(0);
+	private final AtomicLong lastAnyTradeTs = new AtomicLong(0);
+	private final Deque<Long> tradeHistory = new ArrayDeque<>();
 	private final Object flipLock = new Object();
 	private final Deque<Long> flipHistory = new ArrayDeque<>();
 
@@ -492,6 +494,14 @@ public class EtcEthDepthStrategyWatcher {
 		if (pendingOpen.get()) {
 			return;
 		}
+		if (now - lastAnyTradeTs.get() < strategyProperties.hardTradeCooldownMs()) {
+			return;
+		}
+		int recentTrades = tradesInLast5Min(now);
+		if (recentTrades >= strategyProperties.maxTradesPer5Min()) {
+			LOGGER.info("Trade limit reached: tradesInLast5Min={}", recentTrades);
+			return;
+		}
 		int effectiveCooldownMs = Math.max(0, (int) Math.round(strategyProperties.cooldownMs() * 0.7));
 		if (now - lastTradeTimestamp.get() < effectiveCooldownMs) {
 			return;
@@ -538,11 +548,13 @@ public class EtcEthDepthStrategyWatcher {
 						hedgeMode ? direction.name() : "")
 						.flatMap(response -> placeProtectionOrders(response, direction, quantity, hedgeMode)))
 				.doOnNext(response -> {
+					long now = System.currentTimeMillis();
 					entryPrice.set(response.entryOrder().avgPrice());
-					entryTimestamp.set(System.currentTimeMillis());
+					entryTimestamp.set(now);
 					entryQty.set(quantity);
 					positionState.set(direction);
-					lastTradeTimestamp.set(System.currentTimeMillis());
+					lastTradeTimestamp.set(now);
+					recordTrade(now);
 					LOGGER.info("Opened {} position on {} at {}", direction, strategyProperties.tradeSymbol(),
 							response.entryOrder().avgPrice());
 				})
@@ -596,10 +608,12 @@ public class EtcEthDepthStrategyWatcher {
 						.flatMap(response -> orderClient.cancelAllOpenOrders(strategyProperties.tradeSymbol())
 								.thenReturn(response)))
 				.doOnNext(response -> {
+					long now = System.currentTimeMillis();
 					positionState.set(Direction.FLAT);
 					entryTimestamp.set(0);
 					entryQty.set(null);
-					lastTradeTimestamp.set(System.currentTimeMillis());
+					lastTradeTimestamp.set(now);
+					recordTrade(now);
 					updateLossTracking(response, direction);
 					LOGGER.info("Closed {} position on {}", direction, strategyProperties.tradeSymbol());
 				})
@@ -644,6 +658,7 @@ public class EtcEthDepthStrategyWatcher {
 					positionState.set(to);
 					lastTradeTimestamp.set(now);
 					lastFlipTimestamp.set(now);
+					recordTrade(now);
 					recordFlip(now);
 					LOGGER.info("Flip executed: oldPos={}, newPos={}, closeOrderId={}, openOrderId={}, slOrderId={}, tpOrderId={}",
 							from,
@@ -701,6 +716,12 @@ public class EtcEthDepthStrategyWatcher {
 	}
 
 	private FlipDecision evaluateFlipDecision(long now, BigDecimal obi, BigDecimal toi, BigDecimal cancelRatio) {
+		if (tradesInLast5Min(now) >= strategyProperties.maxTradesPer5Min()) {
+			return new FlipDecision(false, false, Direction.NONE, "trade-limit", flipsInLast5Min(now));
+		}
+		if (now - lastAnyTradeTs.get() < strategyProperties.hardTradeCooldownMs()) {
+			return new FlipDecision(false, false, Direction.NONE, "trade-cooldown", flipsInLast5Min(now));
+		}
 		Direction current = positionState.get();
 		if (current == Direction.FLAT || current == Direction.NONE) {
 			return new FlipDecision(false, false, Direction.NONE, "no-position", flipsInLast5Min(now));
@@ -755,6 +776,28 @@ public class EtcEthDepthStrategyWatcher {
 		synchronized (flipLock) {
 			flipHistory.addLast(now);
 			pruneFlipHistory(now);
+		}
+	}
+
+	private void recordTrade(long now) {
+		lastAnyTradeTs.set(now);
+		synchronized (tradeHistory) {
+			tradeHistory.addLast(now);
+			pruneTradeHistory(now);
+		}
+	}
+
+	private int tradesInLast5Min(long now) {
+		synchronized (tradeHistory) {
+			pruneTradeHistory(now);
+			return tradeHistory.size();
+		}
+	}
+
+	private void pruneTradeHistory(long now) {
+		long cutoff = now - Duration.ofMinutes(5).toMillis();
+		while (!tradeHistory.isEmpty() && tradeHistory.peekFirst() < cutoff) {
+			tradeHistory.removeFirst();
 		}
 	}
 

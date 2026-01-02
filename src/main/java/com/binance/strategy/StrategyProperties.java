@@ -49,5 +49,7 @@ public record StrategyProperties(
 		BigDecimal strongObi,
 		BigDecimal strongToi,
 		int maxFlipsPer5Min,
-		BigDecimal flipSpreadMaxBps) {
+		BigDecimal flipSpreadMaxBps,
+		int maxTradesPer5Min,
+		long hardTradeCooldownMs) {
 }
