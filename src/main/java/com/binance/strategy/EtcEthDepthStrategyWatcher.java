@@ -80,6 +80,7 @@ public class EtcEthDepthStrategyWatcher {
 	private final AtomicReference<BigDecimal> dailyLoss = new AtomicReference<>(BigDecimal.ZERO);
 	private final AtomicReference<LocalDate> lossDay = new AtomicReference<>(LocalDate.now());
 	private final AtomicBoolean tradingLock = new AtomicBoolean(false);
+	private final AtomicBoolean pendingOpen = new AtomicBoolean(false);
 	private final AtomicLong lastFlipTimestamp = new AtomicLong(0);
 	private final Object flipLock = new Object();
 	private final Deque<Long> flipHistory = new ArrayDeque<>();
@@ -448,6 +449,9 @@ public class EtcEthDepthStrategyWatcher {
 	}
 
 	private void openIfReady(long now) {
+		if (pendingOpen.get()) {
+			return;
+		}
 		int effectiveCooldownMs = Math.max(0, (int) Math.round(strategyProperties.cooldownMs() * 0.7));
 		if (now - lastTradeTimestamp.get() < effectiveCooldownMs) {
 			return;
@@ -472,8 +476,10 @@ public class EtcEthDepthStrategyWatcher {
 		if (!tradingLock.compareAndSet(false, true)) {
 			return;
 		}
+		pendingOpen.set(true);
 		if (!strategyProperties.enableOrders()) {
 			LOGGER.warn("[TESTNET] Order placement disabled. Set strategy.enable-orders=true to send orders.");
+			pendingOpen.set(false);
 			tradingLock.set(false);
 			return;
 		}
@@ -497,7 +503,10 @@ public class EtcEthDepthStrategyWatcher {
 							response.entryOrder().avgPrice());
 				})
 				.doOnError(error -> LOGGER.warn("Failed to open position", error))
-				.doFinally(signal -> tradingLock.set(false))
+				.doFinally(signal -> {
+					pendingOpen.set(false);
+					tradingLock.set(false);
+				})
 				.subscribe();
 	}
 
