@@ -162,10 +162,20 @@ public class EtcEthDepthStrategyWatcher {
 			return;
 		}
 		if (current == Direction.LONG && shouldExitLong(obiValue, toiValue, cancelValue)) {
+			long entryTs = entryTimestamp.get();
+			if (entryTs > 0 && now - entryTs < strategyProperties.minHoldMs()) {
+				LOGGER.info("Skip exit: min-hold not reached ({}ms)", strategyProperties.minHoldMs());
+				return;
+			}
 			closePosition(Direction.LONG);
 			return;
 		}
 		if (current == Direction.SHORT && shouldExitShort(obiValue, toiValue, cancelValue)) {
+			long entryTs = entryTimestamp.get();
+			if (entryTs > 0 && now - entryTs < strategyProperties.minHoldMs()) {
+				LOGGER.info("Skip exit: min-hold not reached ({}ms)", strategyProperties.minHoldMs());
+				return;
+			}
 			closePosition(Direction.SHORT);
 			return;
 		}
