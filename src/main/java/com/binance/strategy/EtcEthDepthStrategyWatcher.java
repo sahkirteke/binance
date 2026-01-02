@@ -593,16 +593,18 @@ public class EtcEthDepthStrategyWatcher {
 				}
 			}
 		}
+		BigDecimal finalStopPrice = stopPrice;
+		BigDecimal finalTakeProfit = takeProfit;
 		return orderClient.placeStopMarketOrder(strategyProperties.tradeSymbol(),
 				direction == Direction.LONG ? "SELL" : "BUY",
 				quantity,
-				stopPrice,
+				finalStopPrice,
 				true,
 				hedgeMode ? direction.name() : "")
 				.flatMap(stopOrder -> orderClient.placeTakeProfitMarketOrder(strategyProperties.tradeSymbol(),
 						direction == Direction.LONG ? "SELL" : "BUY",
 						quantity,
-						takeProfit,
+						finalTakeProfit,
 						true,
 						hedgeMode ? direction.name() : "")
 						.map(tpOrder -> new ProtectionOrders(response, stopOrder, tpOrder)));
@@ -725,10 +727,6 @@ public class EtcEthDepthStrategyWatcher {
 	}
 
 	private boolean riskAllowed() {
-		if (dailyLoss.get().compareTo(strategyProperties.maxDailyLossUsdt()) >= 0) {
-			LOGGER.warn("Daily loss limit exceeded: {}", dailyLoss.get());
-			return false;
-		}
 		if (consecutiveLosses.get() >= strategyProperties.maxConsecutiveLosses()) {
 			LOGGER.warn("Max consecutive losses reached: {}", consecutiveLosses.get());
 			return false;
