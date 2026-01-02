@@ -641,7 +641,14 @@ public class EtcEthDepthStrategyWatcher {
 					LOGGER.info("Closed {} position on {}", direction, strategyProperties.tradeSymbol());
 				})
 				.onErrorResume(error -> {
-					LOGGER.warn("Failed to close position: {}", error.getMessage());
+					String message = error.getMessage();
+					LOGGER.warn("Failed to close position: {}", message);
+					if (message != null && message.contains("ReduceOnly Order is rejected")) {
+						positionState.set(Direction.FLAT);
+						entryTimestamp.set(0);
+						entryQty.set(null);
+						LOGGER.info("Reset position state after reduce-only rejection");
+					}
 					return Mono.empty();
 				})
 				.doFinally(signal -> tradingLock.set(false))
