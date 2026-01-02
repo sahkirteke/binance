@@ -13,12 +13,8 @@ import java.util.Deque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
 
 import com.binance.exchange.BinanceFuturesOrderClient;
@@ -32,12 +28,17 @@ import com.binance.strategy.LocalOrderBook.DepthDelta;
 import com.binance.strategy.LocalOrderBook.OrderBookView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import jakarta.annotation.PostConstruct;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
 
-@Component
-public class EtcEthDepthStrategyWatcher {
+public class EtcEthDepthStrategyWatcher implements Strategy {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(EtcEthDepthStrategyWatcher.class);
 	private static final BigDecimal EPSILON = new BigDecimal("0.00000001");
@@ -48,6 +49,12 @@ public class EtcEthDepthStrategyWatcher {
 	private final StrategyProperties strategyProperties;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
+	private final AtomicBoolean running = new AtomicBoolean(false);
+	private final AtomicReference<ScheduledExecutorService> schedulerRef = new AtomicReference<>();
+	private final AtomicReference<ScheduledFuture<?>> tickTaskRef = new AtomicReference<>();
+	private final AtomicReference<ScheduledFuture<?>> spreadTaskRef = new AtomicReference<>();
+	private final AtomicReference<Disposable> depthSubscriptionRef = new AtomicReference<>();
+	private final AtomicReference<Disposable> tradeSubscriptionRef = new AtomicReference<>();
 
 	private final LocalOrderBook orderBook = new LocalOrderBook();
 	private final RollingSum addedVol;
@@ -107,13 +114,59 @@ public class EtcEthDepthStrategyWatcher {
 		this.cancelRatioEwma = new Ewma(new BigDecimal("0.3"));
 	}
 
-	@PostConstruct
-	public void startStreams() {
-		startDepthStream();
-		startTradeStream();
+	@Override
+	public StrategyType type() {
+		return StrategyType.ETC_ETH_DEPTH;
 	}
 
-	@Scheduled(fixedDelayString = "${strategy.tick-interval-ms:200}")
+	@Override
+	public void start() {
+		if (!running.compareAndSet(false, true)) {
+			return;
+		}
+		startDepthStream();
+		startTradeStream();
+		ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+		schedulerRef.set(scheduler);
+		ScheduledFuture<?> tickTask = scheduler.scheduleWithFixedDelay(this::computeSignals,
+				0,
+				strategyProperties.tickIntervalMs(),
+				TimeUnit.MILLISECONDS);
+		ScheduledFuture<?> spreadTask = scheduler.scheduleWithFixedDelay(this::refreshFuturesSpread,
+				0,
+				strategyProperties.pollIntervalMs(),
+				TimeUnit.MILLISECONDS);
+		tickTaskRef.set(tickTask);
+		spreadTaskRef.set(spreadTask);
+	}
+
+	@Override
+	public void stop() {
+		if (!running.compareAndSet(true, false)) {
+			return;
+		}
+		ScheduledFuture<?> tickTask = tickTaskRef.getAndSet(null);
+		if (tickTask != null) {
+			tickTask.cancel(true);
+		}
+		ScheduledFuture<?> spreadTask = spreadTaskRef.getAndSet(null);
+		if (spreadTask != null) {
+			spreadTask.cancel(true);
+		}
+		ScheduledExecutorService scheduler = schedulerRef.getAndSet(null);
+		if (scheduler != null) {
+			scheduler.shutdownNow();
+		}
+		Disposable depthSubscription = depthSubscriptionRef.getAndSet(null);
+		if (depthSubscription != null) {
+			depthSubscription.dispose();
+		}
+		Disposable tradeSubscription = tradeSubscriptionRef.getAndSet(null);
+		if (tradeSubscription != null) {
+			tradeSubscription.dispose();
+		}
+	}
+
 	public void computeSignals() {
 		if (!depthSynced.get()) {
 			return;
@@ -215,7 +268,6 @@ public class EtcEthDepthStrategyWatcher {
 		}
 	}
 
-	@Scheduled(fixedDelayString = "${strategy.poll-interval-ms:2000}")
 	public void refreshFuturesSpread() {
 		marketClient.fetchFuturesBookTicker(strategyProperties.tradeSymbol())
 				.doOnNext(this::updateSpread)
@@ -237,23 +289,25 @@ public class EtcEthDepthStrategyWatcher {
 	private void startDepthStream() {
 		String symbol = strategyProperties.referenceSymbol().toLowerCase();
 		URI uri = URI.create("wss://stream.binance.com:9443/ws/" + symbol + "@depth@100ms");
-		webSocketClient.execute(uri, session -> session.receive()
+		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
 				.map(message -> message.getPayloadAsText())
 				.doOnNext(this::handleDepthMessage)
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
 				.subscribe();
+		depthSubscriptionRef.set(subscription);
 	}
 
 	private void startTradeStream() {
 		String symbol = strategyProperties.referenceSymbol().toLowerCase();
 		URI uri = URI.create("wss://stream.binance.com:9443/ws/" + symbol + "@trade");
-		webSocketClient.execute(uri, session -> session.receive()
+		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
 				.map(message -> message.getPayloadAsText())
 				.doOnNext(this::handleTradeMessage)
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
 				.subscribe();
+		tradeSubscriptionRef.set(subscription);
 	}
 
 	private void handleDepthMessage(String payload) {
