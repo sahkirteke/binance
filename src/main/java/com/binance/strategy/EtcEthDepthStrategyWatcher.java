@@ -78,6 +78,7 @@ public class EtcEthDepthStrategyWatcher {
 	private final AtomicReference<BigDecimal> latestFuturesMid = new AtomicReference<>();
 	private final AtomicInteger consecutiveLosses = new AtomicInteger(0);
 	private final AtomicReference<BigDecimal> dailyLoss = new AtomicReference<>(BigDecimal.ZERO);
+	private final AtomicReference<BigDecimal> totalPnl = new AtomicReference<>(BigDecimal.ZERO);
 	private final AtomicReference<LocalDate> lossDay = new AtomicReference<>(LocalDate.now());
 	private final AtomicBoolean tradingLock = new AtomicBoolean(false);
 	private final AtomicBoolean pendingOpen = new AtomicBoolean(false);
@@ -670,6 +671,8 @@ public class EtcEthDepthStrategyWatcher {
 		} else {
 			pnl = entry.subtract(exitPrice).multiply(quantity);
 		}
+		BigDecimal total = totalPnl.updateAndGet(current -> current.add(pnl));
+		LOGGER.info("PnL closed: direction={}, pnl={}, totalPnl={}", direction, pnl, total);
 		LocalDate today = LocalDate.now();
 		if (!today.equals(lossDay.get())) {
 			lossDay.set(today);
