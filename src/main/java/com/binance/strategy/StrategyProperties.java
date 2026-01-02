@@ -6,12 +6,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 
 @Validated
 @ConfigurationProperties(prefix = "strategy")
 public record StrategyProperties(
-		StrategyType active,
+		@NotNull StrategyType type,
 		@NotBlank String referenceSymbol,
 		@NotBlank String tradeSymbol,
 		@Positive int depthLimit,
@@ -19,6 +20,7 @@ public record StrategyProperties(
 		int leverage,
 		String positionSide,
 		boolean enableOrders,
+		@Positive int pollIntervalMs,
 		int tickIntervalMs,
 		int rollingWindowMs,
 		int depthLevels,
