@@ -48,6 +48,10 @@ public class StartupOrderSmokeTest {
 						LOGGER.warn("Startup test order skipped: invalid quantity for {}", symbol);
 						return Mono.empty();
 					}
+					LOGGER.info("Startup test order: symbol={}, quantity={}, step={}",
+							symbol,
+							quantity,
+							strategyProperties.quantityStep());
 					return orderClient.fetchHedgeModeEnabled()
 							.flatMap(hedgeMode -> openAndClose(symbol, quantity, hedgeMode));
 				})

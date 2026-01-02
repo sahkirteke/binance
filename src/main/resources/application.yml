@@ -52,7 +52,7 @@ strategy:
   position-notional-usdt: 200
   stop-loss-bps: 18
   take-profit-bps: 22
-  quantity-step: 0.001
+  quantity-step: 1
   price-tick: 0.01
   max-daily-loss-usdt: 100
   max-consecutive-losses: 3
