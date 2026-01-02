@@ -168,6 +168,9 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 	}
 
 	public void computeSignals() {
+		if (!isActive()) {
+			return;
+		}
 		if (!depthSynced.get()) {
 			return;
 		}
@@ -269,6 +272,9 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 	}
 
 	public void refreshFuturesSpread() {
+		if (!isActive()) {
+			return;
+		}
 		marketClient.fetchFuturesBookTicker(strategyProperties.tradeSymbol())
 				.doOnNext(this::updateSpread)
 				.doOnError(error -> LOGGER.warn("Failed to fetch futures book ticker", error))
@@ -1005,6 +1011,10 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 			return tick;
 		}
 		return BigDecimal.ZERO;
+	}
+
+	private boolean isActive() {
+		return strategyProperties.active() == StrategyType.ETC_ETH_DEPTH;
 	}
 
 	private void resyncOrderBook(String reason) {
