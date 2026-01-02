@@ -33,6 +33,7 @@ public record StrategyProperties(
 		BigDecimal cancelMaxLong,
 		BigDecimal cancelMaxShort,
 		int persistMs,
+		long exitPersistMs,
 		int cooldownMs,
 		BigDecimal maxSpreadBps,
 		BigDecimal positionNotionalUsdt,

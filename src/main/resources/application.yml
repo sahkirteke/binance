@@ -44,6 +44,7 @@ strategy:
   cancel-max-long: 0.85
   cancel-max-short: 0.90
   persist-ms: 180
+  exit-persist-ms: 450
   cooldown-ms: 650
   max-spread-bps: 10
   position-notional-usdt: 50

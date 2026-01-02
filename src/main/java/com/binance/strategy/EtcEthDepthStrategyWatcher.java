@@ -175,8 +175,8 @@ public class EtcEthDepthStrategyWatcher {
 			if (exitSinceLong.get() == 0) {
 				exitSinceLong.set(now);
 			}
-			if (now - exitSinceLong.get() < strategyProperties.persistMs()) {
-				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.persistMs());
+			if (now - exitSinceLong.get() < strategyProperties.exitPersistMs()) {
+				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.exitPersistMs());
 				return;
 			}
 			long entryTs = entryTimestamp.get();
@@ -197,8 +197,8 @@ public class EtcEthDepthStrategyWatcher {
 			if (exitSinceShort.get() == 0) {
 				exitSinceShort.set(now);
 			}
-			if (now - exitSinceShort.get() < strategyProperties.persistMs()) {
-				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.persistMs());
+			if (now - exitSinceShort.get() < strategyProperties.exitPersistMs()) {
+				LOGGER.info("Skip exit: exit signal not persistent ({}ms)", strategyProperties.exitPersistMs());
 				return;
 			}
 			long entryTs = entryTimestamp.get();
