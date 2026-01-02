@@ -32,12 +32,11 @@ import com.binance.strategy.LocalOrderBook.DepthDelta;
 import com.binance.strategy.LocalOrderBook.OrderBookView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import jakarta.annotation.PostConstruct;
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
 
 @Component
-public class EtcEthDepthStrategyWatcher {
+public class EtcEthDepthStrategyWatcher implements StrategyRunner {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(EtcEthDepthStrategyWatcher.class);
 	private static final BigDecimal EPSILON = new BigDecimal("0.00000001");
@@ -107,14 +106,26 @@ public class EtcEthDepthStrategyWatcher {
 		this.cancelRatioEwma = new Ewma(new BigDecimal("0.3"));
 	}
 
-	@PostConstruct
-	public void startStreams() {
+	@Override
+	public StrategyType type() {
+		return StrategyType.ETC_ETH_DEPTH;
+	}
+
+	@Override
+	public void start() {
+		if (!isActive()) {
+			LOGGER.warn("Strategy {} is not active. Skipping stream startup.", type());
+			return;
+		}
 		startDepthStream();
 		startTradeStream();
 	}
 
 	@Scheduled(fixedDelayString = "${strategy.tick-interval-ms:200}")
 	public void computeSignals() {
+		if (!isActive()) {
+			return;
+		}
 		if (!depthSynced.get()) {
 			return;
 		}
@@ -217,10 +228,17 @@ public class EtcEthDepthStrategyWatcher {
 
 	@Scheduled(fixedDelayString = "${strategy.poll-interval-ms:2000}")
 	public void refreshFuturesSpread() {
+		if (!isActive()) {
+			return;
+		}
 		marketClient.fetchFuturesBookTicker(strategyProperties.tradeSymbol())
 				.doOnNext(this::updateSpread)
 				.doOnError(error -> LOGGER.warn("Failed to fetch futures book ticker", error))
 				.subscribe();
+	}
+
+	private boolean isActive() {
+		return strategyProperties.active() == type();
 	}
 
 	private void updateSpread(BookTickerResponse ticker) {
