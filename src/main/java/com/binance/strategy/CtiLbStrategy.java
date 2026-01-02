@@ -94,7 +94,7 @@ public class CtiLbStrategy {
 		return orderClient.placeMarketOrder(strategyProperties.tradeSymbol(), side, quantity, positionSide);
 	}
 
-	private BigDecimal resolveQuantity(double close) {
+	BigDecimal resolveQuantity(double close) {
 		BigDecimal notional = strategyProperties.positionNotionalUsdt();
 		if (notional != null && notional.signum() > 0 && close > 0) {
 			BigDecimal price = BigDecimal.valueOf(close);

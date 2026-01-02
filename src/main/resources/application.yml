@@ -29,6 +29,7 @@ strategy:
   leverage: 2
   position-side: LONG
   enable-orders: true
+  startup-test-order-enabled: true
   poll-interval-ms: 500
   tick-interval-ms: 100
   rolling-window-ms: 800
