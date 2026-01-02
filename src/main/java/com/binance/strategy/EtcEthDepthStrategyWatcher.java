@@ -379,16 +379,20 @@ public class EtcEthDepthStrategyWatcher {
 		if (obi == null || toi == null || cancelRatio == null) {
 			return Direction.NONE;
 		}
-		BigDecimal obiThreshold = strategyProperties.obiEntry().multiply(new BigDecimal("0.90"));
-		BigDecimal toiThreshold = strategyProperties.toiMin().multiply(new BigDecimal("0.85"));
-		BigDecimal cancelMax = strategyProperties.cancelMax();
-		boolean obiOkLong = obi.compareTo(obiThreshold) > 0;
-		boolean toiOkLong = toi.compareTo(toiThreshold) > 0;
-		boolean obiOkShort = obi.compareTo(obiThreshold.negate()) < 0;
-		boolean toiOkShort = toi.compareTo(toiThreshold.negate()) < 0;
-		boolean cancelOk = cancelRatio.compareTo(cancelMax) < 0;
-		boolean longCandidate = obiOkLong && toiOkLong && cancelOk;
-		boolean shortCandidate = obiOkShort && toiOkShort && cancelOk;
+		BigDecimal obiThresholdLong = strategyProperties.obiEntryLong();
+		BigDecimal obiThresholdShort = strategyProperties.obiEntryShort();
+		BigDecimal toiThresholdLong = strategyProperties.toiMinLong();
+		BigDecimal toiThresholdShort = strategyProperties.toiMinShort();
+		BigDecimal cancelMaxLong = strategyProperties.cancelMaxLong();
+		BigDecimal cancelMaxShort = strategyProperties.cancelMaxShort();
+		boolean obiOkLong = obi.compareTo(obiThresholdLong) > 0;
+		boolean toiOkLong = toi.compareTo(toiThresholdLong) > 0;
+		boolean obiOkShort = obi.compareTo(obiThresholdShort.negate()) < 0;
+		boolean toiOkShort = toi.compareTo(toiThresholdShort.negate()) < 0;
+		boolean cancelOkLong = cancelRatio.compareTo(cancelMaxLong) < 0;
+		boolean cancelOkShort = cancelRatio.compareTo(cancelMaxShort) < 0;
+		boolean longCandidate = obiOkLong && toiOkLong && cancelOkLong;
+		boolean shortCandidate = obiOkShort && toiOkShort && cancelOkShort;
 		if (longCandidate) {
 			return Direction.LONG;
 		}
@@ -396,13 +400,16 @@ public class EtcEthDepthStrategyWatcher {
 			return Direction.SHORT;
 		}
 		if (!obiOkLong && !obiOkShort) {
-			LOGGER.info("Gate fail: OBI value={}, threshold={}", obi, obiThreshold);
+			LOGGER.info("Gate fail: OBI value={}, thresholdLong={}, thresholdShort={}", obi, obiThresholdLong,
+					obiThresholdShort);
 		}
 		if (!toiOkLong && !toiOkShort) {
-			LOGGER.info("Gate fail: TOI value={}, threshold={}", toi, toiThreshold);
+			LOGGER.info("Gate fail: TOI value={}, thresholdLong={}, thresholdShort={}", toi, toiThresholdLong,
+					toiThresholdShort);
 		}
-		if (!cancelOk) {
-			LOGGER.info("Gate fail: CANCEL value={}, max={}", cancelRatio, cancelMax);
+		if (!cancelOkLong && !cancelOkShort) {
+			LOGGER.info("Gate fail: CANCEL value={}, maxLong={}, maxShort={}", cancelRatio, cancelMaxLong,
+					cancelMaxShort);
 		}
 		return Direction.NONE;
 	}
