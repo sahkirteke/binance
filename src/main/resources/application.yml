@@ -47,7 +47,7 @@ strategy:
   exit-persist-ms: 450
   cooldown-ms: 650
   max-spread-bps: 10
-  position-notional-usdt: 50
+  position-notional-usdt: 1
   stop-loss-bps: 18
   take-profit-bps: 22
   quantity-step: 0.001
