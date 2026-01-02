@@ -575,6 +575,24 @@ public class EtcEthDepthStrategyWatcher {
 		}
 		BigDecimal stopPrice = stopPrice(entry, direction);
 		BigDecimal takeProfit = takeProfitPrice(entry, direction);
+		BigDecimal tick = strategyProperties.priceTick();
+		if (tick != null && tick.signum() > 0) {
+			if (direction == Direction.LONG) {
+				if (stopPrice.compareTo(entry) >= 0) {
+					stopPrice = clampToPriceTick(entry.subtract(tick));
+				}
+				if (takeProfit.compareTo(entry) <= 0) {
+					takeProfit = clampToPriceTick(entry.add(tick));
+				}
+			} else {
+				if (stopPrice.compareTo(entry) <= 0) {
+					stopPrice = clampToPriceTick(entry.add(tick));
+				}
+				if (takeProfit.compareTo(entry) >= 0) {
+					takeProfit = clampToPriceTick(entry.subtract(tick));
+				}
+			}
+		}
 		return orderClient.placeStopMarketOrder(strategyProperties.tradeSymbol(),
 				direction == Direction.LONG ? "SELL" : "BUY",
 				quantity,
