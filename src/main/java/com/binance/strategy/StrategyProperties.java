@@ -11,6 +11,7 @@ import jakarta.validation.constraints.Positive;
 @Validated
 @ConfigurationProperties(prefix = "strategy")
 public record StrategyProperties(
+		StrategyType active,
 		@NotBlank String referenceSymbol,
 		@NotBlank String tradeSymbol,
 		@Positive int depthLimit,
