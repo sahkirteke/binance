@@ -392,6 +392,7 @@ public class EtcEthDepthStrategyWatcher {
 		boolean toiOkShort = toi.compareTo(toiThresholdShort.negate()) < 0;
 		boolean cancelOkLong = cancelRatio.compareTo(cancelMaxLong) < 0;
 		boolean cancelOkShort = cancelRatio.compareTo(cancelMaxShort) < 0;
+		boolean cancelOk = cancelOkLong || cancelOkShort;
 		boolean longCandidate = obiOkLong && toiOkLong && cancelOkLong;
 		boolean shortCandidate = obiOkShort && toiOkShort && cancelOkShort;
 		if (longCandidate) {
@@ -408,7 +409,7 @@ public class EtcEthDepthStrategyWatcher {
 			LOGGER.info("Gate fail: TOI value={}, thresholdLong={}, thresholdShort={}", toi, toiThresholdLong,
 					toiThresholdShort);
 		}
-		if (!cancelOkLong && !cancelOkShort) {
+		if (!cancelOk) {
 			LOGGER.info("Gate fail: CANCEL value={}, maxLong={}, maxShort={}", cancelRatio, cancelMaxLong,
 					cancelMaxShort);
 		}
