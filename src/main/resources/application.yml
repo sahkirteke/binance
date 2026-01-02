@@ -25,7 +25,7 @@ strategy:
   trade-symbol: ETHUSDT
   depth-limit: 50
   market-quantity: 0.01
-  leverage: 10
+  leverage: 75
   position-side: LONG
   enable-orders: true
   poll-interval-ms: 500
@@ -47,7 +47,7 @@ strategy:
   exit-persist-ms: 450
   cooldown-ms: 650
   max-spread-bps: 10
-  position-notional-usdt: 1
+  position-notional-usdt: 100
   stop-loss-bps: 18
   take-profit-bps: 22
   quantity-step: 0.001
