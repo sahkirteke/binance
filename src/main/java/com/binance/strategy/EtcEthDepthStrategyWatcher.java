@@ -514,7 +514,7 @@ public class EtcEthDepthStrategyWatcher {
 	private Mono<ProtectionOrders> placeProtectionOrders(OrderResponse response, Direction direction, BigDecimal quantity,
 			boolean hedgeMode) {
 		BigDecimal entry = response.avgPrice();
-		if (entry == null) {
+		if (entry == null || entry.signum() <= 0) {
 			return Mono.just(new ProtectionOrders(response, null, null));
 		}
 		BigDecimal stopPrice = stopPrice(entry, direction);
@@ -744,21 +744,21 @@ public class EtcEthDepthStrategyWatcher {
 	private BigDecimal stopPrice(BigDecimal entry, Direction direction) {
 		BigDecimal bps = strategyProperties.stopLossBps().divide(new BigDecimal("10000"), MathContext.DECIMAL64);
 		if (direction == Direction.LONG) {
-			return roundDownToStep(entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-					strategyProperties.priceTick());
+			BigDecimal price = entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+			return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 		}
-		return roundDownToStep(entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-				strategyProperties.priceTick());
+		BigDecimal price = entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+		return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 	}
 
 	private BigDecimal takeProfitPrice(BigDecimal entry, Direction direction) {
 		BigDecimal bps = strategyProperties.takeProfitBps().divide(new BigDecimal("10000"), MathContext.DECIMAL64);
 		if (direction == Direction.LONG) {
-			return roundDownToStep(entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-					strategyProperties.priceTick());
+			BigDecimal price = entry.multiply(BigDecimal.ONE.add(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+			return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 		}
-		return roundDownToStep(entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64),
-				strategyProperties.priceTick());
+		BigDecimal price = entry.multiply(BigDecimal.ONE.subtract(bps, MathContext.DECIMAL64), MathContext.DECIMAL64);
+		return clampToPriceTick(roundDownToStep(price, strategyProperties.priceTick()));
 	}
 
 	private BigDecimal roundDownToStep(BigDecimal value, BigDecimal step) {
@@ -767,6 +767,20 @@ public class EtcEthDepthStrategyWatcher {
 		}
 		BigDecimal ratio = value.divide(step, 0, java.math.RoundingMode.DOWN);
 		return ratio.multiply(step, MathContext.DECIMAL64);
+	}
+
+	private BigDecimal clampToPriceTick(BigDecimal value) {
+		BigDecimal tick = strategyProperties.priceTick();
+		if (value == null) {
+			return null;
+		}
+		if (value.signum() > 0) {
+			return value;
+		}
+		if (tick != null && tick.signum() > 0) {
+			return tick;
+		}
+		return BigDecimal.ZERO;
 	}
 
 	private void resyncOrderBook(String reason) {
