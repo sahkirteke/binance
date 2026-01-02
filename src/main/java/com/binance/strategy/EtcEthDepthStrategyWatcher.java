@@ -281,6 +281,10 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 				.subscribe();
 	}
 
+	private boolean isActive() {
+		return strategyProperties.active() == type();
+	}
+
 	private void updateSpread(BookTickerResponse ticker) {
 		if (ticker == null || ticker.bidPrice() == null || ticker.askPrice() == null) {
 			return;
