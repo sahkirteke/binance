@@ -28,6 +28,7 @@ strategy:
     - 1INCHUSDT
     - ETCUSDT
     - HOTUSDT
+    - MANAUSDT
   depth-limit: 50
   market-quantity: 0.01
   leverage: 2
