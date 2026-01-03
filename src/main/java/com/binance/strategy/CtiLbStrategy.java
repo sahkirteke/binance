@@ -98,7 +98,8 @@ public class CtiLbStrategy {
 						.then()
 				: executeFlip(symbol, target, close);
 
-		execution.doOnError(error -> LOGGER.warn("Failed to execute CTI LB action {}: {}", action, error.getMessage()))
+		SignalAction actionForLog = action;
+		execution.doOnError(error -> LOGGER.warn("Failed to execute CTI LB action {}: {}", actionForLog, error.getMessage()))
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
 	}
