@@ -8,12 +8,13 @@ class CtiScoreLogicTest {
 
 	@Test
 	void computesAdjustedScoreAndRecommendation() {
-		assertResult(2, 21.0, 3.0, CtiDirection.LONG);
-		assertResult(1, 21.0, 2.0, CtiDirection.LONG);
-		assertResult(1, 20.0, 1.0, CtiDirection.NEUTRAL);
-		assertResult(-1, 21.0, -2.0, CtiDirection.SHORT);
-		assertResult(-2, 21.0, -3.0, CtiDirection.SHORT);
-		assertResult(0, 21.0, 0.0, CtiDirection.NEUTRAL);
+		CtiScoreCalculator calculator = new CtiScoreCalculator();
+		assertResult(calculator, 2, 21.0, 3.0, CtiDirection.LONG);
+		assertResult(calculator, 1, 21.0, 2.0, CtiDirection.LONG);
+		assertResult(calculator, 1, 20.0, 1.0, CtiDirection.NEUTRAL);
+		assertResult(calculator, -1, 21.0, -2.0, CtiDirection.SHORT);
+		assertResult(calculator, -2, 21.0, -3.0, CtiDirection.SHORT);
+		assertResult(calculator, 0, 21.0, 0.0, CtiDirection.NEUTRAL);
 	}
 
 	@Test
@@ -30,8 +31,23 @@ class CtiScoreLogicTest {
 		assertEquals(CtiDirection.LONG, confirmedSecond);
 	}
 
-	private void assertResult(int hamScore, double adx, double expectedAdj, CtiDirection expectedRec) {
-		CtiScoreCalculator.ScoreResult result = CtiScoreCalculator.calculate(hamScore, adx);
+	@Test
+	void indicatorsAreIsolatedPerSymbolAndTimeframe() {
+		CtiScoreCalculator calculator = new CtiScoreCalculator();
+		TrendSignal adaFirst = calculator.updateCti("ADAUSDT", "1m", 100.0, 1000L);
+		calculator.updateCti("XRPUSDT", "1m", 200.0, 1000L);
+		TrendSignal adaSecond = calculator.updateCti("ADAUSDT", "1m", 101.0, 2000L);
+		assertEquals(adaFirst.bfr(), adaSecond.bfrPrev());
+	}
+
+	private void assertResult(CtiScoreCalculator calculator, int hamScore, double adx, double expectedAdj,
+			CtiDirection expectedRec) {
+		CtiScoreCalculator.ScoreResult result = calculator.calculate(
+				hamScore,
+				adx,
+				true,
+				true,
+				CtiDirection.NEUTRAL);
 		assertEquals(expectedAdj, result.adjustedScore());
 		assertEquals(expectedRec, result.recommendation());
 	}

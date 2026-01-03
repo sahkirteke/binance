@@ -14,6 +14,7 @@ public class StrategyRouter {
 
 	private final StrategyProperties strategyProperties;
 	private final CtiLbStrategy ctiLbStrategy;
+	private final CtiScoreCalculator scoreCalculator = new CtiScoreCalculator();
 	private final Map<String, ScoreSignalIndicator> indicators = new ConcurrentHashMap<>();
 
 	public StrategyRouter(StrategyProperties strategyProperties,
@@ -30,7 +31,7 @@ public class StrategyRouter {
 			return;
 		}
 		ScoreSignalIndicator indicator = indicators.computeIfAbsent(symbol,
-				ignored -> new ScoreSignalIndicator());
+				ignored -> new ScoreSignalIndicator(symbol, scoreCalculator));
 		ScoreSignal signal = indicator.onClosedCandle(candle);
 		ctiLbStrategy.onScoreSignal(symbol, signal, candle.close());
 	}

@@ -166,7 +166,7 @@ public class CtiLbStrategy {
 	private void logDecision(String symbol, ScoreSignal signal, double close, SignalAction action,
 			int confirm1m, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate) {
 		logSummaryIfNeeded(signal.closeTime());
-		String decisionAction = resolveDecisionAction(action);
+		String decisionAction = recUpdate.missedMove() ? "RESET_PENDING" : resolveDecisionAction(action);
 		DecisionLogDto dto = new DecisionLogDto(
 				symbol,
 				signal.closeTime(),
@@ -174,15 +174,18 @@ public class CtiLbStrategy {
 				signal.cti1mValue(),
 				signal.cti5mValue(),
 				signal.adx5m(),
-				signal.adxBonus() == 1,
+				signal.adxGate(),
+				signal.adxGateReason(),
+				signal.adxReady(),
 				scoreLong(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
 				scoreShort(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
 				signal.adjustedScore(),
-				resolveBias(signal.hamCtiScore()),
+				signal.bias(),
 				signal.recommendation(),
 				confirm1m,
 				strategyProperties.confirmBars(),
-				signal.recommendation(),
+				recommendationForLog(confirmedRec),
+				signal.recReason().name(),
 				recUpdate.recPending(),
 				recUpdate.recFirstSeenAtMs(),
 				recUpdate.recFirstSeenPrice(),
@@ -281,7 +284,7 @@ public class CtiLbStrategy {
 				signal.cti1mValue(),
 				signal.cti5mValue(),
 				signal.adx5m(),
-				resolveDecisionAction(action),
+				resolveFlipAction(to),
 				formatPositionSide(from),
 				BigDecimal.ZERO,
 				strategyProperties.enableOrders(),
@@ -340,16 +343,6 @@ public class CtiLbStrategy {
 		return "HOLD";
 	}
 
-	private CtiDirection resolveBias(int hamScore) {
-		if (hamScore > 0) {
-			return CtiDirection.LONG;
-		}
-		if (hamScore < 0) {
-			return CtiDirection.SHORT;
-		}
-		return CtiDirection.NEUTRAL;
-	}
-
 	private int scoreLong(int score1m, int score5m, int adxBonus, int hamScore) {
 		int longScore = (score1m > 0 ? 1 : 0) + (score5m > 0 ? 1 : 0);
 		if (hamScore > 0) {
@@ -364,6 +357,10 @@ public class CtiLbStrategy {
 			shortScore += adxBonus;
 		}
 		return shortScore;
+	}
+
+	private String resolveFlipAction(PositionState target) {
+		return target == PositionState.LONG ? "FLIP_TO_LONG" : "FLIP_TO_SHORT";
 	}
 
 	private enum PositionState {
