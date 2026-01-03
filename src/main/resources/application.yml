@@ -22,10 +22,12 @@ binance:
 
 strategy:
   active: CTI_LB
-  reference-symbol: MANAUSDT
-  trade-symbol: MANAUSDT
+  reference-symbol: 1INCHUSDT
+  trade-symbol: 1INCHUSDT
   trade-symbols:
-    - MANAUSDT
+    - 1INCHUSDT
+    - ETCUSDT
+    - HOTUSDT
   depth-limit: 50
   market-quantity: 0.01
   leverage: 2
