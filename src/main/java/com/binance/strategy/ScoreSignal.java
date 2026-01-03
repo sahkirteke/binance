@@ -1,5 +1,7 @@
 package com.binance.strategy;
 
+import com.binance.strategy.CtiScoreCalculator.RecReason;
+
 	public record ScoreSignal(
 			CtiDirection cti1mDir,
 			CtiDirection cti5mDir,
@@ -16,7 +18,7 @@ package com.binance.strategy;
 			double adjustedScore,
 			CtiDirection recommendation,
 			CtiDirection bias,
-			CtiScoreCalculator.RecReason recReason,
+			RecReason recReason,
 			boolean adxGate,
 			boolean adxReady,
 			String adxGateReason,
