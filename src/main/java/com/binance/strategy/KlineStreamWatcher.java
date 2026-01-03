@@ -1,6 +1,7 @@
 package com.binance.strategy;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -32,6 +33,7 @@ public class KlineStreamWatcher {
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
+	private final AtomicReference<List<Disposable>> testnetSubscriptionsRef = new AtomicReference<>();
 
 	public KlineStreamWatcher(BinanceProperties binanceProperties,
 			StrategyProperties strategyProperties,
@@ -49,23 +51,11 @@ public class KlineStreamWatcher {
 			LOGGER.info("Kline stream not started (active={})", strategyProperties.active());
 			return;
 		}
-		List<String> streams = strategyProperties.resolvedTradeSymbols().stream()
-				.map(String::toLowerCase)
-				.map(symbol -> symbol + "@kline_" + KLINE_INTERVAL)
-				.toList();
-		String streamPath = streams.stream().collect(Collectors.joining("/"));
-		String streamBaseUrl = binanceProperties.useTestnet()
-				? "wss://stream.binancefuture.com/stream?streams="
-				: "wss://fstream.binance.com/stream?streams=";
-		URI uri = URI.create(streamBaseUrl + streamPath);
-		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
-				.map(message -> message.getPayloadAsText())
-				.doOnNext(this::handleKlineMessage)
-				.then())
-				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
-				.subscribe();
-		subscriptionRef.set(subscription);
-		LOGGER.info("Kline combined stream started for {} interval {}", streams, KLINE_INTERVAL);
+		if (binanceProperties.useTestnet()) {
+			startTestnetStreams();
+		} else {
+			startCombinedStream();
+		}
 	}
 
 	@PreDestroy
@@ -73,6 +63,10 @@ public class KlineStreamWatcher {
 		Disposable subscription = subscriptionRef.getAndSet(null);
 		if (subscription != null) {
 			subscription.dispose();
+		}
+		List<Disposable> subscriptions = testnetSubscriptionsRef.getAndSet(null);
+		if (subscriptions != null) {
+			subscriptions.forEach(Disposable::dispose);
 		}
 	}
 
@@ -90,6 +84,42 @@ public class KlineStreamWatcher {
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse kline message", ex);
 		}
+	}
+
+	private void startCombinedStream() {
+		List<String> streams = strategyProperties.resolvedTradeSymbols().stream()
+				.map(String::toLowerCase)
+				.map(symbol -> symbol + "@kline_" + KLINE_INTERVAL)
+				.toList();
+		String streamPath = streams.stream().collect(Collectors.joining("/"));
+		String streamBaseUrl = "wss://fstream.binance.com/stream?streams=";
+		URI uri = URI.create(streamBaseUrl + streamPath);
+		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
+				.map(message -> message.getPayloadAsText())
+				.doOnNext(this::handleKlineMessage)
+				.then())
+				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
+				.subscribe();
+		subscriptionRef.set(subscription);
+		LOGGER.info("Kline combined stream started for {} interval {}", streams, KLINE_INTERVAL);
+	}
+
+	private void startTestnetStreams() {
+		String baseUrl = "wss://stream.binancefuture.com/ws/";
+		List<Disposable> subscriptions = new ArrayList<>();
+		for (String symbol : strategyProperties.resolvedTradeSymbols()) {
+			String lowerSymbol = symbol.toLowerCase();
+			URI uri = URI.create(baseUrl + lowerSymbol + "@kline_" + KLINE_INTERVAL);
+			Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
+					.map(message -> message.getPayloadAsText())
+					.doOnNext(this::handleKlineMessage)
+					.then())
+					.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
+					.subscribe();
+			subscriptions.add(subscription);
+			LOGGER.info("Kline stream started for {} interval {}", lowerSymbol, KLINE_INTERVAL);
+		}
+		testnetSubscriptionsRef.set(subscriptions);
 	}
 
 	private KlineEvent parseKlineEvent(String payload) throws Exception {
