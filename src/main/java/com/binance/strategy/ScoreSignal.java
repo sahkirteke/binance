@@ -22,6 +22,7 @@ import com.binance.strategy.CtiScoreCalculator.RecReason;
 			boolean adxGate,
 			boolean adxReady,
 			String adxGateReason,
+			boolean cti5mReady,
 			long t5mCloseUsed,
 			long closeTime,
 			boolean insufficientData) {

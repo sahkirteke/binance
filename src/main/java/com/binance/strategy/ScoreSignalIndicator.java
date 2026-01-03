@@ -78,6 +78,7 @@ public class ScoreSignalIndicator {
 				scoreResult.adxGate(),
 				scoreResult.adxReady(),
 				scoreResult.adxGateReason(),
+				has5mCti,
 				last5mCloseTime,
 				candle.closeTime(),
 				!ready);

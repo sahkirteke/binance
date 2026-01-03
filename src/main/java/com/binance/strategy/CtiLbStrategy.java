@@ -52,10 +52,10 @@ public class CtiLbStrategy {
 			return;
 		}
 
-		CtiDirection recommendation = signal.insufficientData() ? CtiDirection.NEUTRAL : signal.recommendation();
+		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : signal.recommendation();
 		RecStreakTracker tracker = recTrackers.computeIfAbsent(symbol, ignored -> new RecStreakTracker());
 		RecStreakTracker.RecUpdate recUpdate = tracker.update(
-				recommendation,
+				recommendationUsed,
 				signal.closeTime(),
 				BigDecimal.valueOf(close),
 				strategyProperties.confirmBars());
@@ -76,7 +76,7 @@ public class CtiLbStrategy {
 
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 		action = resolveAction(current, confirmedRec);
-		logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate);
+		logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed);
 
 		if (action == SignalAction.HOLD) {
 			return;
@@ -85,7 +85,7 @@ public class CtiLbStrategy {
 		PositionState target = confirmedRec == CtiDirection.LONG ? PositionState.LONG : PositionState.SHORT;
 		if (action != SignalAction.HOLD) {
 			flipCount.increment();
-			logFlip(symbol, current, target, signal, close, recommendation, confirmedRec, action);
+			logFlip(symbol, current, target, signal, close, recommendationUsed, confirmedRec, action);
 		}
 
 		if (!strategyProperties.enableOrders()) {
@@ -164,9 +164,11 @@ public class CtiLbStrategy {
 	}
 
 	private void logDecision(String symbol, ScoreSignal signal, double close, SignalAction action,
-			int confirm1m, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate) {
+			int confirm1m, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate,
+			CtiDirection recommendationUsed) {
 		logSummaryIfNeeded(signal.closeTime());
 		String decisionAction = recUpdate.missedMove() ? "RESET_PENDING" : resolveDecisionAction(action);
+		String insufficientReason = resolveInsufficientReason(signal);
 		DecisionLogDto dto = new DecisionLogDto(
 				symbol,
 				signal.closeTime(),
@@ -179,9 +181,17 @@ public class CtiLbStrategy {
 				signal.adxReady(),
 				scoreLong(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
 				scoreShort(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
+				signal.score1m(),
+				signal.score5m(),
+				signal.hamCtiScore(),
+				signal.adxBonus(),
 				signal.adjustedScore(),
 				signal.bias(),
 				signal.recommendation(),
+				signal.recommendation(),
+				recommendationUsed,
+				signal.insufficientData(),
+				insufficientReason,
 				confirm1m,
 				strategyProperties.confirmBars(),
 				confirmedRec,
@@ -341,6 +351,16 @@ public class CtiLbStrategy {
 			return "FLIP_TO_SHORT";
 		}
 		return "HOLD";
+	}
+
+	private String resolveInsufficientReason(ScoreSignal signal) {
+		if (!signal.cti5mReady()) {
+			return "CTI5M_NOT_READY";
+		}
+		if (!signal.adxReady()) {
+			return "ADX5M_NOT_READY";
+		}
+		return "OK";
 	}
 
 	private int scoreLong(int score1m, int score5m, int adxBonus, int hamScore) {
