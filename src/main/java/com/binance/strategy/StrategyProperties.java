@@ -26,6 +26,7 @@ public record StrategyProperties(
 		@Positive int pollIntervalMs,
 		int tickIntervalMs,
 		int rollingWindowMs,
+		@Positive int confirmBars,
 		int depthLevels,
 		BigDecimal weightLambda,
 		BigDecimal obiEntry,

@@ -80,7 +80,8 @@ public class KlineStreamWatcher {
 			if (!kline.closed()) {
 				return;
 			}
-			strategyRouter.onClosedCandle(event.symbol(), kline.close(), kline.closeTime());
+			Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.closeTime());
+			strategyRouter.onClosedCandle(event.symbol(), candle);
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse kline message", ex);
 		}

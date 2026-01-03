@@ -2,14 +2,13 @@ package com.binance.exchange;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-
+import java.util.UUID;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import com.binance.config.BinanceProperties;
 import com.binance.exchange.dto.OrderResponse;
-
 import reactor.core.publisher.Mono;
 
 @Component
@@ -32,19 +31,20 @@ public class BinanceFuturesOrderClient {
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
 		long timestamp = Instant.now().toEpochMilli();
+		String clientOrderId = UUID.randomUUID().toString();
 		String payload = String.format(
-				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d",
+				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
 				symbol,
 				side,
 				quantity.toPlainString(),
 				properties.recvWindowMillis(),
-				timestamp);
+				timestamp,
+				clientOrderId);
 		if (positionSide != null && !positionSide.isBlank()) {
 			payload = payload + "&positionSide=" + positionSide;
 		}
 		String signature = signatureUtil.sign(payload, properties.secretKey());
 		String signedPayload = payload + "&signature=" + signature;
-
 		return binanceWebClient
 				.post()
 				.uri(uriBuilder -> uriBuilder
@@ -186,13 +186,15 @@ public class BinanceFuturesOrderClient {
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
 		long timestamp = Instant.now().toEpochMilli();
+		String clientOrderId = UUID.randomUUID().toString();
 		String payload = String.format(
-				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d",
+				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
 				symbol,
 				side,
 				quantity.toPlainString(),
 				properties.recvWindowMillis(),
-				timestamp);
+				timestamp,
+				clientOrderId);
 		if (reduceOnly) {
 			payload = payload + "&reduceOnly=true";
 		}
@@ -210,15 +212,17 @@ public class BinanceFuturesOrderClient {
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
 		long timestamp = Instant.now().toEpochMilli();
+		String clientOrderId = UUID.randomUUID().toString();
 		String payload = String.format(
-				"symbol=%s&side=%s&type=%s&quantity=%s&stopPrice=%s&recvWindow=%d&timestamp=%d",
+				"symbol=%s&side=%s&type=%s&quantity=%s&stopPrice=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
 				symbol,
 				side,
 				type,
 				quantity.toPlainString(),
 				stopPrice.toPlainString(),
 				properties.recvWindowMillis(),
-				timestamp);
+				timestamp,
+				clientOrderId);
 		if (reduceOnly) {
 			payload = payload + "&reduceOnly=true";
 		}

@@ -14,7 +14,7 @@ public class StrategyRouter {
 
 	private final StrategyProperties strategyProperties;
 	private final CtiLbStrategy ctiLbStrategy;
-	private final Map<String, CtiLbTrendIndicator> indicators = new ConcurrentHashMap<>();
+	private final Map<String, ScoreSignalIndicator> indicators = new ConcurrentHashMap<>();
 
 	public StrategyRouter(StrategyProperties strategyProperties,
 			CtiLbStrategy ctiLbStrategy) {
@@ -22,13 +22,16 @@ public class StrategyRouter {
 		this.ctiLbStrategy = ctiLbStrategy;
 	}
 
-	public void onClosedCandle(String symbol, double close, long closeTime) {
+	public void onClosedCandle(String symbol, Candle candle) {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
-			LOGGER.debug("Closed candle ignored (active={}, closeTime={})", strategyProperties.active(), closeTime);
+			LOGGER.debug("Closed candle ignored (active={}, closeTime={})",
+					strategyProperties.active(),
+					candle.closeTime());
 			return;
 		}
-		CtiLbTrendIndicator indicator = indicators.computeIfAbsent(symbol, ignored -> new CtiLbTrendIndicator());
-		TrendSignal signal = indicator.onClosedCandle(close, closeTime);
-		ctiLbStrategy.onTrendSignal(symbol, signal, close);
+		ScoreSignalIndicator indicator = indicators.computeIfAbsent(symbol,
+				ignored -> new ScoreSignalIndicator());
+		ScoreSignal signal = indicator.onClosedCandle(candle);
+		ctiLbStrategy.onScoreSignal(symbol, signal, candle.close());
 	}
 }

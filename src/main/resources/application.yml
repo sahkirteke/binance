@@ -38,6 +38,7 @@ strategy:
   poll-interval-ms: 500
   tick-interval-ms: 100
   rolling-window-ms: 800
+  confirm-bars: 2
   depth-levels: 12
   weight-lambda: 0.25
   obi-entry: 0.055
