@@ -24,6 +24,8 @@ strategy:
   active: CTI_LB
   reference-symbol: MANAUSDT
   trade-symbol: MANAUSDT
+  trade-symbols:
+    - MANAUSDT
   depth-limit: 50
   market-quantity: 0.01
   leverage: 2

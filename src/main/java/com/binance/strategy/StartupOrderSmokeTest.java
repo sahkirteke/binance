@@ -40,24 +40,25 @@ public class StartupOrderSmokeTest {
 		if (!strategyProperties.enableOrders() || !strategyProperties.startupTestOrderEnabled()) {
 			return;
 		}
-		String symbol = strategyProperties.tradeSymbol();
-		marketClient.fetchMarkPrice(symbol)
-				.flatMap(price -> {
-					BigDecimal quantity = ctiLbStrategy.resolveQuantity(price.doubleValue());
-					if (quantity == null || quantity.signum() <= 0) {
-						LOGGER.warn("Startup test order skipped: invalid quantity for {}", symbol);
-						return Mono.empty();
-					}
-					LOGGER.info("Startup test order: symbol={}, quantity={}, step={}",
-							symbol,
-							quantity,
-							strategyProperties.quantityStep());
-					return orderClient.fetchHedgeModeEnabled()
-							.flatMap(hedgeMode -> openAndClose(symbol, quantity, hedgeMode));
-				})
-				.doOnError(error -> LOGGER.warn("Startup test order failed: {}", error.getMessage()))
-				.onErrorResume(error -> Mono.empty())
-				.subscribe();
+		for (String symbol : strategyProperties.resolvedTradeSymbols()) {
+			marketClient.fetchMarkPrice(symbol)
+					.flatMap(price -> {
+						BigDecimal quantity = ctiLbStrategy.resolveQuantity(price.doubleValue());
+						if (quantity == null || quantity.signum() <= 0) {
+							LOGGER.warn("Startup test order skipped: invalid quantity for {}", symbol);
+							return Mono.empty();
+						}
+						LOGGER.info("Startup test order: symbol={}, quantity={}, step={}",
+								symbol,
+								quantity,
+								strategyProperties.quantityStep());
+						return orderClient.fetchHedgeModeEnabled()
+								.flatMap(hedgeMode -> openAndClose(symbol, quantity, hedgeMode));
+					})
+					.doOnError(error -> LOGGER.warn("Startup test order failed: {}", error.getMessage()))
+					.onErrorResume(error -> Mono.empty())
+					.subscribe();
+		}
 	}
 
 	private Mono<Void> openAndClose(String symbol, BigDecimal quantity, boolean hedgeMode) {

@@ -1,5 +1,8 @@
 package com.binance.strategy;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -10,23 +13,22 @@ public class StrategyRouter {
 	private static final Logger LOGGER = LoggerFactory.getLogger(StrategyRouter.class);
 
 	private final StrategyProperties strategyProperties;
-	private final CtiLbTrendIndicator trendIndicator;
 	private final CtiLbStrategy ctiLbStrategy;
+	private final Map<String, CtiLbTrendIndicator> indicators = new ConcurrentHashMap<>();
 
 	public StrategyRouter(StrategyProperties strategyProperties,
-			CtiLbTrendIndicator trendIndicator,
 			CtiLbStrategy ctiLbStrategy) {
 		this.strategyProperties = strategyProperties;
-		this.trendIndicator = trendIndicator;
 		this.ctiLbStrategy = ctiLbStrategy;
 	}
 
-	public void onClosedCandle(double close, long closeTime) {
+	public void onClosedCandle(String symbol, double close, long closeTime) {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			LOGGER.debug("Closed candle ignored (active={}, closeTime={})", strategyProperties.active(), closeTime);
 			return;
 		}
-		TrendSignal signal = trendIndicator.onClosedCandle(close, closeTime);
-		ctiLbStrategy.onTrendSignal(signal, close);
+		CtiLbTrendIndicator indicator = indicators.computeIfAbsent(symbol, ignored -> new CtiLbTrendIndicator());
+		TrendSignal signal = indicator.onClosedCandle(close, closeTime);
+		ctiLbStrategy.onTrendSignal(symbol, signal, close);
 	}
 }

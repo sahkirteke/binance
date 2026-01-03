@@ -3,8 +3,8 @@ package com.binance.strategy;
 import java.math.BigDecimal;
 import java.math.MathContext;
 import java.math.RoundingMode;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,77 +21,77 @@ public class CtiLbStrategy {
 
 	private final BinanceFuturesOrderClient orderClient;
 	private final StrategyProperties strategyProperties;
-	private final AtomicLong lastCloseTime = new AtomicLong(Long.MIN_VALUE);
-	private final AtomicReference<PositionState> positionState = new AtomicReference<>(PositionState.FLAT);
+	private final Map<String, Long> lastCloseTimes = new ConcurrentHashMap<>();
+	private final Map<String, PositionState> positionStates = new ConcurrentHashMap<>();
 
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 	}
 
-	public void onTrendSignal(TrendSignal signal, double close) {
+	public void onTrendSignal(String symbol, TrendSignal signal, double close) {
 		if (signal == null) {
 			return;
 		}
 		String action = "NONE";
 		long closeTime = signal.closeTime();
-		if (closeTime == lastCloseTime.get()) {
+		Long previousCloseTime = lastCloseTimes.put(symbol, closeTime);
+		if (previousCloseTime != null && previousCloseTime == closeTime) {
 			action = "SKIP_DUPLICATE";
-			logSignal(signal, close, action);
+			logSignal(symbol, signal, close, action);
 			return;
 		}
-		lastCloseTime.set(closeTime);
 
 		if (!signal.changed()) {
 			action = "HOLD";
-			logSignal(signal, close, action);
+			logSignal(symbol, signal, close, action);
 			return;
 		}
 
 		if (!strategyProperties.enableOrders()) {
 			action = "DISABLED";
-			logSignal(signal, close, action);
+			logSignal(symbol, signal, close, action);
 			return;
 		}
 
 		Trend trend = signal.trend();
 		PositionState target = trend == Trend.LONG ? PositionState.LONG : PositionState.SHORT;
 		action = "FLIP_TO_" + target;
-		logSignal(signal, close, action);
+		logSignal(symbol, signal, close, action);
 
-		executeFlip(target, close)
+		executeFlip(symbol, target, close)
 				.doOnError(error -> LOGGER.warn("Failed to execute CTI LB flip to {}: {}", target, error.getMessage()))
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
 	}
 
-	private Mono<Void> executeFlip(PositionState target, double close) {
-		PositionState current = positionState.get();
+	private Mono<Void> executeFlip(String symbol, PositionState target, double close) {
+		PositionState current = positionStates.getOrDefault(symbol, PositionState.FLAT);
 		BigDecimal quantity = resolveQuantity(close);
 		if (quantity == null || quantity.signum() <= 0) {
 			return Mono.empty();
 		}
 		return orderClient.fetchHedgeModeEnabled()
-				.flatMap(hedgeMode -> closeIfNeeded(current, quantity, hedgeMode)
-						.then(openPosition(target, quantity, hedgeMode)))
-				.doOnNext(response -> positionState.set(target))
+				.flatMap(hedgeMode -> closeIfNeeded(symbol, current, quantity, hedgeMode)
+						.then(openPosition(symbol, target, quantity, hedgeMode)))
+				.doOnNext(response -> positionStates.put(symbol, target))
 				.then();
 	}
 
-	private Mono<Void> closeIfNeeded(PositionState current, BigDecimal quantity, boolean hedgeMode) {
+	private Mono<Void> closeIfNeeded(String symbol, PositionState current, BigDecimal quantity, boolean hedgeMode) {
 		if (current == PositionState.FLAT) {
 			return Mono.empty();
 		}
 		String side = current == PositionState.LONG ? "SELL" : "BUY";
 		String positionSide = hedgeMode ? current.name() : "";
-		return orderClient.placeReduceOnlyMarketOrder(strategyProperties.tradeSymbol(), side, quantity, positionSide)
+		return orderClient.placeReduceOnlyMarketOrder(symbol, side, quantity, positionSide)
 				.then();
 	}
 
-	private Mono<?> openPosition(PositionState target, BigDecimal quantity, boolean hedgeMode) {
+	private Mono<?> openPosition(String symbol, PositionState target, BigDecimal quantity, boolean hedgeMode) {
 		String side = target == PositionState.LONG ? "BUY" : "SELL";
 		String positionSide = hedgeMode ? target.name() : "";
-		return orderClient.placeMarketOrder(strategyProperties.tradeSymbol(), side, quantity, positionSide);
+		return orderClient.placeMarketOrder(symbol, side, quantity, positionSide);
 	}
 
 	BigDecimal resolveQuantity(double close) {
@@ -116,8 +116,9 @@ public class CtiLbStrategy {
 		return ratio.multiply(step, MathContext.DECIMAL64);
 	}
 
-	private void logSignal(TrendSignal signal, double close, String action) {
-		LOGGER.info("CTI LB signal closeTime={}, close={}, bfr={}, bfrPrev={}, trend={}, changed={}, action={}",
+	private void logSignal(String symbol, TrendSignal signal, double close, String action) {
+		LOGGER.info("CTI LB signal symbol={}, closeTime={}, close={}, bfr={}, bfrPrev={}, trend={}, changed={}, action={}",
+				symbol,
 				signal.closeTime(),
 				close,
 				signal.bfr(),
