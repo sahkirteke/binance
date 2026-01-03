@@ -1,6 +1,7 @@
 package com.binance.strategy;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -12,14 +13,16 @@ import jakarta.validation.constraints.Positive;
 @Validated
 @ConfigurationProperties(prefix = "strategy")
 public record StrategyProperties(
-		@NotNull StrategyType type,
+		@NotNull StrategyType active,
 		@NotBlank String referenceSymbol,
 		@NotBlank String tradeSymbol,
+		List<String> tradeSymbols,
 		@Positive int depthLimit,
 		@Positive BigDecimal marketQuantity,
 		int leverage,
 		String positionSide,
 		boolean enableOrders,
+		boolean startupTestOrderEnabled,
 		@Positive int pollIntervalMs,
 		int tickIntervalMs,
 		int rollingWindowMs,
@@ -56,4 +59,11 @@ public record StrategyProperties(
 		BigDecimal flipSpreadMaxBps,
 		int maxTradesPer5Min,
 		long hardTradeCooldownMs) {
+
+	public List<String> resolvedTradeSymbols() {
+		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {
+			return tradeSymbols;
+		}
+		return List.of(tradeSymbol);
+	}
 }

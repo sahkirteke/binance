@@ -21,14 +21,20 @@ binance:
   recv-window-millis: 5000
 
 strategy:
-  active: ETC_ETH_DEPTH
-  reference-symbol: ETCUSDT
-  trade-symbol: ETHUSDT
+  active: CTI_LB
+  reference-symbol: 1INCHUSDT
+  trade-symbol: 1INCHUSDT
+  trade-symbols:
+    - 1INCHUSDT
+    - ETCUSDT
+    - HOTUSDT
+    - MANAUSDT
   depth-limit: 50
   market-quantity: 0.01
-  leverage: 75
+  leverage: 2
   position-side: LONG
   enable-orders: true
+  startup-test-order-enabled: true
   poll-interval-ms: 500
   tick-interval-ms: 100
   rolling-window-ms: 800
@@ -48,10 +54,10 @@ strategy:
   exit-persist-ms: 450
   cooldown-ms: 650
   max-spread-bps: 10
-  position-notional-usdt: 100
+  position-notional-usdt: 200
   stop-loss-bps: 18
   take-profit-bps: 22
-  quantity-step: 0.001
+  quantity-step: 1
   price-tick: 0.01
   max-daily-loss-usdt: 100
   max-consecutive-losses: 3

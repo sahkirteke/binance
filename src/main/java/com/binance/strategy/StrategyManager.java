@@ -41,16 +41,25 @@ public class StrategyManager {
 	}
 
 	public void start() {
-		StrategyType type = strategyProperties.type();
-		Strategy selected = strategies.get(type);
+		StrategyType active = strategyProperties.active();
+		if (active == StrategyType.CTI_LB) {
+			Strategy current = activeStrategy.getAndSet(null);
+			if (current != null) {
+				LOGGER.info("Stopping strategy: {}", current.type());
+				current.stop();
+			}
+			LOGGER.info("Strategy set to CTI_LB; skipping legacy strategy startup.");
+			return;
+		}
+		Strategy selected = strategies.get(active);
 		if (selected == null) {
-			throw new IllegalStateException("No strategy registered for type " + type);
+			throw new IllegalStateException("No strategy registered for type " + active);
 		}
 		Strategy current = activeStrategy.getAndSet(selected);
 		if (current != null && current != selected) {
 			current.stop();
 		}
-		LOGGER.info("Starting strategy: {}", type);
+		LOGGER.info("Starting strategy: {}", active);
 		selected.start();
 	}
 

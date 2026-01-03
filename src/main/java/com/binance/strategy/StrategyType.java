@@ -1,5 +1,6 @@
 package com.binance.strategy;
 
 public enum StrategyType {
-	ETC_ETH_DEPTH
+	CTI_LB,
+	OLD
 }

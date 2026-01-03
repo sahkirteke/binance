@@ -116,7 +116,7 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 
 	@Override
 	public StrategyType type() {
-		return StrategyType.ETC_ETH_DEPTH;
+		return StrategyType.OLD;
 	}
 
 	@Override
@@ -1015,10 +1015,6 @@ public class EtcEthDepthStrategyWatcher implements Strategy {
 			return tick;
 		}
 		return BigDecimal.ZERO;
-	}
-
-	private boolean isActive() {
-		return strategyProperties.active() == StrategyType.ETC_ETH_DEPTH;
 	}
 
 	private void resyncOrderBook(String reason) {
