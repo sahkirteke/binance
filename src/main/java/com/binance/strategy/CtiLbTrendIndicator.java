@@ -15,6 +15,10 @@ public class CtiLbTrendIndicator implements TrendIndicator {
 	Trend lastTrend = Trend.LONG;
 	boolean initialized;
 
+	static int period() {
+		return (int) SMOOTHING_PERIOD;
+	}
+
 	@Override
 	public TrendSignal onClosedCandle(double close, long closeTime) {
 		double di = (SMOOTHING_PERIOD - 1.0) / 2.0 + 1.0;

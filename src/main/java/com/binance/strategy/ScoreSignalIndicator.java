@@ -12,12 +12,15 @@ public class ScoreSignalIndicator {
 	private final FiveMinuteCandleAggregator fiveMinuteAggregator = new FiveMinuteCandleAggregator();
 	private final AdxIndicator adxIndicator = new AdxIndicator(ADX_PERIOD);
 	private CtiDirection lastCti5mDir = CtiDirection.NEUTRAL;
-	private double lastCti5mValue;
-	private double lastCti5mPrev;
+	private Double lastCti5mValue;
+	private Double lastCti5mPrev;
 	private double lastAdx5m = Double.NaN;
 	private boolean has5mCti;
 	private boolean hasAdx;
+	private int cti5mBarsSeen;
+	private int adx5mBarsSeen;
 	private long last5mCloseTime;
+	private final int cti5mPeriod = CtiLbTrendIndicator.period();
 
 	public ScoreSignalIndicator(String symbol, CtiScoreCalculator scoreCalculator) {
 		this.symbol = symbol;
@@ -38,8 +41,10 @@ public class ScoreSignalIndicator {
 			lastCti5mPrev = cti5mSignal.bfrPrev();
 			lastCti5mDir = resolveRawDirection(lastCti5mValue, lastCti5mPrev);
 			has5mCti = true;
+			cti5mBarsSeen++;
 			last5mCloseTime = fiveMinute.closeTime();
 			OptionalDouble adx = adxIndicator.update(fiveMinute.high(), fiveMinute.low(), fiveMinute.close());
+			adx5mBarsSeen++;
 			if (adx.isPresent()) {
 				lastAdx5m = adx.getAsDouble();
 				hasAdx = true;
@@ -50,13 +55,19 @@ public class ScoreSignalIndicator {
 		int score1m = cti1mDir == CtiDirection.LONG ? 1 : cti1mDir == CtiDirection.SHORT ? -1 : 0;
 		int hamCtiScore = score5m + score1m;
 		CtiDirection bias = resolveBias(cti1mDir, lastCti5mDir);
-		boolean ready = has5mCti && hasAdx;
+		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
+		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD + 1;
+		boolean ready = cti5mReady && adx5mReady;
 		CtiScoreCalculator.ScoreResult scoreResult = scoreCalculator.calculate(
 				hamCtiScore,
-				hasAdx ? lastAdx5m : null,
-				hasAdx,
+				adx5mReady ? lastAdx5m : null,
+				adx5mReady,
 				ready,
 				bias);
+
+		Double bfr5mValue = cti5mReady ? lastCti5mValue : null;
+		Double bfr5mPrev = cti5mReady ? lastCti5mPrev : null;
+		Double adx5mValue = adx5mReady ? lastAdx5m : null;
 
 		return new ScoreSignal(
 				cti1mDir,
@@ -66,9 +77,9 @@ public class ScoreSignalIndicator {
 				score5m,
 				cti1mValue,
 				cti1mPrev,
-				lastCti5mValue,
-				lastCti5mPrev,
-				lastAdx5m,
+				bfr5mValue,
+				bfr5mPrev,
+				adx5mValue,
 				scoreResult.adxBonus(),
 				scoreResult.trendWeight(),
 				scoreResult.adjustedScore(),
@@ -76,9 +87,13 @@ public class ScoreSignalIndicator {
 				bias,
 				scoreResult.recReason(),
 				scoreResult.adxGate(),
-				scoreResult.adxReady(),
+				adx5mReady,
 				scoreResult.adxGateReason(),
-				has5mCti,
+				cti5mReady,
+				cti5mBarsSeen,
+				cti5mPeriod,
+				adx5mBarsSeen,
+				ADX_PERIOD,
 				last5mCloseTime,
 				candle.closeTime(),
 				!ready);
