@@ -184,7 +184,7 @@ public class CtiLbStrategy {
 				signal.recommendation(),
 				confirm1m,
 				strategyProperties.confirmBars(),
-				recommendationForLog(confirmedRec),
+				confirmedRec,
 				signal.recReason().name(),
 				recUpdate.recPending(),
 				recUpdate.recFirstSeenAtMs(),
