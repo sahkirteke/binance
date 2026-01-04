@@ -64,11 +64,13 @@ strategy:
   max-consecutive-losses: 3
   max-position-usdt: 100
   flip-enabled: true
-  min-hold-ms: 1200
-  flip-cooldown-ms: 900
+  min-hold-ms: 60000
+  flip-cooldown-ms: 60000
   strong-obi: 0.085
   strong-toi: 0.060
-  max-flips-per-5-min: 12
+  max-flips-per-5-min: 2
+  min-bfr-delta: 0.002
+  min-price-move-bps: 10
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500
