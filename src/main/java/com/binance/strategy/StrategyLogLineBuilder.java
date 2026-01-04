@@ -47,11 +47,18 @@ public final class StrategyLogLineBuilder {
 				.append(" recFirstSeenPrice=").append(num(dto.recFirstSeenPrice()))
 				.append(" action=").append(na(dto.action()))
 				.append(" decisionActionReason=").append(na(dto.decisionActionReason()))
+				.append(" enableOrders=").append(dto.enableOrders())
+				.append(" resolvedQty=").append(num(dto.resolvedQty()))
 				.append(" positionSide=").append(na(dto.positionSide()))
 				.append(" positionQty=").append(num(dto.positionQty()))
 				.append(" qtyStep=").append(num(dto.qtyStep()))
 				.append(" notionalUsdt=").append(num(dto.notionalUsdt()))
 				.append(" maxPositionUsdt=").append(num(dto.maxPositionUsdt()))
+				.append(" hedgeMode=").append(na(dto.hedgeMode()))
+				.append(" exchangePosSide=").append(na(dto.exchangePosSide()))
+				.append(" exchangePosQty=").append(num(dto.exchangePosQty()))
+				.append(" stateDesync=").append(na(dto.stateDesync()))
+				.append(" decisionBlockReason=").append(na(dto.decisionBlockReason()))
 				.append(" openOrders=").append(na(dto.openOrders()))
 				.append(" cMissed=").append(nl(dto.cMissed()))
 				.append(" cConfirm=").append(nl(dto.cConfirm()))
@@ -146,6 +153,17 @@ public final class StrategyLogLineBuilder {
 				.append(" missRate=").append(num(dto.missRate()))
 				.append(" confirmRate=").append(num(dto.confirmRate()))
 				.append(" topMissed=").append(na(dto.topMissed()));
+		return builder.toString();
+	}
+
+	public static String buildPositionSyncLine(StrategyLogV1.PositionSyncLogDto dto) {
+		StringBuilder builder = new StringBuilder(256);
+		builder.append("EVENT=POSITION_SYNC")
+				.append(" symbol=").append(na(dto.symbol()))
+				.append(" exchangeSide=").append(na(dto.exchangeSide()))
+				.append(" exchangeQty=").append(num(dto.exchangeQty()))
+				.append(" localSide=").append(na(dto.localSide()))
+				.append(" desync=").append(dto.desync());
 		return builder.toString();
 	}
 

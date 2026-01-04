@@ -43,11 +43,18 @@ public final class StrategyLogV1 {
 			BigDecimal recFirstSeenPrice,
 			String action,
 			String decisionActionReason,
-			String positionSide,
-			BigDecimal positionQty,
+			boolean enableOrders,
+			BigDecimal resolvedQty,
 			BigDecimal qtyStep,
 			BigDecimal notionalUsdt,
 			BigDecimal maxPositionUsdt,
+			Boolean hedgeMode,
+			String exchangePosSide,
+			BigDecimal exchangePosQty,
+			Boolean stateDesync,
+			String decisionBlockReason,
+			String positionSide,
+			BigDecimal positionQty,
 			Integer openOrders,
 			Long cMissed,
 			Long cConfirm,
@@ -120,6 +127,14 @@ public final class StrategyLogV1 {
 			Double missRate,
 			Double confirmRate,
 			String topMissed) {
+	}
+
+	public record PositionSyncLogDto(
+			String symbol,
+			String exchangeSide,
+			BigDecimal exchangeQty,
+			String localSide,
+			boolean desync) {
 	}
 
 	/*

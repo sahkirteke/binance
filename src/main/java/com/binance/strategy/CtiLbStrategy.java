@@ -36,6 +36,9 @@ public class CtiLbStrategy {
 	private final Map<String, LongAdder> missedBySymbol = new ConcurrentHashMap<>();
 	private final java.util.concurrent.atomic.AtomicLong lastSummaryAtMs = new java.util.concurrent.atomic.AtomicLong();
 	private final Map<String, Long> lastPositionSyncMs = new ConcurrentHashMap<>();
+	private final Map<String, BinanceFuturesOrderClient.ExchangePosition> exchangePositions = new ConcurrentHashMap<>();
+	private final Map<String, Boolean> stateDesyncBySymbol = new ConcurrentHashMap<>();
+	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
 	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties) {
@@ -82,35 +85,54 @@ public class CtiLbStrategy {
 		action = resolveAction(current, confirmedRec);
 		BigDecimal resolvedQty = resolveQuantity(close);
 		String decisionActionReason = "OK";
-		if (action != SignalAction.HOLD && (resolvedQty == null || resolvedQty.signum() <= 0)) {
+		String decisionBlockReason = resolveDecisionBlockReason(signal, action, confirmedRec, current);
+		if (action == SignalAction.HOLD || !"OK_EXECUTED".equals(decisionBlockReason)) {
 			action = SignalAction.HOLD;
-			decisionActionReason = "QTY_ZERO_AFTER_STEP";
-		}
-		logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
-				recommendationRaw, resolvedQty, decisionActionReason);
-
-		if (action == SignalAction.HOLD) {
+			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+					recommendationRaw, resolvedQty, decisionActionReason, decisionBlockReason);
 			return;
 		}
 
-		if (!strategyProperties.enableOrders()) {
+		if (action != SignalAction.HOLD && (resolvedQty == null || resolvedQty.signum() <= 0)) {
+			action = SignalAction.HOLD;
+			decisionActionReason = "QTY_ZERO_AFTER_STEP";
+			decisionBlockReason = "QTY_ZERO_AFTER_STEP";
+			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+					recommendationRaw, resolvedQty, decisionActionReason, decisionBlockReason);
 			return;
 		}
 
 		PositionState target = confirmedRec == CtiDirection.LONG ? PositionState.LONG : PositionState.SHORT;
-		if (action != SignalAction.HOLD) {
-			flipCount.increment();
-			logFlip(symbol, current, target, signal, close, recommendationUsed, confirmedRec, action);
-		}
-
-		Mono<Void> execution = action == SignalAction.ENTER_LONG || action == SignalAction.ENTER_SHORT
-				? openPosition(symbol, target, resolvedQty)
-						.doOnNext(response -> positionStates.put(symbol, target))
-						.then()
-				: executeFlip(symbol, target, close);
-
 		SignalAction actionForLog = action;
-		execution.doOnError(error -> LOGGER.warn("Failed to execute CTI LB action {}: {}", actionForLog, error.getMessage()))
+		String decisionBlock = decisionBlockReason;
+		orderClient.fetchHedgeModeEnabled()
+				.flatMap(hedgeMode -> {
+					hedgeModeBySymbol.put(symbol, hedgeMode);
+					logDecision(symbol, signal, close, actionForLog, confirm1m, confirmedRec, recUpdate,
+							recommendationUsed, recommendationRaw, resolvedQty, decisionActionReason, decisionBlock);
+					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
+						return openPosition(symbol, target, resolvedQty, hedgeMode)
+								.doOnNext(response -> positionStates.put(symbol, target))
+								.doOnNext(response -> {
+									flipCount.increment();
+									logFlip(symbol, current, target, signal, close, recommendationUsed, confirmedRec, actionForLog);
+								})
+								.then();
+					}
+					return closeIfNeeded(symbol, current, resolvedQty, hedgeMode)
+							.then(openPosition(symbol, target, resolvedQty, hedgeMode))
+							.doOnNext(response -> positionStates.put(symbol, target))
+							.doOnNext(response -> {
+								flipCount.increment();
+								logFlip(symbol, current, target, signal, close, recommendationUsed, confirmedRec, actionForLog);
+							})
+							.then();
+				})
+				.doOnError(error -> {
+					LOGGER.warn("Failed to execute CTI LB action {}: {}", actionForLog, error.getMessage());
+					logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
+							recommendationUsed, recommendationRaw, resolvedQty, decisionActionReason, "ORDER_ERROR");
+				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
 	}
@@ -177,10 +199,12 @@ public class CtiLbStrategy {
 	private void logDecision(String symbol, ScoreSignal signal, double close, SignalAction action,
 			int confirm1m, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate,
 			CtiDirection recommendationUsed, CtiDirection recommendationRaw, BigDecimal resolvedQty,
-			String decisionActionReason) {
+			String decisionActionReason, String decisionBlockReason) {
 		logSummaryIfNeeded(signal.closeTime());
 		String decisionAction = recUpdate.missedMove() ? "RESET_PENDING" : resolveDecisionAction(action);
 		String insufficientReason = resolveInsufficientReason(signal);
+		BinanceFuturesOrderClient.ExchangePosition exchangePosition = exchangePositions.get(symbol);
+		Boolean desync = stateDesyncBySymbol.get(symbol);
 		DecisionLogDto dto = new DecisionLogDto(
 				symbol,
 				signal.closeTime(),
@@ -217,11 +241,18 @@ public class CtiLbStrategy {
 				recUpdate.recFirstSeenPrice(),
 				decisionAction,
 				decisionActionReason,
-				formatPositionSide(positionStates.getOrDefault(symbol, PositionState.NONE)),
+				strategyProperties.enableOrders(),
 				resolvedQty,
 				strategyProperties.quantityStep(),
 				strategyProperties.positionNotionalUsdt(),
 				strategyProperties.maxPositionUsdt(),
+				hedgeModeBySymbol.get(symbol),
+				exchangePosition == null ? "NA" : exchangePosition.positionSide(),
+				exchangePosition == null ? null : exchangePosition.positionAmt(),
+				desync,
+				decisionBlockReason,
+				formatPositionSide(positionStates.getOrDefault(symbol, PositionState.NONE)),
+				null,
 				0,
 				missedMoveCount.longValue(),
 				confirmHitCount.longValue(),
@@ -373,6 +404,23 @@ public class CtiLbStrategy {
 		return "HOLD";
 	}
 
+	private String resolveDecisionBlockReason(ScoreSignal signal, SignalAction action, CtiDirection confirmedRec,
+			PositionState current) {
+		if (signal.insufficientData()) {
+			return "INSUFFICIENT_DATA";
+		}
+		if (action != SignalAction.HOLD && !strategyProperties.enableOrders()) {
+			return "ORDERS_DISABLED";
+		}
+		if (action == SignalAction.HOLD && confirmedRec != CtiDirection.NEUTRAL) {
+			if ((confirmedRec == CtiDirection.LONG && current == PositionState.LONG)
+					|| (confirmedRec == CtiDirection.SHORT && current == PositionState.SHORT)) {
+				return "EXCHANGE_SYNC_SAYS_ALREADY_IN_POSITION";
+			}
+		}
+		return "OK_EXECUTED";
+	}
+
 	private void syncPositionIfNeeded(String symbol, long closeTime) {
 		Long lastSync = lastPositionSyncMs.get(symbol);
 		if (lastSync != null && closeTime - lastSync < POSITION_SYNC_INTERVAL_MS) {
@@ -385,12 +433,15 @@ public class CtiLbStrategy {
 					PositionState updated = resolvePositionState(position.positionAmt());
 					positionStates.put(symbol, updated);
 					boolean desync = local != updated;
-					LOGGER.info("EVENT=POSITION_SYNC symbol={} exchangeSide={} exchangeQty={} localSide={} desync={}",
+					exchangePositions.put(symbol, position);
+					stateDesyncBySymbol.put(symbol, desync);
+					StrategyLogV1.PositionSyncLogDto dto = new StrategyLogV1.PositionSyncLogDto(
 							symbol,
 							updated == PositionState.NONE ? "FLAT" : updated.name(),
 							position.positionAmt(),
 							formatPositionSide(local),
 							desync);
+					LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
 				})
 				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
 				.subscribe();
