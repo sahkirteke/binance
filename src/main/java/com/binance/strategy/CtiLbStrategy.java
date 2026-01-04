@@ -35,6 +35,8 @@ public class CtiLbStrategy {
 	private final LongAdder confirmHitCount = new LongAdder();
 	private final Map<String, LongAdder> missedBySymbol = new ConcurrentHashMap<>();
 	private final java.util.concurrent.atomic.AtomicLong lastSummaryAtMs = new java.util.concurrent.atomic.AtomicLong();
+	private final Map<String, Long> lastPositionSyncMs = new ConcurrentHashMap<>();
+	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties) {
 		this.orderClient = orderClient;
@@ -52,7 +54,9 @@ public class CtiLbStrategy {
 			return;
 		}
 
-		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : signal.recommendation();
+		syncPositionIfNeeded(symbol, closeTime);
+		CtiDirection recommendationRaw = signal.recommendation();
+		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
 		RecStreakTracker tracker = recTrackers.computeIfAbsent(symbol, ignored -> new RecStreakTracker());
 		RecStreakTracker.RecUpdate recUpdate = tracker.update(
 				recommendationUsed,
@@ -76,9 +80,20 @@ public class CtiLbStrategy {
 
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 		action = resolveAction(current, confirmedRec);
-		logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed);
+		BigDecimal resolvedQty = resolveQuantity(close);
+		String decisionActionReason = "OK";
+		if (action != SignalAction.HOLD && (resolvedQty == null || resolvedQty.signum() <= 0)) {
+			action = SignalAction.HOLD;
+			decisionActionReason = "QTY_ZERO_AFTER_STEP";
+		}
+		logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+				recommendationRaw, resolvedQty, decisionActionReason);
 
 		if (action == SignalAction.HOLD) {
+			return;
+		}
+
+		if (!strategyProperties.enableOrders()) {
 			return;
 		}
 
@@ -88,12 +103,8 @@ public class CtiLbStrategy {
 			logFlip(symbol, current, target, signal, close, recommendationUsed, confirmedRec, action);
 		}
 
-		if (!strategyProperties.enableOrders()) {
-			return;
-		}
-
 		Mono<Void> execution = action == SignalAction.ENTER_LONG || action == SignalAction.ENTER_SHORT
-				? openPosition(symbol, target, resolveQuantity(close))
+				? openPosition(symbol, target, resolvedQty)
 						.doOnNext(response -> positionStates.put(symbol, target))
 						.then()
 				: executeFlip(symbol, target, close);
@@ -165,7 +176,8 @@ public class CtiLbStrategy {
 
 	private void logDecision(String symbol, ScoreSignal signal, double close, SignalAction action,
 			int confirm1m, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate,
-			CtiDirection recommendationUsed) {
+			CtiDirection recommendationUsed, CtiDirection recommendationRaw, BigDecimal resolvedQty,
+			String decisionActionReason) {
 		logSummaryIfNeeded(signal.closeTime());
 		String decisionAction = recUpdate.missedMove() ? "RESET_PENDING" : resolveDecisionAction(action);
 		String insufficientReason = resolveInsufficientReason(signal);
@@ -194,7 +206,7 @@ public class CtiLbStrategy {
 				scoreShort(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
 				signal.adjustedScore(),
 				signal.bias(),
-				signal.recommendation(),
+				recommendationRaw,
 				recommendationUsed,
 				confirm1m,
 				strategyProperties.confirmBars(),
@@ -204,8 +216,12 @@ public class CtiLbStrategy {
 				recUpdate.recFirstSeenAtMs(),
 				recUpdate.recFirstSeenPrice(),
 				decisionAction,
+				decisionActionReason,
 				formatPositionSide(positionStates.getOrDefault(symbol, PositionState.NONE)),
-				BigDecimal.ZERO,
+				resolvedQty,
+				strategyProperties.quantityStep(),
+				strategyProperties.positionNotionalUsdt(),
+				strategyProperties.maxPositionUsdt(),
 				0,
 				missedMoveCount.longValue(),
 				confirmHitCount.longValue(),
@@ -355,6 +371,36 @@ public class CtiLbStrategy {
 			return "FLIP_TO_SHORT";
 		}
 		return "HOLD";
+	}
+
+	private void syncPositionIfNeeded(String symbol, long closeTime) {
+		Long lastSync = lastPositionSyncMs.get(symbol);
+		if (lastSync != null && closeTime - lastSync < POSITION_SYNC_INTERVAL_MS) {
+			return;
+		}
+		lastPositionSyncMs.put(symbol, closeTime);
+		orderClient.fetchPosition(symbol)
+				.doOnNext(position -> {
+					PositionState local = positionStates.getOrDefault(symbol, PositionState.NONE);
+					PositionState updated = resolvePositionState(position.positionAmt());
+					positionStates.put(symbol, updated);
+					boolean desync = local != updated;
+					LOGGER.info("EVENT=POSITION_SYNC symbol={} exchangeSide={} exchangeQty={} localSide={} desync={}",
+							symbol,
+							updated == PositionState.NONE ? "FLAT" : updated.name(),
+							position.positionAmt(),
+							formatPositionSide(local),
+							desync);
+				})
+				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
+				.subscribe();
+	}
+
+	private PositionState resolvePositionState(BigDecimal positionAmt) {
+		if (positionAmt == null || positionAmt.signum() == 0) {
+			return PositionState.NONE;
+		}
+		return positionAmt.signum() > 0 ? PositionState.LONG : PositionState.SHORT;
 	}
 
 	private String resolveInsufficientReason(ScoreSignal signal) {

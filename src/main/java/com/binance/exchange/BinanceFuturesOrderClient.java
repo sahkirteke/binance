@@ -176,6 +176,56 @@ public class BinanceFuturesOrderClient {
 				.map(PositionModeResponse::dualSidePosition);
 	}
 
+	public Mono<ExchangePosition> fetchPosition(String symbol) {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()
+				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
+			return Mono.error(new IllegalStateException(
+					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
+		}
+		long timestamp = Instant.now().toEpochMilli();
+		String payload = String.format("recvWindow=%d&timestamp=%d", properties.recvWindowMillis(), timestamp);
+		String signature = signatureUtil.sign(payload, properties.secretKey());
+		String signedPayload = payload + "&signature=" + signature;
+
+		return binanceWebClient
+				.get()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v2/positionRisk")
+						.query(signedPayload)
+						.build())
+				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+				.header("X-MBX-APIKEY", properties.apiKey())
+				.retrieve()
+				.onStatus(status -> status.isError(), response -> response
+						.bodyToMono(String.class)
+						.defaultIfEmpty("<empty>")
+						.flatMap(body -> Mono.error(new IllegalStateException(
+								"Binance position fetch failed with status=" + response.statusCode().value()
+										+ ", body=" + body))))
+				.bodyToFlux(PositionRiskResponse.class)
+				.filter(position -> symbol.equalsIgnoreCase(position.symbol()))
+				.next()
+				.map(position -> new ExchangePosition(
+						position.symbol(),
+						position.positionAmt(),
+						position.entryPrice(),
+						position.positionSide()));
+	}
+
+	public record ExchangePosition(
+			String symbol,
+			BigDecimal positionAmt,
+			BigDecimal entryPrice,
+			String positionSide) {
+	}
+
+	private record PositionRiskResponse(
+			String symbol,
+			BigDecimal positionAmt,
+			BigDecimal entryPrice,
+			String positionSide) {
+	}
+
 	private record PositionModeResponse(boolean dualSidePosition) {}
 
 	private Mono<OrderResponse> placeMarketOrderWithFlags(String symbol, String side, BigDecimal quantity,
