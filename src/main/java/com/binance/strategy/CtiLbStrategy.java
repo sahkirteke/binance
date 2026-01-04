@@ -105,35 +105,43 @@ public class CtiLbStrategy {
 		PositionState target = confirmedRec == CtiDirection.LONG ? PositionState.LONG : PositionState.SHORT;
 		SignalAction actionForLog = action;
 		String decisionBlock = decisionBlockReason;
+		String decisionActionReasonForLog = decisionActionReason;
+		BigDecimal resolvedQtyForLog = resolvedQty;
+		CtiDirection recommendationRawForLog = recommendationRaw;
+		CtiDirection recommendationUsedForLog = recommendationUsed;
 		PositionState currentForLog = current;
 		PositionState targetForLog = target;
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					hedgeModeBySymbol.put(symbol, hedgeMode);
 					logDecision(symbol, signal, close, actionForLog, confirm1m, confirmedRec, recUpdate,
-							recommendationUsed, recommendationRaw, resolvedQty, decisionActionReason, decisionBlock);
+							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog,
+							decisionActionReasonForLog, decisionBlock);
 					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
-						return openPosition(symbol, targetForLog, resolvedQty, hedgeMode)
+						return openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode)
 								.doOnNext(response -> positionStates.put(symbol, targetForLog))
 								.doOnNext(response -> {
 									flipCount.increment();
-									logFlip(symbol, currentForLog, targetForLog, signal, close, recommendationUsed, confirmedRec, actionForLog);
+									logFlip(symbol, currentForLog, targetForLog, signal, close,
+											recommendationUsedForLog, confirmedRec, actionForLog);
 								})
 								.then();
 					}
-					return closeIfNeeded(symbol, currentForLog, resolvedQty, hedgeMode)
-							.then(openPosition(symbol, targetForLog, resolvedQty, hedgeMode))
+					return closeIfNeeded(symbol, currentForLog, resolvedQtyForLog, hedgeMode)
+							.then(openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode))
 							.doOnNext(response -> positionStates.put(symbol, targetForLog))
 							.doOnNext(response -> {
 								flipCount.increment();
-								logFlip(symbol, currentForLog, targetForLog, signal, close, recommendationUsed, confirmedRec, actionForLog);
+								logFlip(symbol, currentForLog, targetForLog, signal, close,
+										recommendationUsedForLog, confirmedRec, actionForLog);
 							})
 							.then();
 				})
 				.doOnError(error -> {
 					LOGGER.warn("Failed to execute CTI LB action {}: {}", actionForLog, error.getMessage());
 					logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
-							recommendationUsed, recommendationRaw, resolvedQty, decisionActionReason, "ORDER_ERROR");
+							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog,
+							decisionActionReasonForLog, "ORDER_ERROR");
 				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
