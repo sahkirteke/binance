@@ -468,9 +468,6 @@ public class CtiLbStrategy {
 		if (!signal.cti5mReady()) {
 			return "CTI5M_NOT_READY";
 		}
-		if (!signal.adxReady()) {
-			return "ADX5M_NOT_READY";
-		}
 		return "OK";
 	}
 

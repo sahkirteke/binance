@@ -57,12 +57,11 @@ public class ScoreSignalIndicator {
 		CtiDirection bias = resolveBias(cti1mDir, lastCti5mDir);
 		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
 		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD + 1;
-		boolean ready = cti5mReady && adx5mReady;
 		CtiScoreCalculator.ScoreResult scoreResult = scoreCalculator.calculate(
 				hamCtiScore,
 				adx5mReady ? lastAdx5m : null,
 				adx5mReady,
-				ready,
+				cti5mReady,
 				bias);
 
 		Double bfr5mValue = cti5mReady ? lastCti5mValue : null;
@@ -96,7 +95,7 @@ public class ScoreSignalIndicator {
 				ADX_PERIOD,
 				last5mCloseTime,
 				candle.closeTime(),
-				!ready);
+				!cti5mReady);
 	}
 
 	private CtiDirection resolveRawDirection(double ctiValue, double ctiPrevValue) {

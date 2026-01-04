@@ -17,8 +17,8 @@ public class CtiScoreCalculator {
 		}
 	}
 
-	public ScoreResult calculate(int hamScore, Double adxValue, boolean adxReady, boolean ready, CtiDirection bias) {
-		if (!ready) {
+	public ScoreResult calculate(int hamScore, Double adxValue, boolean adxReady, boolean ctiReady, CtiDirection bias) {
+		if (!ctiReady) {
 			return new ScoreResult(0, 0.0, 0.0, CtiDirection.NEUTRAL, RecReason.INSUFFICIENT_DATA,
 					false, adxReady, adxGateReason(adxReady, adxValue));
 		}
