@@ -105,26 +105,28 @@ public class CtiLbStrategy {
 		PositionState target = confirmedRec == CtiDirection.LONG ? PositionState.LONG : PositionState.SHORT;
 		SignalAction actionForLog = action;
 		String decisionBlock = decisionBlockReason;
+		PositionState currentForLog = current;
+		PositionState targetForLog = target;
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					hedgeModeBySymbol.put(symbol, hedgeMode);
 					logDecision(symbol, signal, close, actionForLog, confirm1m, confirmedRec, recUpdate,
 							recommendationUsed, recommendationRaw, resolvedQty, decisionActionReason, decisionBlock);
 					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
-						return openPosition(symbol, target, resolvedQty, hedgeMode)
-								.doOnNext(response -> positionStates.put(symbol, target))
+						return openPosition(symbol, targetForLog, resolvedQty, hedgeMode)
+								.doOnNext(response -> positionStates.put(symbol, targetForLog))
 								.doOnNext(response -> {
 									flipCount.increment();
-									logFlip(symbol, current, target, signal, close, recommendationUsed, confirmedRec, actionForLog);
+									logFlip(symbol, currentForLog, targetForLog, signal, close, recommendationUsed, confirmedRec, actionForLog);
 								})
 								.then();
 					}
-					return closeIfNeeded(symbol, current, resolvedQty, hedgeMode)
-							.then(openPosition(symbol, target, resolvedQty, hedgeMode))
-							.doOnNext(response -> positionStates.put(symbol, target))
+					return closeIfNeeded(symbol, currentForLog, resolvedQty, hedgeMode)
+							.then(openPosition(symbol, targetForLog, resolvedQty, hedgeMode))
+							.doOnNext(response -> positionStates.put(symbol, targetForLog))
 							.doOnNext(response -> {
 								flipCount.increment();
-								logFlip(symbol, current, target, signal, close, recommendationUsed, confirmedRec, actionForLog);
+								logFlip(symbol, currentForLog, targetForLog, signal, close, recommendationUsed, confirmedRec, actionForLog);
 							})
 							.then();
 				})
