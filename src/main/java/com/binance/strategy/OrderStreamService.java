@@ -54,9 +54,7 @@ public class OrderStreamService {
 
 	@PostConstruct
 	public void start() {
-		if (strategyProperties.active() == null
-				|| (strategyProperties.active() != StrategyType.CTI_LB
-						&& strategyProperties.active() != StrategyType.CTI_SCORE)) {
+		if (strategyProperties.active() == null || strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
 		startUserStream();
