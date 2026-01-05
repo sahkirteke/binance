@@ -112,15 +112,18 @@ public class CtiLbStrategy {
 			return;
 		}
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
+		double prevClose = symbolState.prevClose1m;
 		if (signal.cti5mReady()) {
 			int newDir = resolveFiveMinDir(signal.score5m());
-			if (newDir != symbolState.lastFiveMinDir) {
+			if (newDir != 0 && newDir != symbolState.lastFiveMinDir) {
 				symbolState.fiveMinFlipTimeMs = closeTime;
 				symbolState.fiveMinFlipPrice = close;
+				symbolState.prevFiveMinDir = symbolState.lastFiveMinDir;
 			}
 			symbolState.lastFiveMinDir = newDir;
 		}
 		symbolState.prevClose1m = close;
+		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose);
 
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
@@ -363,8 +366,40 @@ public class CtiLbStrategy {
 		return 0;
 	}
 
+	private void logEntryFilterState(String symbol, SymbolState state, long nowMs, double close, double prevClose) {
+		if (warmupMode) {
+			return;
+		}
+		long armingWindowMs = strategyProperties.armingWindowMinutes() * 60_000L;
+		long lateLimitMs = strategyProperties.lateLimitMinutes() * 60_000L;
+		boolean hasDir = state.lastFiveMinDir != 0;
+		long sinceFlipMs = state.fiveMinFlipTimeMs == 0L ? Long.MAX_VALUE : nowMs - state.fiveMinFlipTimeMs;
+		boolean inArming = hasDir && sinceFlipMs <= armingWindowMs;
+		boolean lateBlocked = hasDir && sinceFlipMs > lateLimitMs;
+		double minutesSinceFlip = state.fiveMinFlipTimeMs == 0L ? Double.NaN : sinceFlipMs / 60000.0;
+		double movedDirPct = Double.NaN;
+		if (state.fiveMinFlipPrice > 0) {
+			double movedSinceFlipPct = (close - state.fiveMinFlipPrice) / state.fiveMinFlipPrice * 100.0;
+			movedDirPct = state.lastFiveMinDir == 1
+					? movedSinceFlipPct
+					: (state.fiveMinFlipPrice - close) / state.fiveMinFlipPrice * 100.0;
+		}
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} flipPrice={} movedDirPct={} prevClose1m={}",
+				symbol,
+				state.lastFiveMinDir,
+				state.prevFiveMinDir,
+				state.fiveMinFlipTimeMs == 0L ? "NA" : state.fiveMinFlipTimeMs,
+				Double.isNaN(minutesSinceFlip) ? "NA" : String.format("%.2f", minutesSinceFlip),
+				inArming,
+				lateBlocked,
+				state.fiveMinFlipPrice == 0.0 ? "NA" : String.format("%.8f", state.fiveMinFlipPrice),
+				Double.isNaN(movedDirPct) ? "NA" : String.format("%.4f", movedDirPct),
+				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose));
+	}
+
 	private static class SymbolState {
 		private int lastFiveMinDir;
+		private int prevFiveMinDir;
 		private long fiveMinFlipTimeMs;
 		private double fiveMinFlipPrice;
 		private double prevClose1m = Double.NaN;
