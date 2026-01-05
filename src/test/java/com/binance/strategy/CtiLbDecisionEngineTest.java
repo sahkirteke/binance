@@ -9,6 +9,8 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import com.binance.exchange.dto.OrderResponse;
+
 class CtiLbDecisionEngineTest {
 
 	@Test
@@ -82,6 +84,41 @@ class CtiLbDecisionEngineTest {
 				BigDecimal.valueOf(200));
 		assertTrue(takeProfit.exit());
 		assertEquals("EXIT_TAKE_PROFIT", takeProfit.reason());
+	}
+
+	@Test
+	void targetNotionalUsesMaxPosition() {
+		BigDecimal target = CtiLbDecisionEngine.resolveTargetNotional(
+				BigDecimal.valueOf(300),
+				BigDecimal.valueOf(100),
+				BigDecimal.valueOf(50));
+		assertEquals(BigDecimal.valueOf(100), target);
+	}
+
+	@Test
+	void quantityRoundingToZeroSkips() {
+		BigDecimal qty = CtiLbDecisionEngine.resolveQuantity(
+				BigDecimal.valueOf(1),
+				10_000.0,
+				BigDecimal.valueOf(100));
+		assertTrue(qty == null || qty.signum() == 0);
+	}
+
+	@Test
+	void closeOrderRejectPreventsProceed() {
+		OrderResponse response = new OrderResponse(null, "BTCUSDT", "REJECTED", "SELL", "MARKET",
+				BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE);
+		assertFalse(CtiLbDecisionEngine.shouldProceedAfterClose(response));
+	}
+
+	@Test
+	void confirmBarsDefaultApplied() {
+		assertEquals(1, CtiLbDecisionEngine.effectiveConfirmBars(0));
+	}
+
+	@Test
+	void exitDecisionBlockReasonAlwaysAllows() {
+		assertEquals("OK_EXIT", CtiLbDecisionEngine.resolveExitDecisionBlockReason());
 	}
 
 	@Test

@@ -61,7 +61,8 @@ public record StrategyProperties(
 		BigDecimal minPriceMoveBps,
 		BigDecimal flipSpreadMaxBps,
 		int maxTradesPer5Min,
-		long hardTradeCooldownMs) {
+		long hardTradeCooldownMs,
+		boolean enableTieBreakBias) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

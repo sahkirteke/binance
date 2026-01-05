@@ -38,7 +38,7 @@ strategy:
   poll-interval-ms: 500
   tick-interval-ms: 100
   rolling-window-ms: 800
-  confirm-bars: 2
+  confirm-bars: 1
   depth-levels: 12
   weight-lambda: 0.25
   obi-entry: 0.055
@@ -55,22 +55,23 @@ strategy:
   exit-persist-ms: 450
   cooldown-ms: 650
   max-spread-bps: 10
-  position-notional-usdt: 200
+  position-notional-usdt: 50
   stop-loss-bps: 18
   take-profit-bps: 22
   quantity-step: 1
   price-tick: 0.01
   max-daily-loss-usdt: 100
   max-consecutive-losses: 3
-  max-position-usdt: 100
+  max-position-usdt: 50
   flip-enabled: true
-  min-hold-ms: 60000
+  min-hold-ms: 30000
   flip-cooldown-ms: 60000
   strong-obi: 0.085
   strong-toi: 0.060
   max-flips-per-5-min: 2
   min-bfr-delta: 0.002
   min-price-move-bps: 10
+  enable-tie-break-bias: false
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500

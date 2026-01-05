@@ -17,7 +17,8 @@ public class CtiScoreCalculator {
 		}
 	}
 
-	public ScoreResult calculate(int hamScore, Double adxValue, boolean adxReady, boolean ctiReady, CtiDirection bias) {
+	public ScoreResult calculate(int hamScore, Double adxValue, boolean adxReady, boolean ctiReady,
+			boolean has5mTrend, boolean enableTieBreakBias, CtiDirection bias) {
 		if (!ctiReady) {
 			return new ScoreResult(0, 0.0, 0.0, CtiDirection.NEUTRAL, RecReason.INSUFFICIENT_DATA,
 					false, adxReady, adxGateReason(adxReady, adxValue));
@@ -33,7 +34,8 @@ public class CtiScoreCalculator {
 			adjustedScore = hamScore - adxBonus;
 		}
 		double trendWeight = adxGate ? 1.0 : 0.0;
-		Recommendation recommendation = resolveRecommendation(adjustedScore, bias);
+		boolean allowTieBreak = enableTieBreakBias && adxGate && has5mTrend;
+		Recommendation recommendation = resolveRecommendation(adjustedScore, bias, allowTieBreak);
 		return new ScoreResult(
 				adxBonus,
 				trendWeight,
@@ -45,17 +47,17 @@ public class CtiScoreCalculator {
 				adxGateReason(adxReady, adxValue));
 	}
 
-	private Recommendation resolveRecommendation(double adjustedScore, CtiDirection bias) {
+	private Recommendation resolveRecommendation(double adjustedScore, CtiDirection bias, boolean allowTieBreak) {
 		if (adjustedScore > 0) {
 			return new Recommendation(CtiDirection.LONG, RecReason.SCORE_RULES);
 		}
 		if (adjustedScore < 0) {
 			return new Recommendation(CtiDirection.SHORT, RecReason.SCORE_RULES);
 		}
-		if (bias == CtiDirection.LONG || bias == CtiDirection.SHORT) {
+		if (allowTieBreak && (bias == CtiDirection.LONG || bias == CtiDirection.SHORT)) {
 			return new Recommendation(bias, RecReason.TIE_BREAK_BIAS);
 		}
-		return new Recommendation(CtiDirection.NEUTRAL, RecReason.SCORE_RULES);
+		return new Recommendation(CtiDirection.NEUTRAL, RecReason.TIE_HOLD);
 	}
 
 	private String adxGateReason(boolean adxReady, Double adxValue) {
@@ -74,6 +76,7 @@ public class CtiScoreCalculator {
 	public enum RecReason {
 		SCORE_RULES,
 		TIE_BREAK_BIAS,
+		TIE_HOLD,
 		INSUFFICIENT_DATA
 	}
 

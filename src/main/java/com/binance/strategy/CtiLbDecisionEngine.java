@@ -3,6 +3,8 @@ package com.binance.strategy;
 import java.math.BigDecimal;
 import java.util.List;
 
+import com.binance.exchange.dto.OrderResponse;
+
 public final class CtiLbDecisionEngine {
 
 	private static final long FLIP_WINDOW_MS = 300_000L;
@@ -37,6 +39,41 @@ public final class CtiLbDecisionEngine {
 			}
 		}
 		return new ExitDecision(false, null, pnlBps);
+	}
+
+	public static BigDecimal resolveTargetNotional(BigDecimal notionalUsdt, BigDecimal maxPositionUsdt,
+			BigDecimal defaultNotionalUsdt) {
+		BigDecimal effectiveNotional = (notionalUsdt == null || notionalUsdt.signum() <= 0)
+				? defaultNotionalUsdt
+				: notionalUsdt;
+		BigDecimal effectiveMax = (maxPositionUsdt == null || maxPositionUsdt.signum() <= 0)
+				? defaultNotionalUsdt
+				: maxPositionUsdt;
+		if (maxPositionUsdt != null && maxPositionUsdt.signum() <= 0) {
+			return effectiveNotional;
+		}
+		return effectiveNotional.min(effectiveMax);
+	}
+
+	public static BigDecimal resolveQuantity(BigDecimal targetNotional, double price, BigDecimal quantityStep) {
+		if (targetNotional == null || targetNotional.signum() <= 0 || price <= 0) {
+			return null;
+		}
+		BigDecimal rawQty = targetNotional.divide(BigDecimal.valueOf(price), java.math.MathContext.DECIMAL64);
+		return floorToStep(rawQty, quantityStep);
+	}
+
+	public static boolean shouldProceedAfterClose(OrderResponse response) {
+		return response != null && response.orderId() != null
+				&& (response.status() == null || !"REJECTED".equalsIgnoreCase(response.status()));
+	}
+
+	public static int effectiveConfirmBars(int configured) {
+		return configured > 0 ? configured : 1;
+	}
+
+	public static String resolveExitDecisionBlockReason() {
+		return "OK_EXIT";
 	}
 
 	public static BlockDecision evaluateEntryBlocks(BlockInput input) {
@@ -104,6 +141,14 @@ public final class CtiLbDecisionEngine {
 			}
 		}
 		return count;
+	}
+
+	private static BigDecimal floorToStep(BigDecimal value, BigDecimal step) {
+		if (value == null || step == null || step.signum() <= 0) {
+			return value;
+		}
+		BigDecimal ratio = value.divide(step, 0, java.math.RoundingMode.DOWN);
+		return ratio.multiply(step, java.math.MathContext.DECIMAL64);
 	}
 
 	public record ExitDecision(boolean exit, String reason, double pnlBps) {

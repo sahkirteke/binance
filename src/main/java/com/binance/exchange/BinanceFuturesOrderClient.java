@@ -2,6 +2,7 @@ package com.binance.exchange;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
@@ -212,11 +213,37 @@ public class BinanceFuturesOrderClient {
 						position.positionSide()));
 	}
 
+	public Mono<SymbolFilters> fetchSymbolFilters(String symbol) {
+		return binanceWebClient
+				.get()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/exchangeInfo")
+						.build())
+				.retrieve()
+				.onStatus(status -> status.isError(), response -> response
+						.bodyToMono(String.class)
+						.defaultIfEmpty("<empty>")
+						.flatMap(body -> Mono.error(new IllegalStateException(
+								"Binance exchange info failed with status=" + response.statusCode().value()
+										+ ", body=" + body))))
+				.bodyToMono(ExchangeInfoResponse.class)
+				.flatMap(response -> response.symbols().stream()
+						.filter(info -> symbol.equalsIgnoreCase(info.symbol()))
+						.findFirst()
+						.map(info -> Mono.just(resolveSymbolFilters(info)))
+						.orElseGet(() -> Mono.error(new IllegalArgumentException("Symbol not found: " + symbol))));
+	}
+
 	public record ExchangePosition(
 			String symbol,
 			BigDecimal positionAmt,
 			BigDecimal entryPrice,
 			String positionSide) {
+	}
+
+	public record SymbolFilters(
+			BigDecimal minQty,
+			BigDecimal minNotional) {
 	}
 
 	private record PositionRiskResponse(
@@ -227,6 +254,43 @@ public class BinanceFuturesOrderClient {
 	}
 
 	private record PositionModeResponse(boolean dualSidePosition) {}
+
+	private record ExchangeInfoResponse(
+			List<SymbolInfo> symbols) {
+	}
+
+	private record SymbolInfo(
+			String symbol,
+			List<ExchangeFilter> filters) {
+	}
+
+	private record ExchangeFilter(
+			String filterType,
+			BigDecimal minQty,
+			BigDecimal minNotional,
+			BigDecimal notional) {
+	}
+
+	private SymbolFilters resolveSymbolFilters(SymbolInfo info) {
+		BigDecimal minQty = null;
+		BigDecimal minNotional = null;
+		if (info.filters() != null) {
+			for (ExchangeFilter filter : info.filters()) {
+				if ("LOT_SIZE".equalsIgnoreCase(filter.filterType())) {
+					minQty = filter.minQty();
+				}
+				if ("MIN_NOTIONAL".equalsIgnoreCase(filter.filterType())
+						|| "NOTIONAL".equalsIgnoreCase(filter.filterType())) {
+					if (filter.minNotional() != null) {
+						minNotional = filter.minNotional();
+					} else {
+						minNotional = filter.notional();
+					}
+				}
+			}
+		}
+		return new SymbolFilters(minQty, minNotional);
+	}
 
 	private Mono<OrderResponse> placeMarketOrderWithFlags(String symbol, String side, BigDecimal quantity,
 			String positionSide, boolean reduceOnly) {

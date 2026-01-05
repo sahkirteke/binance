@@ -18,6 +18,21 @@ class CtiScoreLogicTest {
 	}
 
 	@Test
+	void tieHoldWhenBiasDisabled() {
+		CtiScoreCalculator calculator = new CtiScoreCalculator();
+		CtiScoreCalculator.ScoreResult result = calculator.calculate(
+				0,
+				21.0,
+				true,
+				true,
+				true,
+				false,
+				CtiDirection.SHORT);
+		assertEquals(CtiDirection.NEUTRAL, result.recommendation());
+		assertEquals(CtiScoreCalculator.RecReason.TIE_HOLD, result.recReason());
+	}
+
+	@Test
 	void confirmBarsRequireConsecutiveRecommendations() {
 		RecStreakTracker tracker = new RecStreakTracker();
 		RecStreakTracker.RecUpdate first = tracker.update(CtiDirection.LONG, 1000L, java.math.BigDecimal.ONE, 2);
@@ -47,6 +62,8 @@ class CtiScoreLogicTest {
 				adx,
 				true,
 				true,
+				true,
+				false,
 				CtiDirection.NEUTRAL);
 		assertEquals(expectedAdj, result.adjustedScore());
 		assertEquals(expectedRec, result.recommendation());

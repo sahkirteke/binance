@@ -9,6 +9,7 @@ public class ScoreSignalIndicator {
 
 	private final String symbol;
 	private final CtiScoreCalculator scoreCalculator;
+	private final boolean enableTieBreakBias;
 	private final FiveMinuteCandleAggregator fiveMinuteAggregator = new FiveMinuteCandleAggregator();
 	private final AdxIndicator adxIndicator = new AdxIndicator(ADX_PERIOD);
 	private CtiDirection lastCti5mDir = CtiDirection.NEUTRAL;
@@ -22,9 +23,10 @@ public class ScoreSignalIndicator {
 	private long last5mCloseTime;
 	private final int cti5mPeriod = CtiLbTrendIndicator.period();
 
-	public ScoreSignalIndicator(String symbol, CtiScoreCalculator scoreCalculator) {
+	public ScoreSignalIndicator(String symbol, CtiScoreCalculator scoreCalculator, boolean enableTieBreakBias) {
 		this.symbol = symbol;
 		this.scoreCalculator = scoreCalculator;
+		this.enableTieBreakBias = enableTieBreakBias;
 	}
 
 	public ScoreSignal onClosedCandle(Candle candle) {
@@ -57,11 +59,14 @@ public class ScoreSignalIndicator {
 		CtiDirection bias = resolveBias(cti1mDir, lastCti5mDir);
 		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
 		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD + 1;
+		boolean has5mTrend = cti5mReady && lastCti5mDir != CtiDirection.NEUTRAL;
 		CtiScoreCalculator.ScoreResult scoreResult = scoreCalculator.calculate(
 				hamCtiScore,
 				adx5mReady ? lastAdx5m : null,
 				adx5mReady,
 				cti5mReady,
+				has5mTrend,
+				enableTieBreakBias,
 				bias);
 
 		Double bfr5mValue = cti5mReady ? lastCti5mValue : null;

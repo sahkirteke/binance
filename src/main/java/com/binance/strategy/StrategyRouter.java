@@ -31,7 +31,7 @@ public class StrategyRouter {
 			return;
 		}
 		ScoreSignalIndicator indicator = indicators.computeIfAbsent(symbol,
-				ignored -> new ScoreSignalIndicator(symbol, scoreCalculator));
+				ignored -> new ScoreSignalIndicator(symbol, scoreCalculator, strategyProperties.enableTieBreakBias()));
 		ScoreSignal signal = indicator.onClosedCandle(candle);
 		ctiLbStrategy.onScoreSignal(symbol, signal, candle.close());
 	}
