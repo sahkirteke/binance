@@ -30,9 +30,32 @@ public class StrategyRouter {
 					candle.closeTime());
 			return;
 		}
-		ScoreSignalIndicator indicator = indicators.computeIfAbsent(symbol,
-				ignored -> new ScoreSignalIndicator(symbol, scoreCalculator, strategyProperties.enableTieBreakBias()));
+		ScoreSignalIndicator indicator = resolveIndicator(symbol);
 		ScoreSignal signal = indicator.onClosedCandle(candle);
 		ctiLbStrategy.onScoreSignal(symbol, signal, candle.close());
+	}
+
+	public void warmupOneMinuteCandle(String symbol, Candle candle) {
+		if (strategyProperties.active() != StrategyType.CTI_LB) {
+			return;
+		}
+		resolveIndicator(symbol).warmupOneMinuteCandle(candle);
+	}
+
+	public void warmupFiveMinuteCandle(String symbol, Candle candle) {
+		if (strategyProperties.active() != StrategyType.CTI_LB) {
+			return;
+		}
+		resolveIndicator(symbol).warmupFiveMinuteCandle(candle);
+	}
+
+	public boolean isWarmupReady(String symbol) {
+		ScoreSignalIndicator indicator = indicators.get(symbol);
+		return indicator != null && indicator.isWarmupReady();
+	}
+
+	private ScoreSignalIndicator resolveIndicator(String symbol) {
+		return indicators.computeIfAbsent(symbol,
+				ignored -> new ScoreSignalIndicator(symbol, scoreCalculator, strategyProperties.enableTieBreakBias()));
 	}
 }

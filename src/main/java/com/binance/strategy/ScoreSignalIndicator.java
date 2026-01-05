@@ -36,29 +36,14 @@ public class ScoreSignalIndicator {
 		CtiDirection cti1mDir = resolveRawDirection(cti1mValue, cti1mPrev);
 
 		Optional<Candle> fiveMinuteClosed = fiveMinuteAggregator.update(candle);
-		if (fiveMinuteClosed.isPresent()) {
-			Candle fiveMinute = fiveMinuteClosed.get();
-			TrendSignal cti5mSignal = scoreCalculator.updateCti(symbol, "5m", fiveMinute.close(), fiveMinute.closeTime());
-			lastCti5mValue = cti5mSignal.bfr();
-			lastCti5mPrev = cti5mSignal.bfrPrev();
-			lastCti5mDir = resolveRawDirection(lastCti5mValue, lastCti5mPrev);
-			has5mCti = true;
-			cti5mBarsSeen++;
-			last5mCloseTime = fiveMinute.closeTime();
-			OptionalDouble adx = adxIndicator.update(fiveMinute.high(), fiveMinute.low(), fiveMinute.close());
-			adx5mBarsSeen++;
-			if (adx.isPresent()) {
-				lastAdx5m = adx.getAsDouble();
-				hasAdx = true;
-			}
-		}
+		fiveMinuteClosed.ifPresent(this::updateFiveMinute);
 
 		int score5m = lastCti5mDir == CtiDirection.LONG ? 1 : lastCti5mDir == CtiDirection.SHORT ? -1 : 0;
 		int score1m = cti1mDir == CtiDirection.LONG ? 1 : cti1mDir == CtiDirection.SHORT ? -1 : 0;
 		int hamCtiScore = score5m + score1m;
 		CtiDirection bias = resolveBias(cti1mDir, lastCti5mDir);
 		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
-		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD + 1;
+		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD;
 		boolean has5mTrend = cti5mReady && lastCti5mDir != CtiDirection.NEUTRAL;
 		CtiScoreCalculator.ScoreResult scoreResult = scoreCalculator.calculate(
 				hamCtiScore,
@@ -101,6 +86,34 @@ public class ScoreSignalIndicator {
 				last5mCloseTime,
 				candle.closeTime(),
 				!cti5mReady);
+	}
+
+	public void warmupOneMinuteCandle(Candle candle) {
+		scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
+	}
+
+	public void warmupFiveMinuteCandle(Candle candle) {
+		updateFiveMinute(candle);
+	}
+
+	public boolean isWarmupReady() {
+		return cti5mBarsSeen >= cti5mPeriod && adx5mBarsSeen >= ADX_PERIOD;
+	}
+
+	private void updateFiveMinute(Candle fiveMinute) {
+		TrendSignal cti5mSignal = scoreCalculator.updateCti(symbol, "5m", fiveMinute.close(), fiveMinute.closeTime());
+		lastCti5mValue = cti5mSignal.bfr();
+		lastCti5mPrev = cti5mSignal.bfrPrev();
+		lastCti5mDir = resolveRawDirection(lastCti5mValue, lastCti5mPrev);
+		has5mCti = true;
+		cti5mBarsSeen++;
+		last5mCloseTime = fiveMinute.closeTime();
+		OptionalDouble adx = adxIndicator.update(fiveMinute.high(), fiveMinute.low(), fiveMinute.close());
+		adx5mBarsSeen++;
+		if (adx.isPresent()) {
+			lastAdx5m = adx.getAsDouble();
+			hasAdx = true;
+		}
 	}
 
 	private CtiDirection resolveRawDirection(double ctiValue, double ctiPrevValue) {

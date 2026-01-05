@@ -48,13 +48,17 @@ public class CtiLbStrategy {
 	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
 	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 	private static final BigDecimal DEFAULT_NOTIONAL_USDT = BigDecimal.valueOf(50);
-	private static final int DEFAULT_CONFIRM_BARS = 1;
 	private static final long DEFAULT_MIN_HOLD_MS = 30_000L;
+	private volatile boolean warmupMode;
 
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 		logConfigSnapshot();
+	}
+
+	public void setWarmupMode(boolean warmupMode) {
+		this.warmupMode = warmupMode;
 	}
 
 	public void onScoreSignal(String symbol, ScoreSignal signal, double close) {
@@ -68,7 +72,6 @@ public class CtiLbStrategy {
 			return;
 		}
 
-		syncPositionIfNeeded(symbol, closeTime);
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
 		RecStreakTracker tracker = recTrackers.computeIfAbsent(symbol, ignored -> new RecStreakTracker());
@@ -93,6 +96,13 @@ public class CtiLbStrategy {
 			logConfirmHit(symbol, confirmedRec, recUpdate, signal, close);
 		}
 
+		if (warmupMode) {
+			logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+					recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE");
+			return;
+		}
+
+		syncPositionIfNeeded(symbol, closeTime);
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(

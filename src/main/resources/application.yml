@@ -76,6 +76,12 @@ strategy:
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500
 
+warmup:
+  enabled: true
+  candles1m: 240
+  candles5m: 120
+  concurrency: 3
+
 management:
   endpoints:
     web:
