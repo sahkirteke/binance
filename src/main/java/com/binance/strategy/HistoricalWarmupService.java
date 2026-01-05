@@ -1,5 +1,6 @@
 package com.binance.strategy;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
@@ -10,7 +11,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import com.binance.market.BinanceMarketClient;
-import com.binance.market.dto.FuturesKline;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.annotation.PostConstruct;
 import reactor.core.publisher.Flux;
@@ -29,17 +31,23 @@ public class HistoricalWarmupService {
 	private final StrategyProperties strategyProperties;
 	private final WarmupProperties warmupProperties;
 	private final CtiLbStrategy ctiLbStrategy;
+	private final KlineStreamWatcher klineStreamWatcher;
+	private final ObjectMapper objectMapper;
 
 	public HistoricalWarmupService(BinanceMarketClient marketClient,
 			StrategyRouter strategyRouter,
 			StrategyProperties strategyProperties,
 			WarmupProperties warmupProperties,
-			CtiLbStrategy ctiLbStrategy) {
+			CtiLbStrategy ctiLbStrategy,
+			KlineStreamWatcher klineStreamWatcher,
+			ObjectMapper objectMapper) {
 		this.marketClient = marketClient;
 		this.strategyRouter = strategyRouter;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
 		this.ctiLbStrategy = ctiLbStrategy;
+		this.klineStreamWatcher = klineStreamWatcher;
+		this.objectMapper = objectMapper;
 	}
 
 	@PostConstruct
@@ -74,6 +82,7 @@ public class HistoricalWarmupService {
 						.flatMap(ctiLbStrategy::refreshAfterWarmup, concurrency)
 						.then())
 				.doFinally(signal -> {
+					klineStreamWatcher.startStreams();
 					ctiLbStrategy.setWarmupMode(false);
 					long durationMs = System.currentTimeMillis() - start;
 					LOGGER.info("EVENT=WARMUP_DONE totalDurationMs={} readySymbols={}", durationMs,
@@ -108,13 +117,20 @@ public class HistoricalWarmupService {
 
 	private Mono<Integer> warmupSymbolInterval(String symbol, String interval, int limit) {
 		long start = System.currentTimeMillis();
-		return marketClient.fetchFuturesKlines(symbol, interval, limit)
+		return marketClient.fetchFuturesKlinesRaw(symbol, interval, limit)
+				.map(json -> parseKlines(json, symbol))
+				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " " + interval,
+						error))
 				.doOnNext(klines -> {
-					List<FuturesKline> sorted = klines.stream()
-							.sorted(Comparator.comparingLong(FuturesKline::closeTime))
+					List<WarmupCandle> sorted = klines.stream()
+							.sorted(Comparator.comparingLong(WarmupCandle::closeTime))
 							.toList();
-					for (FuturesKline kline : sorted) {
-						Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(),
+					for (WarmupCandle kline : sorted) {
+						Candle candle = new Candle(
+								kline.open().doubleValue(),
+								kline.high().doubleValue(),
+								kline.low().doubleValue(),
+								kline.close().doubleValue(),
 								kline.closeTime());
 						if ("5m".equals(interval)) {
 							strategyRouter.warmupFiveMinuteCandle(symbol, candle);
@@ -154,6 +170,42 @@ public class HistoricalWarmupService {
 		return warmupProperties.concurrency() > 0 ? warmupProperties.concurrency() : DEFAULT_CONCURRENCY;
 	}
 
+	private List<WarmupCandle> parseKlines(String json, String symbol) {
+		try {
+			JsonNode root = objectMapper.readTree(json);
+			if (root == null || !root.isArray()) {
+				throw new IllegalStateException("Unexpected kline payload for " + symbol);
+			}
+			java.util.ArrayList<WarmupCandle> candles = new java.util.ArrayList<>();
+			for (JsonNode entry : root) {
+				if (!entry.isArray() || entry.size() < 7) {
+					continue;
+				}
+				long openTime = entry.get(0).asLong();
+				BigDecimal open = new BigDecimal(entry.get(1).asText());
+				BigDecimal high = new BigDecimal(entry.get(2).asText());
+				BigDecimal low = new BigDecimal(entry.get(3).asText());
+				BigDecimal close = new BigDecimal(entry.get(4).asText());
+				BigDecimal volume = new BigDecimal(entry.get(5).asText());
+				long closeTime = entry.get(6).asLong();
+				candles.add(new WarmupCandle(openTime, closeTime, open, high, low, close, volume));
+			}
+			return candles;
+		} catch (Exception ex) {
+			throw new IllegalStateException("Failed to parse klines for " + symbol + ": " + ex.getMessage(), ex);
+		}
+	}
+
 	private record WarmupCounts(int candles1m, int candles5m) {
+	}
+
+	private record WarmupCandle(
+			long openTime,
+			long closeTime,
+			BigDecimal open,
+			BigDecimal high,
+			BigDecimal low,
+			BigDecimal close,
+			BigDecimal volume) {
 	}
 }

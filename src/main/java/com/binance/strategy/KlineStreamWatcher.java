@@ -30,6 +30,7 @@ public class KlineStreamWatcher {
 	private final BinanceProperties binanceProperties;
 	private final StrategyProperties strategyProperties;
 	private final StrategyRouter strategyRouter;
+	private final WarmupProperties warmupProperties;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
@@ -38,10 +39,12 @@ public class KlineStreamWatcher {
 	public KlineStreamWatcher(BinanceProperties binanceProperties,
 			StrategyProperties strategyProperties,
 			StrategyRouter strategyRouter,
+			WarmupProperties warmupProperties,
 			ObjectMapper objectMapper) {
 		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.strategyRouter = strategyRouter;
+		this.warmupProperties = warmupProperties;
 		this.objectMapper = objectMapper;
 	}
 
@@ -49,6 +52,17 @@ public class KlineStreamWatcher {
 	public void start() {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			LOGGER.info("Kline stream not started (active={})", strategyProperties.active());
+			return;
+		}
+		if (warmupProperties.enabled()) {
+			LOGGER.info("Kline stream delayed until warmup completes.");
+			return;
+		}
+		startStreams();
+	}
+
+	public void startStreams() {
+		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
 		if (binanceProperties.useTestnet()) {
