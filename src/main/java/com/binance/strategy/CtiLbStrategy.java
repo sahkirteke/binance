@@ -52,6 +52,7 @@ public class CtiLbStrategy {
 	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 	private static final BigDecimal DEFAULT_NOTIONAL_USDT = BigDecimal.valueOf(50);
 	private static final long DEFAULT_MIN_HOLD_MS = 30_000L;
+	private static final BigDecimal DEFAULT_FEE_BPS = BigDecimal.valueOf(2);
 	private volatile boolean warmupMode;
 	private volatile boolean ordersEnabledOverride = true;
 
@@ -150,7 +151,13 @@ public class CtiLbStrategy {
 				entryState == null ? null : entryState.entryPrice(),
 				close,
 				strategyProperties.stopLossBps(),
-				strategyProperties.takeProfitBps());
+				strategyProperties.takeProfitBps(),
+				resolveFeeBps(),
+				strategyProperties.maxSpreadBps(),
+				strategyProperties.flipSpreadMaxBps(),
+				closeTime,
+				entryState == null ? null : entryState.entryTimeMs(),
+				resolveMinHoldMs());
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
 
 		if (current != PositionState.NONE && exitDecision.exit()) {
@@ -284,7 +291,8 @@ public class CtiLbStrategy {
 									recordEntry(symbol, targetForLog, response, resolvedQtyForLog, closeTime, close);
 									flipCount.increment();
 									logFlip(symbol, currentForLog, targetForLog, signal, close,
-											recommendationUsedForLog, confirmedRec, actionForLog);
+											recommendationUsedForLog, confirmedRec, actionForLog,
+											response == null ? null : response.orderId());
 								})
 								.then();
 					}
@@ -319,7 +327,8 @@ public class CtiLbStrategy {
 								recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
 								flipCount.increment();
 								logFlip(symbol, currentForLog, targetForLog, signal, close,
-										recommendationUsedForLog, confirmedRec, actionForLog);
+										recommendationUsedForLog, confirmedRec, actionForLog,
+										response == null ? null : response.orderId());
 							})
 							.then();
 				})
@@ -430,6 +439,10 @@ public class CtiLbStrategy {
 			return DEFAULT_MIN_HOLD_MS;
 		}
 		return configured;
+	}
+
+	private BigDecimal resolveFeeBps() {
+		return DEFAULT_FEE_BPS;
 	}
 
 	private void logDecision(String symbol, ScoreSignal signal, double close, SignalAction action,
@@ -716,7 +729,7 @@ public class CtiLbStrategy {
 	}
 
 	private void logFlip(String symbol, PositionState from, PositionState to, ScoreSignal signal, double price,
-			CtiDirection rec, CtiDirection confirmedRec, SignalAction action) {
+			CtiDirection rec, CtiDirection confirmedRec, SignalAction action, Long orderId) {
 		if (warmupMode) {
 			return;
 		}
@@ -738,7 +751,7 @@ public class CtiLbStrategy {
 				formatPositionSide(from),
 				BigDecimal.ZERO,
 				strategyProperties.enableOrders(),
-				"NONE",
+				orderId == null ? "NA" : orderId.toString(),
 				missedMoveCount.longValue(),
 				confirmHitCount.longValue(),
 				flipCount.longValue());

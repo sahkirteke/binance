@@ -8,34 +8,50 @@ import com.binance.exchange.dto.OrderResponse;
 public final class CtiLbDecisionEngine {
 
 	private static final long FLIP_WINDOW_MS = 300_000L;
+	private static final double MIN_STOP_LOSS_BPS = 60.0;
+	private static final double MIN_TAKE_PROFIT_BPS = 80.0;
 
 	private CtiLbDecisionEngine() {
 	}
 
 	public static ExitDecision evaluateExit(CtiDirection side, BigDecimal entryPrice, double currentPrice,
-			BigDecimal stopLossBps, BigDecimal takeProfitBps) {
+			BigDecimal stopLossBps, BigDecimal takeProfitBps, BigDecimal feeBps, BigDecimal spreadBps,
+			BigDecimal slippageBps, long nowMs, Long entryTimeMs, long minHoldMs) {
 		if (side == null || entryPrice == null || entryPrice.signum() <= 0 || currentPrice <= 0) {
 			return new ExitDecision(false, null, 0.0);
 		}
 		double entry = entryPrice.doubleValue();
-		double pnlBps = estimatePnlBps(side, entry, currentPrice);
+		double costBps = normalizeBps(feeBps) + normalizeBps(spreadBps) + normalizeBps(slippageBps);
+		double pnlBps = estimatePnlBps(side, entry, currentPrice) - costBps;
 		double stopLoss = toFraction(stopLossBps);
 		double takeProfit = toFraction(takeProfitBps);
+		double effectiveStopLossBps = Math.max(stopLoss * 10000.0, MIN_STOP_LOSS_BPS);
+		double effectiveTakeProfitBps = Math.max(takeProfit * 10000.0, MIN_TAKE_PROFIT_BPS);
+		double effectiveStopLoss = effectiveStopLossBps / 10000.0;
+		double effectiveTakeProfit = effectiveTakeProfitBps / 10000.0;
 
-		if (stopLoss > 0) {
-			if (side == CtiDirection.LONG && currentPrice <= entry * (1.0 - stopLoss)) {
-				return new ExitDecision(true, "EXIT_STOP_LOSS", pnlBps);
+		if (entryTimeMs != null && minHoldMs > 0 && nowMs - entryTimeMs < minHoldMs) {
+			return new ExitDecision(false, "BLOCK_MIN_HOLD_EXIT", pnlBps);
+		}
+
+		if (effectiveStopLossBps > 0) {
+			if (side == CtiDirection.LONG && currentPrice <= entry * (1.0 - effectiveStopLoss)) {
+				return new ExitDecision(true, formatExitReason("EXIT_STOP_LOSS", pnlBps, effectiveStopLossBps,
+						entry, currentPrice, costBps), pnlBps);
 			}
-			if (side == CtiDirection.SHORT && currentPrice >= entry * (1.0 + stopLoss)) {
-				return new ExitDecision(true, "EXIT_STOP_LOSS", pnlBps);
+			if (side == CtiDirection.SHORT && currentPrice >= entry * (1.0 + effectiveStopLoss)) {
+				return new ExitDecision(true, formatExitReason("EXIT_STOP_LOSS", pnlBps, effectiveStopLossBps,
+						entry, currentPrice, costBps), pnlBps);
 			}
 		}
-		if (takeProfit > 0) {
-			if (side == CtiDirection.LONG && currentPrice >= entry * (1.0 + takeProfit)) {
-				return new ExitDecision(true, "EXIT_TAKE_PROFIT", pnlBps);
+		if (effectiveTakeProfitBps > 0) {
+			if (side == CtiDirection.LONG && currentPrice >= entry * (1.0 + effectiveTakeProfit)) {
+				return new ExitDecision(true, formatExitReason("EXIT_TAKE_PROFIT", pnlBps, effectiveTakeProfitBps,
+						entry, currentPrice, costBps), pnlBps);
 			}
-			if (side == CtiDirection.SHORT && currentPrice <= entry * (1.0 - takeProfit)) {
-				return new ExitDecision(true, "EXIT_TAKE_PROFIT", pnlBps);
+			if (side == CtiDirection.SHORT && currentPrice <= entry * (1.0 - effectiveTakeProfit)) {
+				return new ExitDecision(true, formatExitReason("EXIT_TAKE_PROFIT", pnlBps, effectiveTakeProfitBps,
+						entry, currentPrice, costBps), pnlBps);
 			}
 		}
 		return new ExitDecision(false, null, pnlBps);
@@ -127,6 +143,21 @@ public final class CtiLbDecisionEngine {
 			return 0.0;
 		}
 		return bps.doubleValue() / 10000.0;
+	}
+
+	private static double normalizeBps(BigDecimal bps) {
+		return bps == null ? 0.0 : bps.doubleValue();
+	}
+
+	private static String formatExitReason(String type, double pnlBps, double thresholdBps,
+			double entryPrice, double currentPrice, double costBps) {
+		return String.format("%s pnlBps=%.2f thresholdBps=%.2f entry=%.8f current=%.8f costBps=%.2f",
+				type,
+				pnlBps,
+				thresholdBps,
+				entryPrice,
+				currentPrice,
+				costBps);
 	}
 
 	private static int countRecentFlips(List<Long> flipTimes, long nowMs) {
