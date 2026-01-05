@@ -50,6 +50,8 @@ public class CtiLbStrategy {
 	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, LongAdder> warmupDecisionCounters = new ConcurrentHashMap<>();
 	private final Map<String, SymbolState> symbolStates = new ConcurrentHashMap<>();
+	private final Map<String, Long> lastOppositeExitAtMs = new ConcurrentHashMap<>();
+	private final Map<String, Integer> pendingFlipDirs = new ConcurrentHashMap<>();
 	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 	private static final BigDecimal DEFAULT_NOTIONAL_USDT = BigDecimal.valueOf(50);
 	private static final long DEFAULT_MIN_HOLD_MS = 30_000L;
@@ -136,6 +138,7 @@ public class CtiLbStrategy {
 				closeTime,
 				symbolState);
 		EntryDecision entryDecision = resolveEntryDecision(current, symbolState, entryFilterState);
+		entryDecision = applyPendingFlipGate(symbol, current, entryDecision, entryFilterState, closeTime);
 		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, entryFilterState, entryDecision);
 
 		CtiDirection recommendationRaw = signal.recommendation();
@@ -177,6 +180,11 @@ public class CtiLbStrategy {
 		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
 		OppositeExitDecision oppositeExit = resolveOppositeExit(symbolState, current);
 		if (current != PositionState.NONE && oppositeExit.exit()) {
+			if (strategyProperties.enableFlipOnOppositeExit()) {
+				lastOppositeExitAtMs.put(symbol, closeTime);
+				pendingFlipDirs.put(symbol, symbolState.lastFiveMinDir);
+				LOGGER.info("EVENT=PENDING_FLIP symbol={} setDir={} at={}", symbol, symbolState.lastFiveMinDir, closeTime);
+			}
 			SignalAction exitAction = SignalAction.HOLD;
 			String decisionActionReason = oppositeExit.reason();
 			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
@@ -550,6 +558,32 @@ public class CtiLbStrategy {
 		return new EntryDecision(null, entryMode, confirmBarsUsed, state.confirmCounter, null, null);
 	}
 
+	private EntryDecision applyPendingFlipGate(String symbol, PositionState current, EntryDecision entryDecision,
+			EntryFilterState entryFilterState, long nowMs) {
+		int pendingFlipDir = pendingFlipDirs.getOrDefault(symbol, 0);
+		if (pendingFlipDir == 0) {
+			return entryDecision;
+		}
+		if (current != PositionState.NONE) {
+			return entryDecision;
+		}
+		long remainingMs = resolveFlipCooldownRemaining(symbol, nowMs);
+		if (remainingMs > 0) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_COOLDOWN");
+		}
+		if (orderTracker.openOrdersCount(symbol) > 0) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_OPEN_ORDERS");
+		}
+		if (entryFilterState.fiveMinDir() != pendingFlipDir) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_PENDING_DIR_MISMATCH");
+		}
+		if (entryDecision.confirmedRec() == null) {
+			return entryDecision;
+		}
+		pendingFlipDirs.put(symbol, 0);
+		return entryDecision;
+	}
+
 	private record EntryFilterState(
 			int fiveMinDir,
 			boolean inArming,
@@ -573,6 +607,11 @@ public class CtiLbStrategy {
 			String decisionActionReason) {
 		static EntryDecision defaultDecision() {
 			return new EntryDecision(null, "NORMAL", 0, 0, null, null);
+		}
+
+		EntryDecision withBlockReason(String reason) {
+			return new EntryDecision(confirmedRec, entryMode, confirmBarsUsed, confirmCounter, reason,
+					decisionActionReason);
 		}
 	}
 
@@ -615,6 +654,15 @@ public class CtiLbStrategy {
 		static OppositeExitDecision noExit() {
 			return new OppositeExitDecision(false, null);
 		}
+	}
+
+	private long resolveFlipCooldownRemaining(String symbol, long nowMs) {
+		Long lastExit = lastOppositeExitAtMs.get(symbol);
+		if (lastExit == null) {
+			return 0L;
+		}
+		long remaining = strategyProperties.flipCooldownMs() - (nowMs - lastExit);
+		return Math.max(0L, remaining);
 	}
 
 	private Mono<Void> executeFlip(String symbol, PositionState target, double close) {
@@ -732,6 +780,8 @@ public class CtiLbStrategy {
 		Boolean desync = stateDesyncBySymbol.get(symbol);
 		BigDecimal entryPrice = entryState == null ? null : entryState.entryPrice();
 		int openOrders = orderTracker.openOrdersCount(symbol);
+		Integer pendingFlipDir = pendingFlipDirs.getOrDefault(symbol, 0);
+		Long cooldownRemainingMs = resolveFlipCooldownRemaining(symbol, signal.closeTime());
 		DecisionLogDto dto = new DecisionLogDto(
 				symbol,
 				signal.closeTime(),
@@ -786,6 +836,8 @@ public class CtiLbStrategy {
 				formatPositionSide(positionStates.getOrDefault(symbol, PositionState.NONE)),
 				entryState == null ? null : entryState.quantity(),
 				openOrders,
+				pendingFlipDir,
+				cooldownRemainingMs,
 				missedMoveCount.longValue(),
 				confirmHitCount.longValue(),
 				flipCount.longValue());

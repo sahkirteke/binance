@@ -67,7 +67,7 @@ strategy:
   max-position-usdt: 50
   flip-enabled: true
   min-hold-ms: 30000
-  flip-cooldown-ms: 60000
+  flip-cooldown-ms: 2000
   strong-obi: 0.085
   strong-toi: 0.060
   max-flips-per-5-min: 2
@@ -82,6 +82,7 @@ strategy:
   confirm-bars-early: 1
   confirm-bars-normal: 2
   confirm-bars-exit: 1
+  enable-flip-on-opposite-exit: true
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500

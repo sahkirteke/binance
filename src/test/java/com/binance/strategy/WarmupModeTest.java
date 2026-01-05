@@ -72,7 +72,9 @@ class WarmupModeTest {
 				BigDecimal.valueOf(0.40),
 				1,
 				2,
-				1);
+				1,
+				true,
+				2000L);
 		WarmupProperties warmupProperties = new WarmupProperties(true, 240, 120, 3, false, 0);
 		SymbolFilterService filterService = new SymbolFilterService(orderClient, properties);
 		OrderTracker orderTracker = new OrderTracker();

@@ -70,7 +70,9 @@ public record StrategyProperties(
 		BigDecimal chaseMaxMovePct,
 		int confirmBarsEarly,
 		int confirmBarsNormal,
-		int confirmBarsExit) {
+		int confirmBarsExit,
+		boolean enableFlipOnOppositeExit,
+		long flipCooldownMs) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {
