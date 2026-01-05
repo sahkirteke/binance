@@ -82,6 +82,7 @@ public class HistoricalWarmupService {
 						.flatMap(ctiLbStrategy::refreshAfterWarmup, concurrency)
 						.then())
 				.doFinally(signal -> {
+					klineStreamWatcher.markWarmupComplete();
 					klineStreamWatcher.startStreams();
 					ctiLbStrategy.setWarmupMode(false);
 					long durationMs = System.currentTimeMillis() - start;

@@ -3,6 +3,7 @@ package com.binance.strategy;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -35,6 +36,8 @@ public class KlineStreamWatcher {
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
 	private final AtomicReference<List<Disposable>> testnetSubscriptionsRef = new AtomicReference<>();
+	private final AtomicBoolean warmupComplete = new AtomicBoolean(false);
+	private final AtomicBoolean streamsStarted = new AtomicBoolean(false);
 
 	public KlineStreamWatcher(BinanceProperties binanceProperties,
 			StrategyProperties strategyProperties,
@@ -58,6 +61,7 @@ public class KlineStreamWatcher {
 			LOGGER.info("Kline stream delayed until warmup completes.");
 			return;
 		}
+		markWarmupComplete();
 		startStreams();
 	}
 
@@ -65,11 +69,22 @@ public class KlineStreamWatcher {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
+		if (!warmupComplete.get()) {
+			LOGGER.info("Kline stream start skipped (warmup not complete).");
+			return;
+		}
+		if (!streamsStarted.compareAndSet(false, true)) {
+			return;
+		}
 		if (binanceProperties.useTestnet()) {
 			startTestnetStreams();
 		} else {
 			startCombinedStream();
 		}
+	}
+
+	public void markWarmupComplete() {
+		warmupComplete.set(true);
 	}
 
 	@PreDestroy
