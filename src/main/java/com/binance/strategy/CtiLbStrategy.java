@@ -49,6 +49,7 @@ public class CtiLbStrategy {
 	private final Map<String, Boolean> stateDesyncBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, LongAdder> warmupDecisionCounters = new ConcurrentHashMap<>();
+	private final Map<String, SymbolState> symbolStates = new ConcurrentHashMap<>();
 	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 	private static final BigDecimal DEFAULT_NOTIONAL_USDT = BigDecimal.valueOf(50);
 	private static final long DEFAULT_MIN_HOLD_MS = 30_000L;
@@ -110,6 +111,16 @@ public class CtiLbStrategy {
 		if (previousCloseTime != null && previousCloseTime == closeTime) {
 			return;
 		}
+		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
+		if (signal.cti5mReady()) {
+			int newDir = resolveFiveMinDir(signal.score5m());
+			if (newDir != symbolState.lastFiveMinDir) {
+				symbolState.fiveMinFlipTimeMs = closeTime;
+				symbolState.fiveMinFlipPrice = close;
+			}
+			symbolState.lastFiveMinDir = newDir;
+		}
+		symbolState.prevClose1m = close;
 
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
@@ -340,6 +351,23 @@ public class CtiLbStrategy {
 				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
+	}
+
+	private int resolveFiveMinDir(int score5m) {
+		if (score5m > 0) {
+			return 1;
+		}
+		if (score5m < 0) {
+			return -1;
+		}
+		return 0;
+	}
+
+	private static class SymbolState {
+		private int lastFiveMinDir;
+		private long fiveMinFlipTimeMs;
+		private double fiveMinFlipPrice;
+		private double prevClose1m = Double.NaN;
 	}
 
 	private Mono<Void> executeFlip(String symbol, PositionState target, double close) {

@@ -76,6 +76,11 @@ strategy:
   enable-tie-break-bias: false
   startup-smoke-test-enabled: false
   filter-refresh-ttl-ms: 300000
+  arming-window-minutes: 5
+  late-limit-minutes: 12
+  chase-max-move-pct: 0.40
+  confirm-bars-early: 1
+  confirm-bars-normal: 2
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500
