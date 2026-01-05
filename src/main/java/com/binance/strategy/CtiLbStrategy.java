@@ -30,6 +30,7 @@ public class CtiLbStrategy {
 	private final BinanceFuturesOrderClient orderClient;
 	private final StrategyProperties strategyProperties;
 	private final WarmupProperties warmupProperties;
+	private final SymbolFilterService symbolFilterService;
 	private final Map<String, Long> lastCloseTimes = new ConcurrentHashMap<>();
 	private final Map<String, PositionState> positionStates = new ConcurrentHashMap<>();
 	private final Map<String, EntryState> entryStates = new ConcurrentHashMap<>();
@@ -43,7 +44,6 @@ public class CtiLbStrategy {
 	private final Map<String, Long> lastFlipTimes = new ConcurrentHashMap<>();
 	private final Map<String, BigDecimal> lastFlipPrices = new ConcurrentHashMap<>();
 	private final Map<String, java.util.Deque<Long>> flipTimesBySymbol = new ConcurrentHashMap<>();
-	private final Map<String, BinanceFuturesOrderClient.SymbolFilters> symbolFiltersBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, BinanceFuturesOrderClient.ExchangePosition> exchangePositions = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> stateDesyncBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
@@ -55,10 +55,11 @@ public class CtiLbStrategy {
 	private volatile boolean ordersEnabledOverride = true;
 
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties,
-			WarmupProperties warmupProperties) {
+			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
+		this.symbolFilterService = symbolFilterService;
 		logConfigSnapshot();
 	}
 
@@ -74,6 +75,7 @@ public class CtiLbStrategy {
 	}
 
 	public Mono<Void> refreshAfterWarmup(String symbol) {
+		triggerFilterRefresh(symbol);
 		return orderClient.cancelAllOpenOrders(symbol)
 				.onErrorResume(error -> {
 					LOGGER.warn("EVENT=WARMUP_REFRESH symbol={} cancelError={}", symbol, error.getMessage());
@@ -176,7 +178,7 @@ public class CtiLbStrategy {
 		}
 
 		action = resolveAction(current, confirmedRec);
-		BigDecimal resolvedQty = resolveQuantity(close);
+		BigDecimal resolvedQty = resolveQuantity(symbol, close);
 		BigDecimal closeQty = current == PositionState.NONE ? resolvedQty : resolveExitQuantity(entryState, close);
 		boolean hasSignal = recommendationUsed != CtiDirection.NEUTRAL;
 		boolean confirmationMet = confirmedRec != CtiDirection.NEUTRAL;
@@ -347,9 +349,15 @@ public class CtiLbStrategy {
 				.flatMap(hedgeMode -> openPosition(symbol, target, quantity, hedgeMode));
 	}
 
-	BigDecimal resolveQuantity(double close) {
+	BigDecimal resolveQuantity(String symbol, double close) {
+		BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
+		if (filters == null) {
+			triggerFilterRefresh(symbol);
+			return null;
+		}
 		BigDecimal targetNotional = resolveTargetNotionalUsdt();
-		return CtiLbDecisionEngine.resolveQuantity(targetNotional, close, strategyProperties.quantityStep());
+		BigDecimal stepSize = filters.stepSize() != null ? filters.stepSize() : strategyProperties.quantityStep();
+		return CtiLbDecisionEngine.resolveQuantity(targetNotional, close, stepSize);
 	}
 
 	private BigDecimal resolveTargetNotionalUsdt() {
@@ -462,23 +470,25 @@ public class CtiLbStrategy {
 
 	private String validateMinTrade(String symbol, BigDecimal quantity, double price) {
 		if (quantity == null || quantity.signum() <= 0) {
+			BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
+			if (filters == null) {
+				triggerFilterRefresh(symbol);
+				return "WAIT_FILTERS";
+			}
 			return "QTY_ZERO_AFTER_STEP";
 		}
-		BinanceFuturesOrderClient.SymbolFilters filters = symbolFiltersBySymbol.get(symbol);
+		BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
 		if (filters == null) {
-			orderClient.fetchSymbolFilters(symbol)
-					.doOnNext(result -> symbolFiltersBySymbol.put(symbol, result))
-					.onErrorResume(error -> Mono.empty())
-					.subscribe();
-			return "MIN_FILTERS_NOT_READY";
+			triggerFilterRefresh(symbol);
+			return "WAIT_FILTERS";
 		}
 		if (filters.minQty() != null && quantity.compareTo(filters.minQty()) < 0) {
-			return "BLOCK_MIN_QTY";
+			return "QTY_TOO_SMALL";
 		}
 		if (filters.minNotional() != null) {
 			BigDecimal notional = quantity.multiply(BigDecimal.valueOf(price), MathContext.DECIMAL64);
 			if (notional.compareTo(filters.minNotional()) < 0) {
-				return "BLOCK_MIN_NOTIONAL";
+				return "NOTIONAL_TOO_SMALL";
 			}
 		}
 		return null;
@@ -512,6 +522,11 @@ public class CtiLbStrategy {
 				strategyProperties.enableTieBreakBias(),
 				strategyProperties.flipCooldownMs(),
 				strategyProperties.maxFlipsPer5Min());
+	}
+
+	private void triggerFilterRefresh(String symbol) {
+		symbolFilterService.refreshFilters(symbol)
+				.subscribe();
 	}
 
 	private EntryState resolveEntryState(String symbol, PositionState current, double close, long closeTime) {

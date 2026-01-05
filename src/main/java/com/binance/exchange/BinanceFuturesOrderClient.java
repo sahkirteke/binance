@@ -243,7 +243,9 @@ public class BinanceFuturesOrderClient {
 
 	public record SymbolFilters(
 			BigDecimal minQty,
-			BigDecimal minNotional) {
+			BigDecimal minNotional,
+			BigDecimal stepSize,
+			BigDecimal tickSize) {
 	}
 
 	private record PositionRiskResponse(
@@ -268,16 +270,21 @@ public class BinanceFuturesOrderClient {
 			String filterType,
 			BigDecimal minQty,
 			BigDecimal minNotional,
-			BigDecimal notional) {
+			BigDecimal notional,
+			BigDecimal stepSize,
+			BigDecimal tickSize) {
 	}
 
 	private SymbolFilters resolveSymbolFilters(SymbolInfo info) {
 		BigDecimal minQty = null;
 		BigDecimal minNotional = null;
+		BigDecimal stepSize = null;
+		BigDecimal tickSize = null;
 		if (info.filters() != null) {
 			for (ExchangeFilter filter : info.filters()) {
 				if ("LOT_SIZE".equalsIgnoreCase(filter.filterType())) {
 					minQty = filter.minQty();
+					stepSize = filter.stepSize();
 				}
 				if ("MIN_NOTIONAL".equalsIgnoreCase(filter.filterType())
 						|| "NOTIONAL".equalsIgnoreCase(filter.filterType())) {
@@ -287,9 +294,12 @@ public class BinanceFuturesOrderClient {
 						minNotional = filter.notional();
 					}
 				}
+				if ("PRICE_FILTER".equalsIgnoreCase(filter.filterType())) {
+					tickSize = filter.tickSize();
+				}
 			}
 		}
-		return new SymbolFilters(minQty, minNotional);
+		return new SymbolFilters(minQty, minNotional, stepSize, tickSize);
 	}
 
 	private Mono<OrderResponse> placeMarketOrderWithFlags(String symbol, String side, BigDecimal quantity,

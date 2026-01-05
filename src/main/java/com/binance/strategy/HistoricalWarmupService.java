@@ -33,6 +33,7 @@ public class HistoricalWarmupService {
 	private final CtiLbStrategy ctiLbStrategy;
 	private final KlineStreamWatcher klineStreamWatcher;
 	private final ObjectMapper objectMapper;
+	private final SymbolFilterService symbolFilterService;
 
 	public HistoricalWarmupService(BinanceMarketClient marketClient,
 			StrategyRouter strategyRouter,
@@ -40,7 +41,8 @@ public class HistoricalWarmupService {
 			WarmupProperties warmupProperties,
 			CtiLbStrategy ctiLbStrategy,
 			KlineStreamWatcher klineStreamWatcher,
-			ObjectMapper objectMapper) {
+			ObjectMapper objectMapper,
+			SymbolFilterService symbolFilterService) {
 		this.marketClient = marketClient;
 		this.strategyRouter = strategyRouter;
 		this.strategyProperties = strategyProperties;
@@ -48,6 +50,7 @@ public class HistoricalWarmupService {
 		this.ctiLbStrategy = ctiLbStrategy;
 		this.klineStreamWatcher = klineStreamWatcher;
 		this.objectMapper = objectMapper;
+		this.symbolFilterService = symbolFilterService;
 	}
 
 	@PostConstruct
@@ -55,7 +58,9 @@ public class HistoricalWarmupService {
 		if (!warmupProperties.enabled() || strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
-		warmupAllSymbols(strategyProperties.resolvedTradeSymbols())
+		List<String> symbols = strategyProperties.resolvedTradeSymbols();
+		symbolFilterService.preloadFilters(symbols, resolveConcurrency())
+				.then(warmupAllSymbols(symbols))
 				.subscribe();
 	}
 
@@ -84,10 +89,13 @@ public class HistoricalWarmupService {
 						.flatMap(ctiLbStrategy::refreshAfterWarmup, concurrency)
 						.then())
 				.doFinally(signal -> {
+					boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
 					klineStreamWatcher.markWarmupComplete();
 					klineStreamWatcher.startStreams();
 					ctiLbStrategy.setWarmupMode(false);
-					ctiLbStrategy.enableOrdersAfterWarmup();
+					if (filtersReady) {
+						ctiLbStrategy.enableOrdersAfterWarmup();
+					}
 					long durationMs = System.currentTimeMillis() - start;
 					LOGGER.info("EVENT=WARMUP_DONE totalDurationMs={} readySymbols={} failedSymbols={}", durationMs,
 							readySymbols.get(),
