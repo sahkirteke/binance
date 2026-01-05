@@ -111,6 +111,7 @@ public class CtiLbStrategy {
 		if (previousCloseTime != null && previousCloseTime == closeTime) {
 			return;
 		}
+		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
 		double prevClose = symbolState.prevClose1m;
 		int fiveMinDir = symbolState.lastFiveMinDir;
@@ -125,14 +126,17 @@ public class CtiLbStrategy {
 			fiveMinDir = newDir;
 		}
 		symbolState.prevClose1m = close;
-		PullbackSignal pullbackSignal = resolvePullbackSignal(
+		EntryFilterState entryFilterState = resolveEntryFilterState(
 				fiveMinDir,
 				signal.score1m(),
 				signal.cti1mValue(),
 				signal.cti1mPrev(),
 				prevClose,
-				close);
-		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, pullbackSignal);
+				close,
+				closeTime,
+				symbolState);
+		EntryDecision entryDecision = resolveEntryDecision(current, symbolState, entryFilterState);
+		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, entryFilterState, entryDecision);
 
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
@@ -147,6 +151,9 @@ public class CtiLbStrategy {
 		CtiDirection confirmedRec = confirm1m >= confirmBars
 				? recUpdate.lastRec()
 				: CtiDirection.NEUTRAL;
+		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
+			confirmedRec = entryDecision.confirmedRec();
+		}
 
 		if (warmupMode) {
 			if (shouldLogWarmupDecision(symbol)) {
@@ -167,7 +174,6 @@ public class CtiLbStrategy {
 		}
 
 		syncPositionIfNeeded(symbol, closeTime);
-		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
@@ -232,6 +238,15 @@ public class CtiLbStrategy {
 				? resolveHoldReason(signal, hasSignal, confirmationMet)
 				: current == PositionState.NONE ? "OK" : resolveFlipReason(current, target);
 		String decisionBlockReason = resolveDecisionBlockReason(signal, action, confirmedRec, current);
+		if (current == PositionState.NONE && entryDecision.blockReason() != null) {
+			action = SignalAction.HOLD;
+			decisionActionReason = entryDecision.blockReason();
+			decisionBlockReason = entryDecision.blockReason();
+		}
+		if (current == PositionState.NONE && entryDecision.decisionActionReason() != null
+				&& action != SignalAction.HOLD) {
+			decisionActionReason = entryDecision.decisionActionReason();
+		}
 		if (action != SignalAction.HOLD) {
 			CtiLbDecisionEngine.BlockDecision blockDecision = CtiLbDecisionEngine.evaluateEntryBlocks(
 					new CtiLbDecisionEngine.BlockInput(
@@ -376,13 +391,38 @@ public class CtiLbStrategy {
 	}
 
 	private void logEntryFilterState(String symbol, SymbolState state, long nowMs, double close, double prevClose,
-			PullbackSignal pullbackSignal) {
+			EntryFilterState entryFilterState, EntryDecision entryDecision) {
 		if (warmupMode) {
 			return;
 		}
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} blockReason={}",
+				symbol,
+				state.lastFiveMinDir,
+				state.prevFiveMinDir,
+				entryFilterState.flipTimeMs() == 0L ? "NA" : entryFilterState.flipTimeMs(),
+				Double.isNaN(entryFilterState.minutesSinceFlip()) ? "NA" : String.format("%.2f",
+						entryFilterState.minutesSinceFlip()),
+				entryFilterState.inArming(),
+				entryFilterState.lateBlocked(),
+				entryFilterState.flipPrice() == 0.0 ? "NA" : String.format("%.8f", entryFilterState.flipPrice()),
+				Double.isNaN(entryFilterState.movedDirPct()) ? "NA" : String.format("%.4f",
+						entryFilterState.movedDirPct()),
+				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose),
+				entryFilterState.pullbackTriggered(),
+				entryFilterState.scoreAligned(),
+				entryFilterState.entryTrigger(),
+				entryFilterState.triggerReason(),
+				entryDecision.entryMode(),
+				entryDecision.confirmBarsUsed(),
+				entryDecision.confirmCounter(),
+				entryDecision.blockReason());
+	}
+
+	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double bfr1m, double bfrPrev,
+			double prevClose, double close, long nowMs, SymbolState state) {
 		long armingWindowMs = strategyProperties.armingWindowMinutes() * 60_000L;
 		long lateLimitMs = strategyProperties.lateLimitMinutes() * 60_000L;
-		boolean hasDir = state.lastFiveMinDir != 0;
+		boolean hasDir = fiveMinDir != 0;
 		long sinceFlipMs = state.fiveMinFlipTimeMs == 0L ? Long.MAX_VALUE : nowMs - state.fiveMinFlipTimeMs;
 		boolean inArming = hasDir && sinceFlipMs <= armingWindowMs;
 		boolean lateBlocked = hasDir && sinceFlipMs > lateLimitMs;
@@ -390,29 +430,10 @@ public class CtiLbStrategy {
 		double movedDirPct = Double.NaN;
 		if (state.fiveMinFlipPrice > 0) {
 			double movedSinceFlipPct = (close - state.fiveMinFlipPrice) / state.fiveMinFlipPrice * 100.0;
-			movedDirPct = state.lastFiveMinDir == 1
+			movedDirPct = fiveMinDir == 1
 					? movedSinceFlipPct
 					: (state.fiveMinFlipPrice - close) / state.fiveMinFlipPrice * 100.0;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={}",
-				symbol,
-				state.lastFiveMinDir,
-				state.prevFiveMinDir,
-				state.fiveMinFlipTimeMs == 0L ? "NA" : state.fiveMinFlipTimeMs,
-				Double.isNaN(minutesSinceFlip) ? "NA" : String.format("%.2f", minutesSinceFlip),
-				inArming,
-				lateBlocked,
-				state.fiveMinFlipPrice == 0.0 ? "NA" : String.format("%.8f", state.fiveMinFlipPrice),
-				Double.isNaN(movedDirPct) ? "NA" : String.format("%.4f", movedDirPct),
-				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose),
-				pullbackSignal.pullbackTriggered(),
-				pullbackSignal.scoreAligned(),
-				pullbackSignal.entryTrigger(),
-				pullbackSignal.triggerReason());
-	}
-
-	private PullbackSignal resolvePullbackSignal(int fiveMinDir, int score1m, double bfr1m, double bfrPrev,
-			double prevClose, double close) {
 		boolean prevCloseValid = !Double.isNaN(prevClose);
 		boolean pullbackLong = fiveMinDir == 1 && prevCloseValid && prevClose < bfrPrev && close > bfr1m;
 		boolean pullbackShort = fiveMinDir == -1 && prevCloseValid && prevClose > bfrPrev && close < bfr1m;
@@ -438,14 +459,82 @@ public class CtiLbStrategy {
 		} else if (scoreAligned) {
 			triggerReason = "SCORE";
 		}
-		return new PullbackSignal(pullbackTriggered, scoreAligned, entryTrigger, triggerReason);
+		return new EntryFilterState(fiveMinDir, inArming, lateBlocked, movedDirPct, entryTrigger, pullbackTriggered,
+				scoreAligned, triggerReason, state.fiveMinFlipTimeMs, minutesSinceFlip, state.fiveMinFlipPrice);
 	}
 
-	private record PullbackSignal(
+	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state, EntryFilterState entryFilterState) {
+		if (current != PositionState.NONE) {
+			state.confirmCounter = 0;
+			return EntryDecision.defaultDecision();
+		}
+		if (entryFilterState.fiveMinDir() == 0) {
+			state.confirmCounter = 0;
+			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, "NO_5M_SUPPORT", "NO_5M_SUPPORT");
+		}
+		if (entryFilterState.lateBlocked()) {
+			state.confirmCounter = 0;
+			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, "ENTRY_BLOCK_LATE", "ENTRY_BLOCK_LATE");
+		}
+		BigDecimal chaseMaxMovePct = strategyProperties.chaseMaxMovePct();
+		boolean chaseBlocked = !entryFilterState.inArming()
+				&& chaseMaxMovePct != null
+				&& !Double.isNaN(entryFilterState.movedDirPct())
+				&& entryFilterState.movedDirPct() > chaseMaxMovePct.doubleValue();
+		if (chaseBlocked) {
+			state.confirmCounter = 0;
+			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, "ENTRY_BLOCK_CHASE",
+					"ENTRY_BLOCK_CHASE");
+		}
+		int confirmBarsUsed = entryFilterState.inArming()
+				? strategyProperties.confirmBarsEarly()
+				: strategyProperties.confirmBarsNormal();
+		if (entryFilterState.entryTrigger()) {
+			state.confirmCounter += 1;
+		} else {
+			state.confirmCounter = 0;
+		}
+		if (state.confirmCounter >= Math.max(1, confirmBarsUsed)) {
+			CtiDirection confirmed = entryFilterState.fiveMinDir() == 1 ? CtiDirection.LONG : CtiDirection.SHORT;
+			String entryMode = entryFilterState.inArming() ? "ARMED_EARLY" : "NORMAL";
+			String reason;
+			if (entryFilterState.inArming()) {
+				reason = entryFilterState.triggerReason().equals("PULLBACK")
+						? "ENTRY_ARMED_PULLBACK"
+						: "ENTRY_ARMED_SCORE";
+			} else {
+				reason = "ENTRY_NORMAL_SCORE_CONFIRMED";
+			}
+			return new EntryDecision(confirmed, entryMode, confirmBarsUsed, state.confirmCounter, null, reason);
+		}
+		String entryMode = entryFilterState.inArming() ? "ARMED_EARLY" : "NORMAL";
+		return new EntryDecision(null, entryMode, confirmBarsUsed, state.confirmCounter, null, null);
+	}
+
+	private record EntryFilterState(
+			int fiveMinDir,
+			boolean inArming,
+			boolean lateBlocked,
+			double movedDirPct,
+			boolean entryTrigger,
 			boolean pullbackTriggered,
 			boolean scoreAligned,
-			boolean entryTrigger,
-			String triggerReason) {
+			String triggerReason,
+			long flipTimeMs,
+			double minutesSinceFlip,
+			double flipPrice) {
+	}
+
+	private record EntryDecision(
+			CtiDirection confirmedRec,
+			String entryMode,
+			int confirmBarsUsed,
+			int confirmCounter,
+			String blockReason,
+			String decisionActionReason) {
+		static EntryDecision defaultDecision() {
+			return new EntryDecision(null, "NORMAL", 0, 0, null, null);
+		}
 	}
 
 	private static class SymbolState {
@@ -454,6 +543,7 @@ public class CtiLbStrategy {
 		private long fiveMinFlipTimeMs;
 		private double fiveMinFlipPrice;
 		private double prevClose1m = Double.NaN;
+		private int confirmCounter;
 	}
 
 	private Mono<Void> executeFlip(String symbol, PositionState target, double close) {
