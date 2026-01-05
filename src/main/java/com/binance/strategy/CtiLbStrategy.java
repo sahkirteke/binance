@@ -148,7 +148,7 @@ public class CtiLbStrategy {
 			SignalAction exitAction = SignalAction.HOLD;
 			String decisionActionReason = exitDecision.reason();
 			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
-			BigDecimal exitQty = resolveExitQuantity(entryState, close);
+			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
 			logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
 					recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason, decisionBlockReason);
 			if (!effectiveEnableOrders()) {
@@ -179,7 +179,7 @@ public class CtiLbStrategy {
 
 		action = resolveAction(current, confirmedRec);
 		BigDecimal resolvedQty = resolveQuantity(symbol, close);
-		BigDecimal closeQty = current == PositionState.NONE ? resolvedQty : resolveExitQuantity(entryState, close);
+		BigDecimal closeQty = current == PositionState.NONE ? resolvedQty : resolveExitQuantity(symbol, entryState, close);
 		boolean hasSignal = recommendationUsed != CtiDirection.NEUTRAL;
 		boolean confirmationMet = confirmedRec != CtiDirection.NEUTRAL;
 		PositionState target = confirmedRec == CtiDirection.LONG ? PositionState.LONG : PositionState.SHORT;
@@ -306,7 +306,7 @@ public class CtiLbStrategy {
 
 	private Mono<Void> executeFlip(String symbol, PositionState target, double close) {
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
-		BigDecimal quantity = resolveQuantity(close);
+		BigDecimal quantity = resolveQuantity(symbol, close);
 		if (quantity == null || quantity.signum() <= 0) {
 			return Mono.empty();
 		}
@@ -553,11 +553,11 @@ public class CtiLbStrategy {
 		return created;
 	}
 
-	private BigDecimal resolveExitQuantity(EntryState entryState, double close) {
+	private BigDecimal resolveExitQuantity(String symbol, EntryState entryState, double close) {
 		if (entryState != null && entryState.quantity() != null && entryState.quantity().signum() > 0) {
 			return entryState.quantity();
 		}
-		return resolveQuantity(close);
+		return resolveQuantity(symbol, close);
 	}
 
 	private void recordEntry(String symbol, PositionState target, OrderResponse response, BigDecimal fallbackQty,
