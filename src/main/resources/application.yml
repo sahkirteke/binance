@@ -81,6 +81,8 @@ warmup:
   candles1m: 240
   candles5m: 120
   concurrency: 3
+  log-decisions: false
+  decision-log-every: 0
 
 management:
   endpoints:

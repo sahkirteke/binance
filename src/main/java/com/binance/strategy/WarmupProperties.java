@@ -9,5 +9,7 @@ public record WarmupProperties(
 		boolean enabled,
 		int candles1m,
 		int candles5m,
-		int concurrency) {
+		int concurrency,
+		boolean logDecisions,
+		int decisionLogEvery) {
 }

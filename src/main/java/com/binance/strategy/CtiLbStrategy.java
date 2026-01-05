@@ -29,6 +29,7 @@ public class CtiLbStrategy {
 
 	private final BinanceFuturesOrderClient orderClient;
 	private final StrategyProperties strategyProperties;
+	private final WarmupProperties warmupProperties;
 	private final Map<String, Long> lastCloseTimes = new ConcurrentHashMap<>();
 	private final Map<String, PositionState> positionStates = new ConcurrentHashMap<>();
 	private final Map<String, EntryState> entryStates = new ConcurrentHashMap<>();
@@ -46,19 +47,30 @@ public class CtiLbStrategy {
 	private final Map<String, BinanceFuturesOrderClient.ExchangePosition> exchangePositions = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> stateDesyncBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
+	private final Map<String, LongAdder> warmupDecisionCounters = new ConcurrentHashMap<>();
 	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 	private static final BigDecimal DEFAULT_NOTIONAL_USDT = BigDecimal.valueOf(50);
 	private static final long DEFAULT_MIN_HOLD_MS = 30_000L;
 	private volatile boolean warmupMode;
+	private volatile boolean ordersEnabledOverride = true;
 
-	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties) {
+	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties,
+			WarmupProperties warmupProperties) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
+		this.warmupProperties = warmupProperties;
 		logConfigSnapshot();
 	}
 
 	public void setWarmupMode(boolean warmupMode) {
 		this.warmupMode = warmupMode;
+		if (warmupMode) {
+			ordersEnabledOverride = false;
+		}
+	}
+
+	public void enableOrdersAfterWarmup() {
+		ordersEnabledOverride = true;
 	}
 
 	public Mono<Void> refreshAfterWarmup(String symbol) {
@@ -101,6 +113,14 @@ public class CtiLbStrategy {
 				? recUpdate.lastRec()
 				: CtiDirection.NEUTRAL;
 
+		if (warmupMode) {
+			if (shouldLogWarmupDecision(symbol)) {
+				logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
+						recommendationUsed, recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE");
+			}
+			return;
+		}
+
 		if (recUpdate.missedMove()) {
 			missedMoveCount.increment();
 			missedBySymbol.computeIfAbsent(symbol, ignored -> new LongAdder()).increment();
@@ -109,12 +129,6 @@ public class CtiLbStrategy {
 		if (recUpdate.confirmHit()) {
 			confirmHitCount.increment();
 			logConfirmHit(symbol, confirmedRec, recUpdate, signal, close);
-		}
-
-		if (warmupMode) {
-			logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate, recommendationUsed,
-					recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE");
-			return;
 		}
 
 		syncPositionIfNeeded(symbol, closeTime);
@@ -135,7 +149,7 @@ public class CtiLbStrategy {
 			BigDecimal exitQty = resolveExitQuantity(entryState, close);
 			logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
 					recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason, decisionBlockReason);
-			if (!strategyProperties.enableOrders()) {
+			if (!effectiveEnableOrders()) {
 				return;
 			}
 			if (exitQty == null || exitQty.signum() <= 0) {
@@ -416,7 +430,7 @@ public class CtiLbStrategy {
 				recUpdate.recFirstSeenPrice(),
 				decisionAction,
 				decisionActionReason,
-				strategyProperties.enableOrders(),
+				effectiveEnableOrders(),
 				resolvedQty,
 				entryPrice,
 				estimatedPnlPct,
@@ -595,6 +609,9 @@ public class CtiLbStrategy {
 
 	private void logMissedMove(String symbol, RecStreakTracker.RecUpdate recUpdate, ScoreSignal signal,
 			double nowPrice) {
+		if (warmupMode) {
+			return;
+		}
 		MissedMoveLogDto dto = new MissedMoveLogDto(
 				symbol,
 				recUpdate.missedPending(),
@@ -615,6 +632,9 @@ public class CtiLbStrategy {
 
 	private void logConfirmHit(String symbol, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate,
 			ScoreSignal signal, double nowPrice) {
+		if (warmupMode) {
+			return;
+		}
 		ConfirmHitLogDto dto = new ConfirmHitLogDto(
 				symbol,
 				confirmedRec,
@@ -635,6 +655,9 @@ public class CtiLbStrategy {
 
 	private void logFlip(String symbol, PositionState from, PositionState to, ScoreSignal signal, double price,
 			CtiDirection rec, CtiDirection confirmedRec, SignalAction action) {
+		if (warmupMode) {
+			return;
+		}
 		FlipLogDto dto = new FlipLogDto(
 				symbol,
 				formatPositionSide(from),
@@ -661,6 +684,9 @@ public class CtiLbStrategy {
 	}
 
 	private void logSummaryIfNeeded(long closeTimeMs) {
+		if (warmupMode) {
+			return;
+		}
 		long last = lastSummaryAtMs.get();
 		if (last == 0L) {
 			lastSummaryAtMs.compareAndSet(0L, closeTimeMs);
@@ -713,7 +739,7 @@ public class CtiLbStrategy {
 		if (signal.insufficientData()) {
 			return "INSUFFICIENT_DATA";
 		}
-		if (action != SignalAction.HOLD && !strategyProperties.enableOrders()) {
+		if (action != SignalAction.HOLD && !effectiveEnableOrders()) {
 			return "ORDERS_DISABLED";
 		}
 		if (action == SignalAction.HOLD && confirmedRec != CtiDirection.NEUTRAL) {
@@ -777,6 +803,23 @@ public class CtiLbStrategy {
 			return "CTI5M_NOT_READY";
 		}
 		return "OK";
+	}
+
+	private boolean effectiveEnableOrders() {
+		return strategyProperties.enableOrders() && ordersEnabledOverride && !warmupMode;
+	}
+
+	private boolean shouldLogWarmupDecision(String symbol) {
+		if (!warmupProperties.logDecisions()) {
+			return false;
+		}
+		int every = warmupProperties.decisionLogEvery();
+		if (every <= 0) {
+			return true;
+		}
+		LongAdder counter = warmupDecisionCounters.computeIfAbsent(symbol, ignored -> new LongAdder());
+		counter.increment();
+		return counter.longValue() % every == 0;
 	}
 
 	private int scoreLong(int score1m, int score5m, int adxBonus, int hamScore) {

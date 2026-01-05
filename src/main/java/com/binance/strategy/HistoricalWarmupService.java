@@ -65,6 +65,7 @@ public class HistoricalWarmupService {
 		LOGGER.info("EVENT=WARMUP_START symbolsCount={} concurrency={}", symbols.size(), concurrency);
 		ctiLbStrategy.setWarmupMode(true);
 		AtomicInteger readySymbols = new AtomicInteger();
+		AtomicInteger failedSymbols = new AtomicInteger();
 		return Flux.fromIterable(symbols)
 				.flatMap(symbol -> warmupSymbol(symbol)
 						.doOnNext(ready -> {
@@ -73,6 +74,7 @@ public class HistoricalWarmupService {
 							}
 						})
 						.onErrorResume(error -> {
+							failedSymbols.incrementAndGet();
 							LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} error={}", symbol, error.getMessage());
 							scheduleRetry(symbol);
 							return Mono.just(false);
@@ -85,9 +87,11 @@ public class HistoricalWarmupService {
 					klineStreamWatcher.markWarmupComplete();
 					klineStreamWatcher.startStreams();
 					ctiLbStrategy.setWarmupMode(false);
+					ctiLbStrategy.enableOrdersAfterWarmup();
 					long durationMs = System.currentTimeMillis() - start;
-					LOGGER.info("EVENT=WARMUP_DONE totalDurationMs={} readySymbols={}", durationMs,
-							readySymbols.get());
+					LOGGER.info("EVENT=WARMUP_DONE totalDurationMs={} readySymbols={} failedSymbols={}", durationMs,
+							readySymbols.get(),
+							failedSymbols.get());
 				});
 	}
 
@@ -100,39 +104,23 @@ public class HistoricalWarmupService {
 					ScoreSignalIndicator.WarmupStatus status = strategyRouter.warmupStatus(symbol);
 					boolean ready = status != null && status.cti5mReady() && status.adx5mReady();
 					long durationMs = System.currentTimeMillis() - start;
-					LOGGER.info("EVENT=WARMUP_DONE symbol={} tf=1m candles={} tf=5m candles={} cti5mBarsSeen={} adx5mBarsSeen={}"
-							+ " cti5mReady={} adx5mReady={} ready={} durationMs={}",
+					LOGGER.info("EVENT=WARMUP_DONE symbol={} candles1m={} candles5m={} cti5mBarsSeen={} adx5mBarsSeen={} ready={} durationMs={}",
 							symbol,
 							counts.candles1m(),
 							counts.candles5m(),
 							status == null ? 0 : status.cti5mBarsSeen(),
 							status == null ? 0 : status.adx5mBarsSeen(),
-							status != null && status.cti5mReady(),
-							status != null && status.adx5mReady(),
 							ready,
 							durationMs);
-					LOGGER.info("EVENT=WARMUP_SYMBOL symbol={} cti5mBarsSeen={} adx5mBarsSeen={} ready={}",
-							symbol,
-							status == null ? 0 : status.cti5mBarsSeen(),
-							status == null ? 0 : status.adx5mBarsSeen(),
-							ready);
 					strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
 					return ready;
 				});
 	}
 
 	private Mono<Integer> warmupSymbolInterval(String symbol, String interval, int limit) {
-		long start = System.currentTimeMillis();
 		return marketClient.fetchFuturesKlinesRaw(symbol, interval, limit)
 				.map(response -> {
-					List<WarmupCandle> klines = parseKlines(response.body(), symbol);
-					LOGGER.info("EVENT=WARMUP_FETCH symbol={} tf={} httpStatus={} bytes={} candlesParsed={}",
-							symbol,
-							interval,
-							response.statusCode(),
-							response.body() == null ? 0 : response.body().length(),
-							klines.size());
-					return klines;
+					return parseKlines(response.body(), symbol);
 				})
 				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " " + interval,
 						error))
@@ -153,12 +141,6 @@ public class HistoricalWarmupService {
 							strategyRouter.onClosedCandle(symbol, candle);
 						}
 					}
-					long durationMs = System.currentTimeMillis() - start;
-					LOGGER.info("EVENT=WARMUP_SYMBOL symbol={} tf={} candles={} durationMs={}",
-							symbol,
-							interval,
-							sorted.size(),
-							durationMs);
 				})
 				.map(List::size);
 	}

@@ -65,7 +65,8 @@ class WarmupModeTest {
 				10,
 				2500L,
 				false);
-		CtiLbStrategy strategy = new CtiLbStrategy(orderClient, properties);
+		WarmupProperties warmupProperties = new WarmupProperties(true, 240, 120, 3, false, 0);
+		CtiLbStrategy strategy = new CtiLbStrategy(orderClient, properties, warmupProperties);
 		strategy.setWarmupMode(true);
 
 		ScoreSignal signal = new ScoreSignal(
