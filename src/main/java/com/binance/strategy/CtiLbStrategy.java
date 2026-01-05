@@ -420,7 +420,7 @@ public class CtiLbStrategy {
 				})
 				.doOnError(error -> {
 					LOGGER.warn("Failed to execute CTI LB action {}: {}", actionForLog, error.getMessage());
-					logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
+					logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRecForLog, recUpdate,
 							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
 							estimatedPnlPct, decisionActionReasonForLog, "ORDER_ERROR");
 				})
