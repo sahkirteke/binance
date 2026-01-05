@@ -3,6 +3,7 @@ package com.binance.strategy;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -30,18 +31,23 @@ public class KlineStreamWatcher {
 	private final BinanceProperties binanceProperties;
 	private final StrategyProperties strategyProperties;
 	private final StrategyRouter strategyRouter;
+	private final WarmupProperties warmupProperties;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
 	private final AtomicReference<List<Disposable>> testnetSubscriptionsRef = new AtomicReference<>();
+	private final AtomicBoolean warmupComplete = new AtomicBoolean(false);
+	private final AtomicBoolean streamsStarted = new AtomicBoolean(false);
 
 	public KlineStreamWatcher(BinanceProperties binanceProperties,
 			StrategyProperties strategyProperties,
 			StrategyRouter strategyRouter,
+			WarmupProperties warmupProperties,
 			ObjectMapper objectMapper) {
 		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.strategyRouter = strategyRouter;
+		this.warmupProperties = warmupProperties;
 		this.objectMapper = objectMapper;
 	}
 
@@ -51,11 +57,34 @@ public class KlineStreamWatcher {
 			LOGGER.info("Kline stream not started (active={})", strategyProperties.active());
 			return;
 		}
+		if (warmupProperties.enabled()) {
+			LOGGER.info("Kline stream delayed until warmup completes.");
+			return;
+		}
+		markWarmupComplete();
+		startStreams();
+	}
+
+	public void startStreams() {
+		if (strategyProperties.active() != StrategyType.CTI_LB) {
+			return;
+		}
+		if (!warmupComplete.get()) {
+			LOGGER.info("Kline stream start skipped (warmup not complete).");
+			return;
+		}
+		if (!streamsStarted.compareAndSet(false, true)) {
+			return;
+		}
 		if (binanceProperties.useTestnet()) {
 			startTestnetStreams();
 		} else {
 			startCombinedStream();
 		}
+	}
+
+	public void markWarmupComplete() {
+		warmupComplete.set(true);
 	}
 
 	@PreDestroy
@@ -80,7 +109,8 @@ public class KlineStreamWatcher {
 			if (!kline.closed()) {
 				return;
 			}
-			strategyRouter.onClosedCandle(event.symbol(), kline.close(), kline.closeTime());
+			Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.closeTime());
+			strategyRouter.onClosedCandle(event.symbol(), candle);
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse kline message", ex);
 		}

@@ -38,6 +38,9 @@ public class StartupOrderSmokeTest {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
+		if (!strategyProperties.startupSmokeTestEnabled()) {
+			return;
+		}
 		if (!strategyProperties.enableOrders() || !strategyProperties.startupTestOrderEnabled()) {
 			return;
 		}

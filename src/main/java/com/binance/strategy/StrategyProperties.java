@@ -26,6 +26,7 @@ public record StrategyProperties(
 		@Positive int pollIntervalMs,
 		int tickIntervalMs,
 		int rollingWindowMs,
+		@Positive int confirmBars,
 		int depthLevels,
 		BigDecimal weightLambda,
 		BigDecimal obiEntry,
@@ -56,9 +57,13 @@ public record StrategyProperties(
 		BigDecimal strongObi,
 		BigDecimal strongToi,
 		int maxFlipsPer5Min,
+		BigDecimal minBfrDelta,
+		BigDecimal minPriceMoveBps,
 		BigDecimal flipSpreadMaxBps,
 		int maxTradesPer5Min,
-		long hardTradeCooldownMs) {
+		long hardTradeCooldownMs,
+		boolean enableTieBreakBias,
+		boolean startupSmokeTestEnabled) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

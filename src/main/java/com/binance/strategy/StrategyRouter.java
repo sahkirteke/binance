@@ -14,7 +14,10 @@ public class StrategyRouter {
 
 	private final StrategyProperties strategyProperties;
 	private final CtiLbStrategy ctiLbStrategy;
-	private final Map<String, CtiLbTrendIndicator> indicators = new ConcurrentHashMap<>();
+	private final CtiScoreCalculator scoreCalculator = new CtiScoreCalculator();
+	private final Map<String, ScoreSignalIndicator> indicators = new ConcurrentHashMap<>();
+	private final Map<String, Long> warmupFinishedAtMs = new ConcurrentHashMap<>();
+	private static final long WARMUP_DUPLICATE_WINDOW_MS = 10_000L;
 
 	public StrategyRouter(StrategyProperties strategyProperties,
 			CtiLbStrategy ctiLbStrategy) {
@@ -22,13 +25,54 @@ public class StrategyRouter {
 		this.ctiLbStrategy = ctiLbStrategy;
 	}
 
-	public void onClosedCandle(String symbol, double close, long closeTime) {
+	public void onClosedCandle(String symbol, Candle candle) {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
-			LOGGER.debug("Closed candle ignored (active={}, closeTime={})", strategyProperties.active(), closeTime);
+			LOGGER.debug("Closed candle ignored (active={}, closeTime={})",
+					strategyProperties.active(),
+					candle.closeTime());
 			return;
 		}
-		CtiLbTrendIndicator indicator = indicators.computeIfAbsent(symbol, ignored -> new CtiLbTrendIndicator());
-		TrendSignal signal = indicator.onClosedCandle(close, closeTime);
-		ctiLbStrategy.onTrendSignal(symbol, signal, close);
+		ScoreSignalIndicator indicator = resolveIndicator(symbol);
+		Long warmupFinishedAt = warmupFinishedAtMs.get(symbol);
+		if (warmupFinishedAt != null
+				&& System.currentTimeMillis() - warmupFinishedAt < WARMUP_DUPLICATE_WINDOW_MS
+				&& indicator.isDuplicate1mClose(candle.closeTime())) {
+			return;
+		}
+		ScoreSignal signal = indicator.onClosedCandle(candle);
+		ctiLbStrategy.onScoreSignal(symbol, signal, candle.close());
+	}
+
+	public void warmupOneMinuteCandle(String symbol, Candle candle) {
+		if (strategyProperties.active() != StrategyType.CTI_LB) {
+			return;
+		}
+		resolveIndicator(symbol).warmupOneMinuteCandle(candle);
+	}
+
+	public void warmupFiveMinuteCandle(String symbol, Candle candle) {
+		if (strategyProperties.active() != StrategyType.CTI_LB) {
+			return;
+		}
+		resolveIndicator(symbol).warmupFiveMinuteCandle(candle);
+	}
+
+	public boolean isWarmupReady(String symbol) {
+		ScoreSignalIndicator indicator = indicators.get(symbol);
+		return indicator != null && indicator.isWarmupReady();
+	}
+
+	public ScoreSignalIndicator.WarmupStatus warmupStatus(String symbol) {
+		ScoreSignalIndicator indicator = indicators.get(symbol);
+		return indicator == null ? null : indicator.warmupStatus();
+	}
+
+	public void markWarmupFinished(String symbol, long finishedAtMs) {
+		warmupFinishedAtMs.put(symbol, finishedAtMs);
+	}
+
+	private ScoreSignalIndicator resolveIndicator(String symbol) {
+		return indicators.computeIfAbsent(symbol,
+				ignored -> new ScoreSignalIndicator(symbol, scoreCalculator, strategyProperties.enableTieBreakBias()));
 	}
 }

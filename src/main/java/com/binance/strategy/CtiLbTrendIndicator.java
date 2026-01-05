@@ -1,8 +1,5 @@
 package com.binance.strategy;
 
-import org.springframework.stereotype.Component;
-
-@Component
 public class CtiLbTrendIndicator implements TrendIndicator {
 
 	private static final double SMOOTHING_PERIOD = 21.0;
@@ -17,6 +14,10 @@ public class CtiLbTrendIndicator implements TrendIndicator {
 	double bfrPrev;
 	Trend lastTrend = Trend.LONG;
 	boolean initialized;
+
+	static int period() {
+		return (int) SMOOTHING_PERIOD;
+	}
 
 	@Override
 	public TrendSignal onClosedCandle(double close, long closeTime) {

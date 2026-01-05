@@ -11,6 +11,9 @@ public record KlineEvent(
 
 	@JsonIgnoreProperties(ignoreUnknown = true)
 	public record Kline(
+			@JsonProperty("o") double open,
+			@JsonProperty("h") double high,
+			@JsonProperty("l") double low,
 			@JsonProperty("c") double close,
 			@JsonProperty("T") long closeTime,
 			@JsonProperty("x") boolean closed) {
