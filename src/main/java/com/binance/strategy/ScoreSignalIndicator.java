@@ -93,6 +93,9 @@ public class ScoreSignalIndicator {
 	}
 
 	public void warmupFiveMinuteCandle(Candle candle) {
+		if (candle.closeTime() <= last5mCloseTime) {
+			return;
+		}
 		updateFiveMinute(candle);
 	}
 

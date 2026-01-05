@@ -97,7 +97,7 @@ public class HistoricalWarmupService {
 						if ("5m".equals(interval)) {
 							strategyRouter.warmupFiveMinuteCandle(symbol, candle);
 						} else {
-							strategyRouter.warmupOneMinuteCandle(symbol, candle);
+							strategyRouter.onClosedCandle(symbol, candle);
 						}
 					}
 					long durationMs = System.currentTimeMillis() - start;
