@@ -70,7 +70,7 @@ public class BinanceMarketClient {
 				.bodyToMono(BookTickerResponse.class);
 	}
 
-	public Mono<String> fetchFuturesKlinesRaw(String symbol, String interval, int limit) {
+	public Mono<KlineResponse> fetchFuturesKlinesRaw(String symbol, String interval, int limit) {
 		return binanceWebClient
 				.get()
 				.uri(uriBuilder -> uriBuilder
@@ -79,7 +79,13 @@ public class BinanceMarketClient {
 						.queryParam("interval", interval)
 						.queryParam("limit", limit)
 						.build())
-				.retrieve()
-				.bodyToMono(String.class);
+				.exchangeToMono(response -> response.bodyToMono(String.class)
+						.defaultIfEmpty("")
+						.map(body -> new KlineResponse(response.rawStatusCode(), body)));
+	}
+
+	public record KlineResponse(
+			int statusCode,
+			String body) {
 	}
 }

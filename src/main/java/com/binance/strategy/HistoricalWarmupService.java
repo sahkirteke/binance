@@ -110,6 +110,11 @@ public class HistoricalWarmupService {
 							status != null && status.adx5mReady(),
 							ready,
 							durationMs);
+					LOGGER.info("EVENT=WARMUP_SYMBOL symbol={} cti5mBarsSeen={} adx5mBarsSeen={} ready={}",
+							symbol,
+							status == null ? 0 : status.cti5mBarsSeen(),
+							status == null ? 0 : status.adx5mBarsSeen(),
+							ready);
 					strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
 					return ready;
 				});
@@ -118,7 +123,16 @@ public class HistoricalWarmupService {
 	private Mono<Integer> warmupSymbolInterval(String symbol, String interval, int limit) {
 		long start = System.currentTimeMillis();
 		return marketClient.fetchFuturesKlinesRaw(symbol, interval, limit)
-				.map(json -> parseKlines(json, symbol))
+				.map(response -> {
+					List<WarmupCandle> klines = parseKlines(response.body(), symbol);
+					LOGGER.info("EVENT=WARMUP_FETCH symbol={} tf={} httpStatus={} bytes={} candlesParsed={}",
+							symbol,
+							interval,
+							response.statusCode(),
+							response.body() == null ? 0 : response.body().length(),
+							klines.size());
+					return klines;
+				})
 				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " " + interval,
 						error))
 				.doOnNext(klines -> {
