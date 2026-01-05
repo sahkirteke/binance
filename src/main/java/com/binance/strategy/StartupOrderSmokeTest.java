@@ -47,7 +47,7 @@ public class StartupOrderSmokeTest {
 		Flux.fromIterable(strategyProperties.resolvedTradeSymbols())
 				.flatMap(symbol -> marketClient.fetchMarkPrice(symbol)
 						.flatMap(price -> {
-							BigDecimal quantity = ctiLbStrategy.resolveQuantity(price.doubleValue());
+							BigDecimal quantity = ctiLbStrategy.resolveQuantity(symbol, price.doubleValue());
 							if (quantity == null || quantity.signum() <= 0) {
 								LOGGER.warn("Startup test order skipped: invalid quantity for {}", symbol);
 								return Mono.empty();
