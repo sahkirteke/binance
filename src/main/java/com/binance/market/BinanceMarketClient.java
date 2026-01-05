@@ -81,7 +81,7 @@ public class BinanceMarketClient {
 						.build())
 				.exchangeToMono(response -> response.bodyToMono(String.class)
 						.defaultIfEmpty("")
-						.map(body -> new KlineResponse(response.rawStatusCode(), body)));
+						.map(body -> new KlineResponse(response.statusCode().value(), body)));
 	}
 
 	public record KlineResponse(
