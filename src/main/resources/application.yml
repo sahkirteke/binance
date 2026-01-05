@@ -78,6 +78,7 @@ strategy:
   filter-refresh-ttl-ms: 300000
   arming-window-minutes: 5
   late-limit-minutes: 12
+  moved-dir-pct-late-gate: 1.0
   chase-max-move-pct: 0.40
   confirm-bars-early: 1
   confirm-bars-normal: 2

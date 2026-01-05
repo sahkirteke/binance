@@ -69,6 +69,7 @@ class WarmupModeTest {
 				300_000L,
 				5,
 				12,
+				BigDecimal.valueOf(1.0),
 				BigDecimal.valueOf(0.40),
 				1,
 				2,

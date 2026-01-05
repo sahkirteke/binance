@@ -443,7 +443,7 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} blockReason={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} lateIgnoredPullback={} lateIgnoredMoveGate={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} blockReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -452,6 +452,8 @@ public class CtiLbStrategy {
 						entryFilterState.minutesSinceFlip()),
 				entryFilterState.inArming(),
 				entryFilterState.lateBlocked(),
+				entryFilterState.lateBlockedIgnoredPullback(),
+				entryFilterState.lateBlockedIgnoredMoveGate(),
 				entryFilterState.flipPrice() == 0.0 ? "NA" : String.format("%.8f", entryFilterState.flipPrice()),
 				Double.isNaN(entryFilterState.movedDirPct()) ? "NA" : String.format("%.4f",
 						entryFilterState.movedDirPct()),
@@ -473,7 +475,6 @@ public class CtiLbStrategy {
 		boolean hasDir = fiveMinDir != 0;
 		long sinceFlipMs = state.fiveMinFlipTimeMs == 0L ? Long.MAX_VALUE : nowMs - state.fiveMinFlipTimeMs;
 		boolean inArming = hasDir && sinceFlipMs <= armingWindowMs;
-		boolean lateBlocked = hasDir && sinceFlipMs > lateLimitMs;
 		double minutesSinceFlip = state.fiveMinFlipTimeMs == 0L ? Double.NaN : sinceFlipMs / 60000.0;
 		double movedDirPct = Double.NaN;
 		if (state.fiveMinFlipPrice > 0) {
@@ -502,13 +503,42 @@ public class CtiLbStrategy {
 			entryTrigger = scoreAlignedShort || pullbackShort;
 		}
 
+		LateBlockDecision lateBlockDecision = resolveLateBlockDecision(
+				hasDir,
+				sinceFlipMs,
+				lateLimitMs,
+				pullbackTriggered,
+				movedDirPct,
+				strategyProperties.movedDirPctLateGate());
+
 		if (pullbackTriggered) {
 			triggerReason = "PULLBACK";
 		} else if (scoreAligned) {
 			triggerReason = "SCORE";
 		}
-		return new EntryFilterState(fiveMinDir, inArming, lateBlocked, movedDirPct, entryTrigger, pullbackTriggered,
-				scoreAligned, triggerReason, state.fiveMinFlipTimeMs, minutesSinceFlip, state.fiveMinFlipPrice);
+		return new EntryFilterState(fiveMinDir, inArming, lateBlockDecision.lateBlocked(),
+				lateBlockDecision.ignoredPullback(), lateBlockDecision.ignoredMoveGate(), movedDirPct,
+				entryTrigger, pullbackTriggered, scoreAligned, triggerReason, state.fiveMinFlipTimeMs,
+				minutesSinceFlip, state.fiveMinFlipPrice);
+	}
+
+	static LateBlockDecision resolveLateBlockDecision(boolean hasDir, long sinceFlipMs, long lateLimitMs,
+			boolean pullbackTriggered, double movedDirPct, BigDecimal movedDirPctLateGate) {
+		boolean lateLimitExceeded = hasDir && sinceFlipMs > lateLimitMs;
+		boolean ignoredMoveGate = false;
+		boolean ignoredPullback = false;
+		boolean gatePassed = true;
+		if (lateLimitExceeded && movedDirPctLateGate != null) {
+			if (Double.isNaN(movedDirPct) || Math.abs(movedDirPct) < movedDirPctLateGate.doubleValue()) {
+				gatePassed = false;
+				ignoredMoveGate = true;
+			}
+		}
+		if (lateLimitExceeded && pullbackTriggered) {
+			ignoredPullback = true;
+		}
+		boolean lateBlocked = lateLimitExceeded && gatePassed && !pullbackTriggered;
+		return new LateBlockDecision(lateBlocked, ignoredPullback, ignoredMoveGate);
 	}
 
 	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state, EntryFilterState entryFilterState) {
@@ -589,6 +619,8 @@ public class CtiLbStrategy {
 			int fiveMinDir,
 			boolean inArming,
 			boolean lateBlocked,
+			boolean lateBlockedIgnoredPullback,
+			boolean lateBlockedIgnoredMoveGate,
 			double movedDirPct,
 			boolean entryTrigger,
 			boolean pullbackTriggered,
@@ -597,6 +629,9 @@ public class CtiLbStrategy {
 			long flipTimeMs,
 			double minutesSinceFlip,
 			double flipPrice) {
+	}
+
+	record LateBlockDecision(boolean lateBlocked, boolean ignoredPullback, boolean ignoredMoveGate) {
 	}
 
 	private record EntryDecision(
