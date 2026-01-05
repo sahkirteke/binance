@@ -16,8 +16,12 @@ public class ScoreSignalIndicator {
 	private Double lastCti5mValue;
 	private Double lastCti5mPrev;
 	private double lastAdx5m = Double.NaN;
+	private double lastCti1mValue;
+	private double lastCti1mPrev;
+	private CtiDirection lastCti1mDir = CtiDirection.NEUTRAL;
 	private boolean has5mCti;
 	private boolean hasAdx;
+	private long last1mCloseTime;
 	private int cti5mBarsSeen;
 	private int adx5mBarsSeen;
 	private long last5mCloseTime;
@@ -30,10 +34,17 @@ public class ScoreSignalIndicator {
 	}
 
 	public ScoreSignal onClosedCandle(Candle candle) {
+		if (candle.closeTime() <= last1mCloseTime) {
+			return null;
+		}
+		last1mCloseTime = candle.closeTime();
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
 		double cti1mValue = cti1mSignal.bfr();
 		double cti1mPrev = cti1mSignal.bfrPrev();
 		CtiDirection cti1mDir = resolveRawDirection(cti1mValue, cti1mPrev);
+		lastCti1mValue = cti1mValue;
+		lastCti1mPrev = cti1mPrev;
+		lastCti1mDir = cti1mDir;
 
 		Optional<Candle> fiveMinuteClosed = fiveMinuteAggregator.update(candle);
 		fiveMinuteClosed.ifPresent(this::updateFiveMinute);
@@ -89,7 +100,14 @@ public class ScoreSignalIndicator {
 	}
 
 	public void warmupOneMinuteCandle(Candle candle) {
-		scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
+		if (candle.closeTime() <= last1mCloseTime) {
+			return;
+		}
+		last1mCloseTime = candle.closeTime();
+		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
+		lastCti1mValue = cti1mSignal.bfr();
+		lastCti1mPrev = cti1mSignal.bfrPrev();
+		lastCti1mDir = resolveRawDirection(lastCti1mValue, lastCti1mPrev);
 	}
 
 	public void warmupFiveMinuteCandle(Candle candle) {
@@ -101,6 +119,27 @@ public class ScoreSignalIndicator {
 
 	public boolean isWarmupReady() {
 		return cti5mBarsSeen >= cti5mPeriod && adx5mBarsSeen >= ADX_PERIOD;
+	}
+
+	public WarmupStatus warmupStatus() {
+		boolean ctiReady = cti5mBarsSeen >= cti5mPeriod;
+		boolean adxReady = adx5mBarsSeen >= ADX_PERIOD;
+		return new WarmupStatus(cti5mBarsSeen, adx5mBarsSeen, ctiReady, adxReady);
+	}
+
+	public boolean isDuplicate1mClose(long closeTime) {
+		return closeTime <= last1mCloseTime;
+	}
+
+	public long last1mCloseTime() {
+		return last1mCloseTime;
+	}
+
+	public record WarmupStatus(
+			int cti5mBarsSeen,
+			int adx5mBarsSeen,
+			boolean cti5mReady,
+			boolean adx5mReady) {
 	}
 
 	private void updateFiveMinute(Candle fiveMinute) {

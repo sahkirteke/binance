@@ -70,6 +70,9 @@ public class HistoricalWarmupService {
 							return Mono.just(false);
 						}), concurrency)
 				.then()
+				.then(Flux.fromIterable(symbols)
+						.flatMap(ctiLbStrategy::refreshAfterWarmup, concurrency)
+						.then())
 				.doFinally(signal -> {
 					ctiLbStrategy.setWarmupMode(false);
 					long durationMs = System.currentTimeMillis() - start;
@@ -79,12 +82,31 @@ public class HistoricalWarmupService {
 	}
 
 	public Mono<Boolean> warmupSymbol(String symbol) {
+		long start = System.currentTimeMillis();
 		return warmupSymbolInterval(symbol, "5m", resolveCandles5m())
-				.then(warmupSymbolInterval(symbol, "1m", resolveCandles1m()))
-				.thenReturn(strategyRouter.isWarmupReady(symbol));
+				.flatMap(count5m -> warmupSymbolInterval(symbol, "1m", resolveCandles1m())
+						.map(count1m -> new WarmupCounts(count1m, count5m)))
+				.map(counts -> {
+					ScoreSignalIndicator.WarmupStatus status = strategyRouter.warmupStatus(symbol);
+					boolean ready = status != null && status.cti5mReady() && status.adx5mReady();
+					long durationMs = System.currentTimeMillis() - start;
+					LOGGER.info("EVENT=WARMUP_DONE symbol={} tf=1m candles={} tf=5m candles={} cti5mBarsSeen={} adx5mBarsSeen={}"
+							+ " cti5mReady={} adx5mReady={} ready={} durationMs={}",
+							symbol,
+							counts.candles1m(),
+							counts.candles5m(),
+							status == null ? 0 : status.cti5mBarsSeen(),
+							status == null ? 0 : status.adx5mBarsSeen(),
+							status != null && status.cti5mReady(),
+							status != null && status.adx5mReady(),
+							ready,
+							durationMs);
+					strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
+					return ready;
+				});
 	}
 
-	private Mono<Void> warmupSymbolInterval(String symbol, String interval, int limit) {
+	private Mono<Integer> warmupSymbolInterval(String symbol, String interval, int limit) {
 		long start = System.currentTimeMillis();
 		return marketClient.fetchFuturesKlines(symbol, interval, limit)
 				.doOnNext(klines -> {
@@ -107,7 +129,7 @@ public class HistoricalWarmupService {
 							sorted.size(),
 							durationMs);
 				})
-				.then();
+				.map(List::size);
 	}
 
 	private void scheduleRetry(String symbol) {
@@ -130,5 +152,8 @@ public class HistoricalWarmupService {
 
 	private int resolveConcurrency() {
 		return warmupProperties.concurrency() > 0 ? warmupProperties.concurrency() : DEFAULT_CONCURRENCY;
+	}
+
+	private record WarmupCounts(int candles1m, int candles5m) {
 	}
 }

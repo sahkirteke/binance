@@ -61,6 +61,21 @@ public class CtiLbStrategy {
 		this.warmupMode = warmupMode;
 	}
 
+	public Mono<Void> refreshAfterWarmup(String symbol) {
+		return orderClient.cancelAllOpenOrders(symbol)
+				.onErrorResume(error -> {
+					LOGGER.warn("EVENT=WARMUP_REFRESH symbol={} cancelError={}", symbol, error.getMessage());
+					return Mono.empty();
+				})
+				.then(orderClient.fetchPosition(symbol)
+						.doOnNext(position -> applyExchangePosition(symbol, position, System.currentTimeMillis()))
+						.onErrorResume(error -> {
+							LOGGER.warn("EVENT=WARMUP_REFRESH symbol={} positionError={}", symbol, error.getMessage());
+							return Mono.empty();
+						})
+						.then());
+	}
+
 	public void onScoreSignal(String symbol, ScoreSignal signal, double close) {
 		if (signal == null) {
 			return;
@@ -718,32 +733,36 @@ public class CtiLbStrategy {
 		lastPositionSyncMs.put(symbol, closeTime);
 		orderClient.fetchPosition(symbol)
 				.doOnNext(position -> {
-					PositionState local = positionStates.getOrDefault(symbol, PositionState.NONE);
-					PositionState updated = resolvePositionState(position.positionAmt());
-					positionStates.put(symbol, updated);
-					boolean desync = local != updated;
-					exchangePositions.put(symbol, position);
-					stateDesyncBySymbol.put(symbol, desync);
-					if (updated == PositionState.NONE) {
-						entryStates.remove(symbol);
-					} else if (position.entryPrice() != null && position.entryPrice().signum() > 0) {
-						CtiDirection side = updated == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT;
-						BigDecimal qty = position.positionAmt() == null ? null : position.positionAmt().abs();
-						EntryState existing = entryStates.get(symbol);
-						if (existing == null) {
-							entryStates.put(symbol, new EntryState(side, position.entryPrice(), closeTime, qty));
-						}
-					}
-					StrategyLogV1.PositionSyncLogDto dto = new StrategyLogV1.PositionSyncLogDto(
-							symbol,
-							updated == PositionState.NONE ? "FLAT" : updated.name(),
-							position.positionAmt(),
-							formatPositionSide(local),
-							desync);
-					LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
+					applyExchangePosition(symbol, position, closeTime);
 				})
 				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
 				.subscribe();
+	}
+
+	private void applyExchangePosition(String symbol, BinanceFuturesOrderClient.ExchangePosition position, long closeTime) {
+		PositionState local = positionStates.getOrDefault(symbol, PositionState.NONE);
+		PositionState updated = resolvePositionState(position.positionAmt());
+		positionStates.put(symbol, updated);
+		boolean desync = local != updated;
+		exchangePositions.put(symbol, position);
+		stateDesyncBySymbol.put(symbol, desync);
+		if (updated == PositionState.NONE) {
+			entryStates.remove(symbol);
+		} else if (position.entryPrice() != null && position.entryPrice().signum() > 0) {
+			CtiDirection side = updated == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT;
+			BigDecimal qty = position.positionAmt() == null ? null : position.positionAmt().abs();
+			EntryState existing = entryStates.get(symbol);
+			if (existing == null) {
+				entryStates.put(symbol, new EntryState(side, position.entryPrice(), closeTime, qty));
+			}
+		}
+		StrategyLogV1.PositionSyncLogDto dto = new StrategyLogV1.PositionSyncLogDto(
+				symbol,
+				updated == PositionState.NONE ? "FLAT" : updated.name(),
+				position.positionAmt(),
+				formatPositionSide(local),
+				desync);
+		LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
 	}
 
 	private PositionState resolvePositionState(BigDecimal positionAmt) {
