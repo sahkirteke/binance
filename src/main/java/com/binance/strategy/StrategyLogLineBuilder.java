@@ -65,6 +65,8 @@ public final class StrategyLogLineBuilder {
 				.append(" stateDesync=").append(na(dto.stateDesync()))
 				.append(" decisionBlockReason=").append(na(dto.decisionBlockReason()))
 				.append(" openOrders=").append(na(dto.openOrders()))
+				.append(" pendingFlipDir=").append(na(dto.pendingFlipDir()))
+				.append(" flipCooldownRemainingMs=").append(nl(dto.flipCooldownRemainingMs()))
 				.append(" cMissed=").append(nl(dto.cMissed()))
 				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));

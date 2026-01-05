@@ -61,6 +61,8 @@ public final class StrategyLogV1 {
 			String positionSide,
 			BigDecimal positionQty,
 			Integer openOrders,
+			Integer pendingFlipDir,
+			Long flipCooldownRemainingMs,
 			Long cMissed,
 			Long cConfirm,
 			Long cFlip) {

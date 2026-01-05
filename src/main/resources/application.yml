@@ -1,6 +1,8 @@
 spring:
   application:
     name: binance-trader
+  codec:
+    max-in-memory-size: 5MB
   datasource:
     url: jdbc:postgresql://aws-1-eu-central-1.pooler.supabase.com:5432/postgres?user=postgres.qssdtvxgkxjnfvchzghw&password=N7wncMMz9asKnain
     username: postgres
@@ -73,6 +75,15 @@ strategy:
   min-price-move-bps: 10
   enable-tie-break-bias: false
   startup-smoke-test-enabled: false
+  filter-refresh-ttl-ms: 300000
+  arming-window-minutes: 5
+  late-limit-minutes: 12
+  chase-max-move-pct: 0.40
+  confirm-bars-early: 1
+  confirm-bars-normal: 2
+  confirm-bars-exit: 1
+  enable-flip-on-opposite-exit: true
+  opposite-exit-flip-cooldown-ms: 2000
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500
