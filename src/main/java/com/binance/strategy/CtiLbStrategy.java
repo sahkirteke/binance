@@ -353,10 +353,11 @@ public class CtiLbStrategy {
 		CtiDirection recommendationUsedForLog = recommendationUsed;
 		PositionState currentForLog = current;
 		PositionState targetForLog = target;
+		CtiDirection confirmedRecForLog = confirmedRec;
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					hedgeModeBySymbol.put(symbol, hedgeMode);
-					logDecision(symbol, signal, close, actionForLog, confirm1m, confirmedRec, recUpdate,
+					logDecision(symbol, signal, close, actionForLog, confirm1m, confirmedRecForLog, recUpdate,
 							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
 							estimatedPnlPct, decisionActionReasonForLog, decisionBlock);
 					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
@@ -376,7 +377,7 @@ public class CtiLbStrategy {
 									recordEntry(symbol, targetForLog, response, resolvedQtyForLog, closeTime, close);
 									flipCount.increment();
 									logFlip(symbol, currentForLog, targetForLog, signal, close,
-											recommendationUsedForLog, confirmedRec, actionForLog,
+											recommendationUsedForLog, confirmedRecForLog, actionForLog,
 											response == null ? null : response.orderId());
 								})
 								.then();
@@ -412,7 +413,7 @@ public class CtiLbStrategy {
 								recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
 								flipCount.increment();
 								logFlip(symbol, currentForLog, targetForLog, signal, close,
-										recommendationUsedForLog, confirmedRec, actionForLog,
+										recommendationUsedForLog, confirmedRecForLog, actionForLog,
 										response == null ? null : response.orderId());
 							})
 							.then();
@@ -661,7 +662,7 @@ public class CtiLbStrategy {
 		if (lastExit == null) {
 			return 0L;
 		}
-		long remaining = strategyProperties.flipCooldownMs() - (nowMs - lastExit);
+		long remaining = strategyProperties.oppositeExitFlipCooldownMs() - (nowMs - lastExit);
 		return Math.max(0L, remaining);
 	}
 

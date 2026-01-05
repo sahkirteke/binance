@@ -72,7 +72,7 @@ public record StrategyProperties(
 		int confirmBarsNormal,
 		int confirmBarsExit,
 		boolean enableFlipOnOppositeExit,
-		long flipCooldownMs) {
+		long oppositeExitFlipCooldownMs) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {
