@@ -31,6 +31,7 @@ public class CtiLbStrategy {
 	private final StrategyProperties strategyProperties;
 	private final WarmupProperties warmupProperties;
 	private final SymbolFilterService symbolFilterService;
+	private final OrderTracker orderTracker;
 	private final Map<String, Long> lastCloseTimes = new ConcurrentHashMap<>();
 	private final Map<String, PositionState> positionStates = new ConcurrentHashMap<>();
 	private final Map<String, EntryState> entryStates = new ConcurrentHashMap<>();
@@ -55,11 +56,12 @@ public class CtiLbStrategy {
 	private volatile boolean ordersEnabledOverride = true;
 
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties,
-			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService) {
+			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService, OrderTracker orderTracker) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
 		this.symbolFilterService = symbolFilterService;
+		this.orderTracker = orderTracker;
 		logConfigSnapshot();
 	}
 
@@ -72,6 +74,13 @@ public class CtiLbStrategy {
 
 	public void enableOrdersAfterWarmup() {
 		ordersEnabledOverride = true;
+	}
+
+	public void syncPositionNow(String symbol, long eventTime) {
+		orderClient.fetchPosition(symbol)
+				.doOnNext(position -> applyExchangePosition(symbol, position, eventTime))
+				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
+				.subscribe();
 	}
 
 	public Mono<Void> refreshAfterWarmup(String symbol) {
@@ -158,13 +167,19 @@ public class CtiLbStrategy {
 				return;
 			}
 			orderClient.fetchHedgeModeEnabled()
-					.flatMap(hedgeMode -> closePosition(symbol, current, exitQty, hedgeMode)
-							.doOnNext(response -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
-									current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-									hedgeMode ? current.name() : "", response, null))
-							.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
-									current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-									hedgeMode ? current.name() : "", null, error.getMessage())))
+					.flatMap(hedgeMode -> {
+						String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT");
+						return closePosition(symbol, current, exitQty, hedgeMode, correlationId)
+								.doOnNext(response -> {
+									orderTracker.registerSubmitted(symbol, correlationId, response, true);
+									logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
+											current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
+											hedgeMode ? current.name() : "", correlationId, response, null);
+								})
+								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
+										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
+										hedgeMode ? current.name() : "", correlationId, null, error.getMessage()));
+					})
 					.doOnNext(response -> {
 						positionStates.put(symbol, PositionState.NONE);
 						entryStates.remove(symbol);
@@ -253,13 +268,17 @@ public class CtiLbStrategy {
 							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
 							estimatedPnlPct, decisionActionReasonForLog, decisionBlock);
 					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
-						return openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode)
-								.doOnNext(response -> logOrderEvent("ENTRY_ORDER", symbol, decisionActionReasonForLog,
-										targetForLog == PositionState.LONG ? "BUY" : "SELL", resolvedQtyForLog, false,
-										hedgeMode ? targetForLog.name() : "", response, null))
+						String correlationId = orderTracker.nextCorrelationId(symbol, "ENTRY");
+						return openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode, correlationId)
+								.doOnNext(response -> {
+									orderTracker.registerSubmitted(symbol, correlationId, response, false);
+									logOrderEvent("ENTRY_ORDER", symbol, decisionActionReasonForLog,
+											targetForLog == PositionState.LONG ? "BUY" : "SELL", resolvedQtyForLog, false,
+											hedgeMode ? targetForLog.name() : "", correlationId, response, null);
+								})
 								.doOnError(error -> logOrderEvent("ENTRY_ORDER", symbol, decisionActionReasonForLog,
 										targetForLog == PositionState.LONG ? "BUY" : "SELL", resolvedQtyForLog, false,
-										hedgeMode ? targetForLog.name() : "", null, error.getMessage()))
+										hedgeMode ? targetForLog.name() : "", correlationId, null, error.getMessage()))
 								.doOnNext(response -> positionStates.put(symbol, targetForLog))
 								.doOnNext(response -> {
 									recordEntry(symbol, targetForLog, response, resolvedQtyForLog, closeTime, close);
@@ -269,21 +288,31 @@ public class CtiLbStrategy {
 								})
 								.then();
 					}
-					return closePosition(symbol, currentForLog, closeQty, hedgeMode)
-							.doOnNext(response -> logOrderEvent("FLIP_ORDER", symbol, decisionActionReasonForLog,
-									currentForLog == PositionState.LONG ? "SELL" : "BUY", closeQty, true,
-									hedgeMode ? currentForLog.name() : "", response, null))
+					String closeCorrelationId = orderTracker.nextCorrelationId(symbol, "FLIP_CLOSE");
+					String openCorrelationId = orderTracker.nextCorrelationId(symbol, "FLIP_OPEN");
+					return closePosition(symbol, currentForLog, closeQty, hedgeMode, closeCorrelationId)
+							.doOnNext(response -> {
+								orderTracker.registerSubmitted(symbol, closeCorrelationId, response, true);
+								logOrderEvent("FLIP_ORDER", symbol, decisionActionReasonForLog,
+										currentForLog == PositionState.LONG ? "SELL" : "BUY", closeQty, true,
+										hedgeMode ? currentForLog.name() : "", closeCorrelationId, response, null);
+							})
 							.doOnError(error -> logOrderEvent("FLIP_ORDER", symbol, decisionActionReasonForLog,
 									currentForLog == PositionState.LONG ? "SELL" : "BUY", closeQty, true,
-									hedgeMode ? currentForLog.name() : "", null, error.getMessage()))
-							.flatMap(response -> openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode)
-									.doOnNext(openResponse -> logOrderEvent("FLIP_ORDER", symbol,
-											decisionActionReasonForLog, targetForLog == PositionState.LONG ? "BUY" : "SELL",
-											resolvedQtyForLog, false, hedgeMode ? targetForLog.name() : "", openResponse,
-											null))
+									hedgeMode ? currentForLog.name() : "", closeCorrelationId, null, error.getMessage()))
+							.flatMap(response -> openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode,
+									openCorrelationId)
+									.doOnNext(openResponse -> {
+										orderTracker.registerSubmitted(symbol, openCorrelationId, openResponse, false);
+										logOrderEvent("FLIP_ORDER", symbol,
+												decisionActionReasonForLog, targetForLog == PositionState.LONG ? "BUY" : "SELL",
+												resolvedQtyForLog, false, hedgeMode ? targetForLog.name() : "",
+												openCorrelationId, openResponse, null);
+									})
 									.doOnError(error -> logOrderEvent("FLIP_ORDER", symbol, decisionActionReasonForLog,
 											targetForLog == PositionState.LONG ? "BUY" : "SELL", resolvedQtyForLog, false,
-											hedgeMode ? targetForLog.name() : "", null, error.getMessage())))
+											hedgeMode ? targetForLog.name() : "", openCorrelationId, null,
+											error.getMessage())))
 							.doOnNext(response -> positionStates.put(symbol, targetForLog))
 							.doOnNext(response -> {
 								recordEntry(symbol, targetForLog, response, resolvedQtyForLog, closeTime, close);
@@ -313,32 +342,40 @@ public class CtiLbStrategy {
 		return orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					if (current == PositionState.NONE) {
-						return openPosition(symbol, target, quantity, hedgeMode);
+						String correlationId = orderTracker.nextCorrelationId(symbol, "FLIP_OPEN");
+						return openPosition(symbol, target, quantity, hedgeMode, correlationId)
+								.doOnNext(response -> orderTracker.registerSubmitted(symbol, correlationId, response, false));
 					}
-					return closePosition(symbol, current, quantity, hedgeMode)
-							.flatMap(response -> openPosition(symbol, target, quantity, hedgeMode));
+					String closeCorrelationId = orderTracker.nextCorrelationId(symbol, "FLIP_CLOSE");
+					String openCorrelationId = orderTracker.nextCorrelationId(symbol, "FLIP_OPEN");
+					return closePosition(symbol, current, quantity, hedgeMode, closeCorrelationId)
+							.doOnNext(response -> orderTracker.registerSubmitted(symbol, closeCorrelationId, response, true))
+							.flatMap(response -> openPosition(symbol, target, quantity, hedgeMode, openCorrelationId)
+									.doOnNext(openResponse -> orderTracker.registerSubmitted(symbol, openCorrelationId, openResponse, false)));
 				})
 				.doOnNext(response -> positionStates.put(symbol, target))
 				.then();
 	}
 
-	private Mono<OrderResponse> closePosition(String symbol, PositionState current, BigDecimal quantity, boolean hedgeMode) {
+	private Mono<OrderResponse> closePosition(String symbol, PositionState current, BigDecimal quantity, boolean hedgeMode,
+			String correlationId) {
 		if (current == PositionState.NONE) {
 			return Mono.empty();
 		}
 		String side = current == PositionState.LONG ? "SELL" : "BUY";
 		String positionSide = hedgeMode ? current.name() : "";
-		return orderClient.placeReduceOnlyMarketOrder(symbol, side, quantity, positionSide)
+		return orderClient.placeReduceOnlyMarketOrder(symbol, side, quantity, positionSide, correlationId)
 				.retryWhen(Retry.backoff(2, Duration.ofMillis(200))
 						.filter(error -> !(error instanceof IllegalArgumentException)))
 				.filter(CtiLbDecisionEngine::shouldProceedAfterClose)
 				.switchIfEmpty(Mono.error(new IllegalStateException("Close order rejected")));
 	}
 
-	private Mono<OrderResponse> openPosition(String symbol, PositionState target, BigDecimal quantity, boolean hedgeMode) {
+	private Mono<OrderResponse> openPosition(String symbol, PositionState target, BigDecimal quantity, boolean hedgeMode,
+			String correlationId) {
 		String side = target == PositionState.LONG ? "BUY" : "SELL";
 		String positionSide = hedgeMode ? target.name() : "";
-		return orderClient.placeMarketOrder(symbol, side, quantity, positionSide);
+		return orderClient.placeMarketOrder(symbol, side, quantity, positionSide, correlationId);
 	}
 
 	private Mono<OrderResponse> openPosition(String symbol, PositionState target, BigDecimal quantity) {
@@ -346,7 +383,11 @@ public class CtiLbStrategy {
 			return Mono.empty();
 		}
 		return orderClient.fetchHedgeModeEnabled()
-				.flatMap(hedgeMode -> openPosition(symbol, target, quantity, hedgeMode));
+				.flatMap(hedgeMode -> {
+					String correlationId = orderTracker.nextCorrelationId(symbol, "ENTRY");
+					return openPosition(symbol, target, quantity, hedgeMode, correlationId)
+							.doOnNext(response -> orderTracker.registerSubmitted(symbol, correlationId, response, false));
+				});
 	}
 
 	BigDecimal resolveQuantity(String symbol, double close) {
@@ -399,8 +440,10 @@ public class CtiLbStrategy {
 		String decisionAction = recUpdate.missedMove() ? "RESET_PENDING" : resolveDecisionAction(action);
 		String insufficientReason = resolveInsufficientReason(signal);
 		BinanceFuturesOrderClient.ExchangePosition exchangePosition = exchangePositions.get(symbol);
+		String exchangePositionSide = resolveExchangePositionSide(exchangePosition);
 		Boolean desync = stateDesyncBySymbol.get(symbol);
 		BigDecimal entryPrice = entryState == null ? null : entryState.entryPrice();
+		int openOrders = orderTracker.openOrdersCount(symbol);
 		DecisionLogDto dto = new DecisionLogDto(
 				symbol,
 				signal.closeTime(),
@@ -446,15 +489,15 @@ public class CtiLbStrategy {
 				strategyProperties.positionNotionalUsdt(),
 				strategyProperties.maxPositionUsdt(),
 				hedgeModeBySymbol.get(symbol),
-				exchangePosition == null ? "NA" : exchangePosition.positionSide(),
+				exchangePositionSide,
 				exchangePosition == null ? null : exchangePosition.positionAmt(),
 				desync,
 				decisionBlockReason,
 				recommendationRaw,
 				confirm1m,
 				formatPositionSide(positionStates.getOrDefault(symbol, PositionState.NONE)),
-				null,
-				0,
+				entryState == null ? null : entryState.quantity(),
+				openOrders,
 				missedMoveCount.longValue(),
 				confirmHitCount.longValue(),
 				flipCount.longValue());
@@ -499,11 +542,11 @@ public class CtiLbStrategy {
 	}
 
 	private void logOrderEvent(String event, String symbol, String reason, String side, BigDecimal qty,
-			boolean reduceOnly, String positionSide, OrderResponse response, String error) {
+			boolean reduceOnly, String positionSide, String correlationId, OrderResponse response, String error) {
 		String orderId = response == null || response.orderId() == null ? "NA" : response.orderId().toString();
 		String status = response == null ? "NA" : response.status();
 		String errorValue = error == null ? "NA" : error;
-		LOGGER.info("EVENT={} symbol={} reason={} side={} qty={} reduceOnly={} positionSide={} orderId={} status={} error={}",
+		LOGGER.info("EVENT={} symbol={} reason={} side={} qty={} reduceOnly={} positionSide={} orderId={} correlationId={} status={} error={}",
 				event,
 				symbol,
 				reason,
@@ -512,6 +555,7 @@ public class CtiLbStrategy {
 				reduceOnly,
 				positionSide == null || positionSide.isBlank() ? "NA" : positionSide,
 				orderId,
+				correlationId == null || correlationId.isBlank() ? "NA" : correlationId,
 				status == null ? "NA" : status,
 				errorValue);
 	}
@@ -796,12 +840,18 @@ public class CtiLbStrategy {
 		stateDesyncBySymbol.put(symbol, desync);
 		if (updated == PositionState.NONE) {
 			entryStates.remove(symbol);
-		} else if (position.entryPrice() != null && position.entryPrice().signum() > 0) {
-			CtiDirection side = updated == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT;
-			BigDecimal qty = position.positionAmt() == null ? null : position.positionAmt().abs();
+		} else {
+			BigDecimal entryPrice = position.entryPrice();
 			EntryState existing = entryStates.get(symbol);
-			if (existing == null) {
-				entryStates.put(symbol, new EntryState(side, position.entryPrice(), closeTime, qty));
+			if (entryPrice == null || entryPrice.signum() <= 0) {
+				entryPrice = existing == null ? null : existing.entryPrice();
+			}
+			if (entryPrice != null && entryPrice.signum() > 0) {
+				CtiDirection side = updated == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT;
+				BigDecimal qty = position.positionAmt() == null ? null : position.positionAmt().abs();
+				if (existing == null) {
+					entryStates.put(symbol, new EntryState(side, entryPrice, closeTime, qty));
+				}
 			}
 		}
 		StrategyLogV1.PositionSyncLogDto dto = new StrategyLogV1.PositionSyncLogDto(
@@ -811,6 +861,21 @@ public class CtiLbStrategy {
 				formatPositionSide(local),
 				desync);
 		LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
+	}
+
+	private String resolveExchangePositionSide(BinanceFuturesOrderClient.ExchangePosition position) {
+		if (position == null) {
+			return "NA";
+		}
+		BigDecimal amount = position.positionAmt();
+		if (amount == null || amount.signum() == 0) {
+			return "FLAT";
+		}
+		String side = position.positionSide();
+		if (side == null || side.isBlank() || "BOTH".equalsIgnoreCase(side)) {
+			return amount.signum() > 0 ? "LONG" : "SHORT";
+		}
+		return side;
 	}
 
 	private PositionState resolvePositionState(BigDecimal positionAmt) {

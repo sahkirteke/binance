@@ -63,7 +63,8 @@ public record StrategyProperties(
 		int maxTradesPer5Min,
 		long hardTradeCooldownMs,
 		boolean enableTieBreakBias,
-		boolean startupSmokeTestEnabled) {
+		boolean startupSmokeTestEnabled,
+		long filterRefreshTtlMs) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

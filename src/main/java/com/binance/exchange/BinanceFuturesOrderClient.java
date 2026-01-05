@@ -3,6 +3,7 @@ package com.binance.exchange;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
@@ -26,13 +27,20 @@ public class BinanceFuturesOrderClient {
 	}
 
 	public Mono<OrderResponse> placeMarketOrder(String symbol, String side, BigDecimal quantity, String positionSide) {
+		return placeMarketOrder(symbol, side, quantity, positionSide, null);
+	}
+
+	public Mono<OrderResponse> placeMarketOrder(String symbol, String side, BigDecimal quantity, String positionSide,
+			String clientOrderId) {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()
 				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
 		long timestamp = Instant.now().toEpochMilli();
-		String clientOrderId = UUID.randomUUID().toString();
+		String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
+				? UUID.randomUUID().toString()
+				: clientOrderId;
 		String payload = String.format(
 				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
 				symbol,
@@ -40,7 +48,7 @@ public class BinanceFuturesOrderClient {
 				quantity.toPlainString(),
 				properties.recvWindowMillis(),
 				timestamp,
-				clientOrderId);
+				resolvedClientOrderId);
 		if (positionSide != null && !positionSide.isBlank()) {
 			payload = payload + "&positionSide=" + positionSide;
 		}
@@ -66,17 +74,23 @@ public class BinanceFuturesOrderClient {
 
 	public Mono<OrderResponse> placeReduceOnlyMarketOrder(String symbol, String side, BigDecimal quantity,
 			String positionSide) {
-		return placeMarketOrderWithFlags(symbol, side, quantity, positionSide, true);
+		return placeMarketOrderWithFlags(symbol, side, quantity, positionSide, true, null);
+	}
+
+	public Mono<OrderResponse> placeReduceOnlyMarketOrder(String symbol, String side, BigDecimal quantity,
+			String positionSide, String clientOrderId) {
+		return placeMarketOrderWithFlags(symbol, side, quantity, positionSide, true, clientOrderId);
 	}
 
 	public Mono<OrderResponse> placeStopMarketOrder(String symbol, String side, BigDecimal quantity,
 			BigDecimal stopPrice, boolean reduceOnly, String positionSide) {
-		return placeTriggeredOrder(symbol, side, quantity, stopPrice, "STOP_MARKET", reduceOnly, positionSide);
+		return placeTriggeredOrder(symbol, side, quantity, stopPrice, "STOP_MARKET", reduceOnly, positionSide, null);
 	}
 
 	public Mono<OrderResponse> placeTakeProfitMarketOrder(String symbol, String side, BigDecimal quantity,
 			BigDecimal stopPrice, boolean reduceOnly, String positionSide) {
-		return placeTriggeredOrder(symbol, side, quantity, stopPrice, "TAKE_PROFIT_MARKET", reduceOnly, positionSide);
+		return placeTriggeredOrder(symbol, side, quantity, stopPrice, "TAKE_PROFIT_MARKET", reduceOnly, positionSide,
+				null);
 	}
 
 	public Mono<Void> cancelAllOpenOrders(String symbol) {
@@ -252,6 +266,18 @@ public class BinanceFuturesOrderClient {
 			BigDecimal tickSize) {
 	}
 
+	public record OpenOrder(
+			String symbol,
+			long orderId,
+			String clientOrderId,
+			String status,
+			String side,
+			BigDecimal origQty,
+			BigDecimal executedQty,
+			long updateTime,
+			boolean reduceOnly) {
+	}
+
 	private record PositionRiskResponse(
 			String symbol,
 			BigDecimal positionAmt,
@@ -260,6 +286,8 @@ public class BinanceFuturesOrderClient {
 	}
 
 	private record PositionModeResponse(boolean dualSidePosition) {}
+
+	private record ListenKeyResponse(String listenKey) {}
 
 	public record ExchangeInfoResponse(
 			List<SymbolInfo> symbols) {
@@ -307,14 +335,16 @@ public class BinanceFuturesOrderClient {
 	}
 
 	private Mono<OrderResponse> placeMarketOrderWithFlags(String symbol, String side, BigDecimal quantity,
-			String positionSide, boolean reduceOnly) {
+			String positionSide, boolean reduceOnly, String clientOrderId) {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()
 				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
 		long timestamp = Instant.now().toEpochMilli();
-		String clientOrderId = UUID.randomUUID().toString();
+		String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
+				? UUID.randomUUID().toString()
+				: clientOrderId;
 		String payload = String.format(
 				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
 				symbol,
@@ -322,7 +352,7 @@ public class BinanceFuturesOrderClient {
 				quantity.toPlainString(),
 				properties.recvWindowMillis(),
 				timestamp,
-				clientOrderId);
+				resolvedClientOrderId);
 		if (reduceOnly) {
 			payload = payload + "&reduceOnly=true";
 		}
@@ -333,14 +363,16 @@ public class BinanceFuturesOrderClient {
 	}
 
 	private Mono<OrderResponse> placeTriggeredOrder(String symbol, String side, BigDecimal quantity,
-			BigDecimal stopPrice, String type, boolean reduceOnly, String positionSide) {
+			BigDecimal stopPrice, String type, boolean reduceOnly, String positionSide, String clientOrderId) {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()
 				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
 		long timestamp = Instant.now().toEpochMilli();
-		String clientOrderId = UUID.randomUUID().toString();
+		String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
+				? UUID.randomUUID().toString()
+				: clientOrderId;
 		String payload = String.format(
 				"symbol=%s&side=%s&type=%s&quantity=%s&stopPrice=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
 				symbol,
@@ -350,7 +382,7 @@ public class BinanceFuturesOrderClient {
 				stopPrice.toPlainString(),
 				properties.recvWindowMillis(),
 				timestamp,
-				clientOrderId);
+				resolvedClientOrderId);
 		if (reduceOnly) {
 			payload = payload + "&reduceOnly=true";
 		}
@@ -381,3 +413,79 @@ public class BinanceFuturesOrderClient {
 				.bodyToMono(OrderResponse.class);
 	}
 }
+	public Mono<String> startUserDataStream() {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()) {
+			return Mono.error(new IllegalStateException("Binance API key is not configured."));
+		}
+		return binanceWebClient
+				.post()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/listenKey")
+						.build())
+				.header("X-MBX-APIKEY", properties.apiKey())
+				.retrieve()
+				.bodyToMono(ListenKeyResponse.class)
+				.map(ListenKeyResponse::listenKey);
+	}
+
+	public Mono<Void> keepAliveUserDataStream(String listenKey) {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()) {
+			return Mono.error(new IllegalStateException("Binance API key is not configured."));
+		}
+		return binanceWebClient
+				.put()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/listenKey")
+						.queryParam("listenKey", listenKey)
+						.build())
+				.header("X-MBX-APIKEY", properties.apiKey())
+				.retrieve()
+				.bodyToMono(Void.class);
+	}
+
+	public Mono<Void> closeUserDataStream(String listenKey) {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()) {
+			return Mono.error(new IllegalStateException("Binance API key is not configured."));
+		}
+		return binanceWebClient
+				.delete()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/listenKey")
+						.queryParam("listenKey", listenKey)
+						.build())
+				.header("X-MBX-APIKEY", properties.apiKey())
+				.retrieve()
+				.bodyToMono(Void.class);
+	}
+
+	public Mono<Map<Long, OpenOrder>> fetchOpenOrders(String symbol) {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()
+				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
+			return Mono.error(new IllegalStateException(
+					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
+		}
+		long timestamp = Instant.now().toEpochMilli();
+		String payload = String.format("symbol=%s&recvWindow=%d&timestamp=%d",
+				symbol,
+				properties.recvWindowMillis(),
+				timestamp);
+		String signature = signatureUtil.sign(payload, properties.secretKey());
+		String signedPayload = payload + "&signature=" + signature;
+		return binanceWebClient
+				.get()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/openOrders")
+						.query(signedPayload)
+						.build())
+				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+				.header("X-MBX-APIKEY", properties.apiKey())
+				.retrieve()
+				.onStatus(status -> status.isError(), response -> response
+						.bodyToMono(String.class)
+						.defaultIfEmpty("<empty>")
+						.flatMap(body -> Mono.error(new IllegalStateException(
+								"Binance open orders failed with status=" + response.statusCode().value()
+										+ ", body=" + body))))
+				.bodyToFlux(OpenOrder.class)
+				.collectMap(OpenOrder::orderId);
+	}

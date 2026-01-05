@@ -65,10 +65,13 @@ class WarmupModeTest {
 				10,
 				2500L,
 				false,
-				false);
+				false,
+				300_000L);
 		WarmupProperties warmupProperties = new WarmupProperties(true, 240, 120, 3, false, 0);
-		SymbolFilterService filterService = new SymbolFilterService(orderClient);
-		CtiLbStrategy strategy = new CtiLbStrategy(orderClient, properties, warmupProperties, filterService);
+		SymbolFilterService filterService = new SymbolFilterService(orderClient, properties);
+		OrderTracker orderTracker = new OrderTracker();
+		CtiLbStrategy strategy = new CtiLbStrategy(orderClient, properties, warmupProperties, filterService,
+				orderTracker);
 		strategy.setWarmupMode(true);
 
 		ScoreSignal signal = new ScoreSignal(

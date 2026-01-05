@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,11 +32,15 @@ public class SymbolFilterService {
 	private final Set<String> trackedSymbols = ConcurrentHashMap.newKeySet();
 	private final AtomicBoolean filtersReady = new AtomicBoolean(false);
 	private final AtomicBoolean refreshInFlight = new AtomicBoolean(false);
+	private final AtomicLong lastRefreshMs = new AtomicLong(0L);
 	private final StrategyProperties strategyProperties;
+	private final Duration refreshTtl;
 
 	public SymbolFilterService(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
+		long ttlMs = Math.max(0L, strategyProperties.filterRefreshTtlMs());
+		this.refreshTtl = ttlMs == 0L ? Duration.ZERO : Duration.ofMillis(ttlMs);
 	}
 
 	@PostConstruct
@@ -72,6 +77,10 @@ public class SymbolFilterService {
 		if (!refreshInFlight.compareAndSet(false, true)) {
 			return Mono.empty();
 		}
+		if (!shouldRefresh()) {
+			refreshInFlight.set(false);
+			return Mono.empty();
+		}
 		return orderClient.fetchExchangeInfo()
 				.map(response -> parseExchangeInfo(response, trackedSymbols))
 				.doOnNext(parsed -> {
@@ -86,6 +95,8 @@ public class SymbolFilterService {
 							filters.minQty(),
 							filters.minNotional(),
 							filters.tickSize()));
+					logMissingSymbols(parsed.keySet());
+					lastRefreshMs.set(System.currentTimeMillis());
 					LOGGER.info("EVENT=FILTERS_GLOBAL_OK symbolsReady={}", parsed.size());
 				})
 				.retryWhen(Retry.backoff(4, RETRY_MIN_BACKOFF)
@@ -115,5 +126,27 @@ public class SymbolFilterService {
 
 	private static String normalizeSymbol(String symbol) {
 		return symbol == null ? null : symbol.toUpperCase();
+	}
+
+	private boolean shouldRefresh() {
+		if (refreshTtl.isZero()) {
+			return true;
+		}
+		long lastRefresh = lastRefreshMs.get();
+		if (lastRefresh == 0L) {
+			return true;
+		}
+		return System.currentTimeMillis() - lastRefresh >= refreshTtl.toMillis();
+	}
+
+	private void logMissingSymbols(Set<String> loadedSymbols) {
+		Set<String> missing = trackedSymbols.stream()
+				.map(SymbolFilterService::normalizeSymbol)
+				.filter(symbol -> !loadedSymbols.contains(symbol))
+				.collect(java.util.stream.Collectors.toSet());
+		if (!missing.isEmpty()) {
+			LOGGER.warn("EVENT=FILTERS_FAIL missingSymbols={}", String.join(",", missing));
+			filtersReady.set(false);
+		}
 	}
 }
