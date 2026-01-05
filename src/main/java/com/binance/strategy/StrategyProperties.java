@@ -69,7 +69,8 @@ public record StrategyProperties(
 		int lateLimitMinutes,
 		BigDecimal chaseMaxMovePct,
 		int confirmBarsEarly,
-		int confirmBarsNormal) {
+		int confirmBarsNormal,
+		int confirmBarsExit) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

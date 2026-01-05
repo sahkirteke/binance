@@ -175,6 +175,45 @@ public class CtiLbStrategy {
 
 		syncPositionIfNeeded(symbol, closeTime);
 		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
+		OppositeExitDecision oppositeExit = resolveOppositeExit(symbolState, current);
+		if (current != PositionState.NONE && oppositeExit.exit()) {
+			SignalAction exitAction = SignalAction.HOLD;
+			String decisionActionReason = oppositeExit.reason();
+			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
+			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
+			logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+					recommendationRaw, exitQty, entryState, null, decisionActionReason, decisionBlockReason);
+			if (!effectiveEnableOrders()) {
+				return;
+			}
+			if (exitQty == null || exitQty.signum() <= 0) {
+				return;
+			}
+			orderClient.fetchHedgeModeEnabled()
+					.flatMap(hedgeMode -> {
+						String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT_OPPOSITE");
+						return closePosition(symbol, current, exitQty, hedgeMode, correlationId)
+								.doOnNext(response -> {
+									orderTracker.registerSubmitted(symbol, correlationId, response, true);
+									logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
+											current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
+											hedgeMode ? current.name() : "", correlationId, response, null);
+								})
+								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
+										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
+										hedgeMode ? current.name() : "", correlationId, null, error.getMessage()));
+					})
+					.doOnNext(response -> {
+						positionStates.put(symbol, PositionState.NONE);
+						entryStates.remove(symbol);
+						recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
+					})
+					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB opposite exit {}: {}",
+							decisionActionReason, error.getMessage()))
+					.onErrorResume(error -> Mono.empty())
+					.subscribe();
+			return;
+		}
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
 				entryState == null ? null : entryState.entryPrice(),
@@ -544,6 +583,38 @@ public class CtiLbStrategy {
 		private double fiveMinFlipPrice;
 		private double prevClose1m = Double.NaN;
 		private int confirmCounter;
+		private int exitConfirmCounter;
+	}
+
+	private OppositeExitDecision resolveOppositeExit(SymbolState state, PositionState current) {
+		if (current == PositionState.NONE) {
+			state.exitConfirmCounter = 0;
+			return OppositeExitDecision.noExit();
+		}
+		boolean oppositeCandidate = (current == PositionState.LONG && state.lastFiveMinDir == -1)
+				|| (current == PositionState.SHORT && state.lastFiveMinDir == 1);
+		if (oppositeCandidate) {
+			state.exitConfirmCounter += 1;
+		} else {
+			state.exitConfirmCounter = 0;
+		}
+		int confirmBarsExit = Math.max(1, strategyProperties.confirmBarsExit());
+		if (oppositeCandidate && state.exitConfirmCounter >= confirmBarsExit) {
+			String reason = String.format(
+					"EXIT_OPPOSITE_SIGNAL fiveMinDir=%d positionSide=%s confirm=%d/%d",
+					state.lastFiveMinDir,
+					current.name(),
+					state.exitConfirmCounter,
+					confirmBarsExit);
+			return new OppositeExitDecision(true, reason);
+		}
+		return OppositeExitDecision.noExit();
+	}
+
+	private record OppositeExitDecision(boolean exit, String reason) {
+		static OppositeExitDecision noExit() {
+			return new OppositeExitDecision(false, null);
+		}
 	}
 
 	private Mono<Void> executeFlip(String symbol, PositionState target, double close) {

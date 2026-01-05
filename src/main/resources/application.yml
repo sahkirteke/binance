@@ -81,6 +81,7 @@ strategy:
   chase-max-move-pct: 0.40
   confirm-bars-early: 1
   confirm-bars-normal: 2
+  confirm-bars-exit: 1
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500
