@@ -113,6 +113,7 @@ public class CtiLbStrategy {
 		}
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
 		double prevClose = symbolState.prevClose1m;
+		int fiveMinDir = symbolState.lastFiveMinDir;
 		if (signal.cti5mReady()) {
 			int newDir = resolveFiveMinDir(signal.score5m());
 			if (newDir != 0 && newDir != symbolState.lastFiveMinDir) {
@@ -121,9 +122,17 @@ public class CtiLbStrategy {
 				symbolState.prevFiveMinDir = symbolState.lastFiveMinDir;
 			}
 			symbolState.lastFiveMinDir = newDir;
+			fiveMinDir = newDir;
 		}
 		symbolState.prevClose1m = close;
-		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose);
+		PullbackSignal pullbackSignal = resolvePullbackSignal(
+				fiveMinDir,
+				signal.score1m(),
+				signal.cti1mValue(),
+				signal.cti1mPrev(),
+				prevClose,
+				close);
+		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, pullbackSignal);
 
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
@@ -366,7 +375,8 @@ public class CtiLbStrategy {
 		return 0;
 	}
 
-	private void logEntryFilterState(String symbol, SymbolState state, long nowMs, double close, double prevClose) {
+	private void logEntryFilterState(String symbol, SymbolState state, long nowMs, double close, double prevClose,
+			PullbackSignal pullbackSignal) {
 		if (warmupMode) {
 			return;
 		}
@@ -384,7 +394,7 @@ public class CtiLbStrategy {
 					? movedSinceFlipPct
 					: (state.fiveMinFlipPrice - close) / state.fiveMinFlipPrice * 100.0;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} flipPrice={} movedDirPct={} prevClose1m={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -394,7 +404,48 @@ public class CtiLbStrategy {
 				lateBlocked,
 				state.fiveMinFlipPrice == 0.0 ? "NA" : String.format("%.8f", state.fiveMinFlipPrice),
 				Double.isNaN(movedDirPct) ? "NA" : String.format("%.4f", movedDirPct),
-				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose));
+				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose),
+				pullbackSignal.pullbackTriggered(),
+				pullbackSignal.scoreAligned(),
+				pullbackSignal.entryTrigger(),
+				pullbackSignal.triggerReason());
+	}
+
+	private PullbackSignal resolvePullbackSignal(int fiveMinDir, int score1m, double bfr1m, double bfrPrev,
+			double prevClose, double close) {
+		boolean prevCloseValid = !Double.isNaN(prevClose);
+		boolean pullbackLong = fiveMinDir == 1 && prevCloseValid && prevClose < bfrPrev && close > bfr1m;
+		boolean pullbackShort = fiveMinDir == -1 && prevCloseValid && prevClose > bfrPrev && close < bfr1m;
+		boolean scoreAlignedLong = score1m == 1;
+		boolean scoreAlignedShort = score1m == -1;
+		boolean entryTrigger = false;
+		String triggerReason = "NONE";
+		boolean scoreAligned = false;
+		boolean pullbackTriggered = false;
+
+		if (fiveMinDir == 1) {
+			scoreAligned = scoreAlignedLong;
+			pullbackTriggered = pullbackLong;
+			entryTrigger = scoreAlignedLong || pullbackLong;
+		} else if (fiveMinDir == -1) {
+			scoreAligned = scoreAlignedShort;
+			pullbackTriggered = pullbackShort;
+			entryTrigger = scoreAlignedShort || pullbackShort;
+		}
+
+		if (pullbackTriggered) {
+			triggerReason = "PULLBACK";
+		} else if (scoreAligned) {
+			triggerReason = "SCORE";
+		}
+		return new PullbackSignal(pullbackTriggered, scoreAligned, entryTrigger, triggerReason);
+	}
+
+	private record PullbackSignal(
+			boolean pullbackTriggered,
+			boolean scoreAligned,
+			boolean entryTrigger,
+			String triggerReason) {
 	}
 
 	private static class SymbolState {
