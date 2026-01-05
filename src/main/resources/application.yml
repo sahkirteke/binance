@@ -1,6 +1,8 @@
 spring:
   application:
     name: binance-trader
+  codec:
+    max-in-memory-size: 5MB
   datasource:
     url: jdbc:postgresql://aws-1-eu-central-1.pooler.supabase.com:5432/postgres?user=postgres.qssdtvxgkxjnfvchzghw&password=N7wncMMz9asKnain
     username: postgres

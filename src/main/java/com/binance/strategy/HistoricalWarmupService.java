@@ -59,7 +59,7 @@ public class HistoricalWarmupService {
 			return;
 		}
 		List<String> symbols = strategyProperties.resolvedTradeSymbols();
-		symbolFilterService.preloadFilters(symbols, resolveConcurrency())
+		symbolFilterService.preloadFilters(symbols)
 				.then(warmupAllSymbols(symbols))
 				.subscribe();
 	}

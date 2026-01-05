@@ -75,7 +75,7 @@ public class CtiLbStrategy {
 	}
 
 	public Mono<Void> refreshAfterWarmup(String symbol) {
-		triggerFilterRefresh(symbol);
+		triggerFilterRefresh();
 		return orderClient.cancelAllOpenOrders(symbol)
 				.onErrorResume(error -> {
 					LOGGER.warn("EVENT=WARMUP_REFRESH symbol={} cancelError={}", symbol, error.getMessage());
@@ -352,7 +352,7 @@ public class CtiLbStrategy {
 	BigDecimal resolveQuantity(String symbol, double close) {
 		BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
 		if (filters == null) {
-			triggerFilterRefresh(symbol);
+			triggerFilterRefresh();
 			return null;
 		}
 		BigDecimal targetNotional = resolveTargetNotionalUsdt();
@@ -469,17 +469,21 @@ public class CtiLbStrategy {
 	}
 
 	private String validateMinTrade(String symbol, BigDecimal quantity, double price) {
+		if (!symbolFilterService.filtersReady()) {
+			triggerFilterRefresh();
+			return "WAIT_FILTERS";
+		}
 		if (quantity == null || quantity.signum() <= 0) {
 			BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
 			if (filters == null) {
-				triggerFilterRefresh(symbol);
+				triggerFilterRefresh();
 				return "WAIT_FILTERS";
 			}
 			return "QTY_ZERO_AFTER_STEP";
 		}
 		BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
 		if (filters == null) {
-			triggerFilterRefresh(symbol);
+			triggerFilterRefresh();
 			return "WAIT_FILTERS";
 		}
 		if (filters.minQty() != null && quantity.compareTo(filters.minQty()) < 0) {
@@ -524,9 +528,8 @@ public class CtiLbStrategy {
 				strategyProperties.maxFlipsPer5Min());
 	}
 
-	private void triggerFilterRefresh(String symbol) {
-		symbolFilterService.refreshFilters(symbol)
-				.subscribe();
+	private void triggerFilterRefresh() {
+		symbolFilterService.requestRefresh();
 	}
 
 	private EntryState resolveEntryState(String symbol, PositionState current, double close, long closeTime) {
@@ -753,6 +756,10 @@ public class CtiLbStrategy {
 			PositionState current) {
 		if (signal.insufficientData()) {
 			return "INSUFFICIENT_DATA";
+		}
+		if (action != SignalAction.HOLD && !symbolFilterService.filtersReady()) {
+			triggerFilterRefresh();
+			return "WAIT_FILTERS";
 		}
 		if (action != SignalAction.HOLD && !effectiveEnableOrders()) {
 			return "ORDERS_DISABLED";

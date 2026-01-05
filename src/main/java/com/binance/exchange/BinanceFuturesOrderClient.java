@@ -213,7 +213,7 @@ public class BinanceFuturesOrderClient {
 						position.positionSide()));
 	}
 
-	public Mono<SymbolFilters> fetchSymbolFilters(String symbol) {
+	public Mono<ExchangeInfoResponse> fetchExchangeInfo() {
 		return binanceWebClient
 				.get()
 				.uri(uriBuilder -> uriBuilder
@@ -226,7 +226,11 @@ public class BinanceFuturesOrderClient {
 						.flatMap(body -> Mono.error(new IllegalStateException(
 								"Binance exchange info failed with status=" + response.statusCode().value()
 										+ ", body=" + body))))
-				.bodyToMono(ExchangeInfoResponse.class)
+				.bodyToMono(ExchangeInfoResponse.class);
+	}
+
+	public Mono<SymbolFilters> fetchSymbolFilters(String symbol) {
+		return fetchExchangeInfo()
 				.flatMap(response -> response.symbols().stream()
 						.filter(info -> symbol.equalsIgnoreCase(info.symbol()))
 						.findFirst()
@@ -257,16 +261,16 @@ public class BinanceFuturesOrderClient {
 
 	private record PositionModeResponse(boolean dualSidePosition) {}
 
-	private record ExchangeInfoResponse(
+	public record ExchangeInfoResponse(
 			List<SymbolInfo> symbols) {
 	}
 
-	private record SymbolInfo(
+	public record SymbolInfo(
 			String symbol,
 			List<ExchangeFilter> filters) {
 	}
 
-	private record ExchangeFilter(
+	public record ExchangeFilter(
 			String filterType,
 			BigDecimal minQty,
 			BigDecimal minNotional,
@@ -275,7 +279,7 @@ public class BinanceFuturesOrderClient {
 			BigDecimal tickSize) {
 	}
 
-	private SymbolFilters resolveSymbolFilters(SymbolInfo info) {
+	public static SymbolFilters resolveSymbolFilters(SymbolInfo info) {
 		BigDecimal minQty = null;
 		BigDecimal minNotional = null;
 		BigDecimal stepSize = null;
