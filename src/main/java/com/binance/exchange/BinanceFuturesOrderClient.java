@@ -412,7 +412,7 @@ public class BinanceFuturesOrderClient {
 										+ ", body=" + body))))
 				.bodyToMono(OrderResponse.class);
 	}
-}
+
 	public Mono<String> startUserDataStream() {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()) {
 			return Mono.error(new IllegalStateException("Binance API key is not configured."));
@@ -489,3 +489,4 @@ public class BinanceFuturesOrderClient {
 				.bodyToFlux(OpenOrder.class)
 				.collectMap(OpenOrder::orderId);
 	}
+}
