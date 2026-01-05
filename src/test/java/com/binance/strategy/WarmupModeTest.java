@@ -64,6 +64,7 @@ class WarmupModeTest {
 				BigDecimal.valueOf(12),
 				10,
 				2500L,
+				false,
 				false);
 		WarmupProperties warmupProperties = new WarmupProperties(true, 240, 120, 3, false, 0);
 		CtiLbStrategy strategy = new CtiLbStrategy(orderClient, properties, warmupProperties);

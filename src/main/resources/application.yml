@@ -72,6 +72,7 @@ strategy:
   min-bfr-delta: 0.002
   min-price-move-bps: 10
   enable-tie-break-bias: false
+  startup-smoke-test-enabled: false
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500

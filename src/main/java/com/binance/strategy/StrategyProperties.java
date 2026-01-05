@@ -62,7 +62,8 @@ public record StrategyProperties(
 		BigDecimal flipSpreadMaxBps,
 		int maxTradesPer5Min,
 		long hardTradeCooldownMs,
-		boolean enableTieBreakBias) {
+		boolean enableTieBreakBias,
+		boolean startupSmokeTestEnabled) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {
