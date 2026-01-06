@@ -39,15 +39,9 @@ public final class StrategyLogLineBuilder {
 				.append(" recommendationUsed=").append(recDir(dto.recommendationUsed()))
 				.append(" adxGate=").append(dto.adxGate())
 				.append(" adxGateReason=").append(na(dto.adxGateReason()))
-				.append(" streak=").append(na(dto.streak()))
-				.append(" confirmBars=").append(na(dto.confirmBars()))
 				.append(" confirmedRec=").append(recDir(dto.confirmedRec()))
 				.append(" recReason=").append(na(dto.recReason()))
-				.append(" recPending=").append(recDir(dto.recPending()))
-				.append(" recFirstSeenAt=").append(nl(dto.recFirstSeenAt()))
-				.append(" recFirstSeenPrice=").append(num(dto.recFirstSeenPrice()))
 				.append(" trend=").append(recDir(dto.trend()))
-				.append(" confirmCounter=").append(na(dto.confirmCounter()))
 				.append(" action=").append(na(dto.action()))
 				.append(" decisionActionReason=").append(na(dto.decisionActionReason()))
 				.append(" enableOrders=").append(dto.enableOrders())
@@ -94,8 +88,6 @@ public final class StrategyLogLineBuilder {
 				.append(" tpTrailingActive=").append(na(dto.tpTrailingActive()))
 				.append(" maxPnlSeenPct=").append(num(dto.maxPnlSeenPct()))
 				.append(" trailingStopPct=").append(num(dto.trailingStopPct()))
-				.append(" cMissed=").append(nl(dto.cMissed()))
-				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));
 		return builder.toString();
 	}
