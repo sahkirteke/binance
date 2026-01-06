@@ -25,7 +25,8 @@ public class FiveMinuteCandleAggregator {
 
 		double high = Math.max(current.high(), candle.high());
 		double low = Math.min(current.low(), candle.low());
-		current = new Candle(current.open(), high, low, candle.close(), candle.closeTime());
+		double volume = current.volume() + candle.volume();
+		current = new Candle(current.open(), high, low, candle.close(), volume, candle.closeTime());
 		return Optional.empty();
 	}
 }

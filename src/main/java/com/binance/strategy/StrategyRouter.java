@@ -40,7 +40,7 @@ public class StrategyRouter {
 			return;
 		}
 		ScoreSignal signal = indicator.onClosedCandle(candle);
-		ctiLbStrategy.onScoreSignal(symbol, signal, candle.close());
+		ctiLbStrategy.onScoreSignal(symbol, signal, candle);
 	}
 
 	public void warmupOneMinuteCandle(String symbol, Candle candle) {
@@ -55,6 +55,7 @@ public class StrategyRouter {
 			return;
 		}
 		resolveIndicator(symbol).warmupFiveMinuteCandle(candle);
+		ctiLbStrategy.onWarmupFiveMinuteCandle(symbol, candle);
 	}
 
 	public boolean isWarmupReady(String symbol) {
