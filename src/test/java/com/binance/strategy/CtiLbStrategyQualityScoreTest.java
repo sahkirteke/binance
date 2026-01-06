@@ -147,6 +147,12 @@ class CtiLbStrategyQualityScoreTest {
 				1,
 				0.35,
 				0.20,
-				0.15);
+				0.15,
+				55,
+				3,
+				0.35,
+				70,
+				2,
+				true);
 	}
 }

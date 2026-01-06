@@ -101,6 +101,12 @@ strategy:
   trail-activate-pct: 0.35
   trail-retrace-pct: 0.20
   trend-hold-min-profit-pct: 0.15
+  continuation-quality-min: 55
+  continuation-min-bars: 3
+  continuation-max-retrace-pct: 0.35
+  flip-fast-quality: 70
+  flip-confirm-bars: 2
+  flip-confirm-reset-on-neutral: true
 
 warmup:
   enabled: true

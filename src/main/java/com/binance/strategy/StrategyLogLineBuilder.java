@@ -74,6 +74,12 @@ public final class StrategyLogLineBuilder {
 				.append(" profitPct=").append(num(dto.profitPct()))
 				.append(" trendStillStrong=").append(dto.trendStillStrong())
 				.append(" exitHoldApplied=").append(dto.exitHoldApplied())
+				.append(" continuationActive=").append(dto.continuationActive())
+				.append(" continuationBars=").append(na(dto.continuationBars()))
+				.append(" bestFavorablePrice=").append(num(dto.bestFavorablePrice()))
+				.append(" retracePct=").append(num(dto.retracePct()))
+				.append(" flipConfirmCounter=").append(na(dto.flipConfirmCounter()))
+				.append(" flipGateReason=").append(na(dto.flipGateReason()))
 				.append(" cMissed=").append(nl(dto.cMissed()))
 				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));

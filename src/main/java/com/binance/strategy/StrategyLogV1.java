@@ -72,7 +72,13 @@ public final class StrategyLogV1 {
 			Double trailStop,
 			Double profitPct,
 			boolean trendStillStrong,
-			boolean exitHoldApplied) {
+			boolean exitHoldApplied,
+			boolean continuationActive,
+			Integer continuationBars,
+			Double bestFavorablePrice,
+			Double retracePct,
+			Integer flipConfirmCounter,
+			String flipGateReason) {
 	}
 
 	public record ConfirmHitLogDto(

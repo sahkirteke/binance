@@ -88,7 +88,13 @@ class WarmupModeTest {
 				1,
 				0.35,
 				0.20,
-				0.15);
+				0.15,
+				55,
+				3,
+				0.35,
+				70,
+				2,
+				true);
 		WarmupProperties warmupProperties = new WarmupProperties(true, 240, 120, 3, false, 0);
 		SymbolFilterService filterService = new SymbolFilterService(orderClient, properties);
 		OrderTracker orderTracker = new OrderTracker();
