@@ -147,7 +147,7 @@ public class CtiLbStrategy {
 		double close = candle.close();
 		double prevClose = symbolState.prevClose1m;
 		int fiveMinDir = symbolState.lastFiveMinDir;
-		symbolState.updateIndicators(candle);
+		symbolState.updateOneMinuteIndicators(candle);
 		if (signal.cti5mReady()) {
 			int newDir = resolveFiveMinDir(signal.score5m());
 			if (newDir != 0 && newDir != symbolState.lastFiveMinDir) {
@@ -614,6 +614,11 @@ public class CtiLbStrategy {
 	}
 
 	public void onWarmupFiveMinuteCandle(String symbol, Candle candle) {
+		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
+		symbolState.updateFiveMinuteIndicators(candle);
+	}
+
+	public void onClosedFiveMinuteCandle(String symbol, Candle candle) {
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
 		symbolState.updateFiveMinuteIndicators(candle);
 	}
@@ -1355,6 +1360,8 @@ public class CtiLbStrategy {
 		private long fiveMinFlipTimeMs;
 		private double fiveMinFlipPrice;
 		private double prevClose1m = Double.NaN;
+		private long last1mCloseTime;
+		private long last5mCloseTime;
 		private double peakPriceSinceEntry = Double.NaN;
 		private double troughPriceSinceEntry = Double.NaN;
 		private boolean trailActive;
@@ -1366,7 +1373,6 @@ public class CtiLbStrategy {
 		private long continuationStartTimeMs;
 		private long continuationEntryTimeMs;
 		private double bestFavorablePriceSinceEntry = Double.NaN;
-		private final FiveMinuteCandleAggregator fiveMinuteAggregator = new FiveMinuteCandleAggregator();
 		private final BarSeries series1m = new BaseBarSeriesBuilder().withName("1m").build();
 		private final BarSeries series5m = new BaseBarSeriesBuilder().withName("5m").build();
 		private final ClosePriceIndicator closePrice1m = new ClosePriceIndicator(series1m);
@@ -1385,7 +1391,11 @@ public class CtiLbStrategy {
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
 
-		private void updateIndicators(Candle candle) {
+		private void updateOneMinuteIndicators(Candle candle) {
+			if (candle.closeTime() <= last1mCloseTime) {
+				return;
+			}
+			last1mCloseTime = candle.closeTime();
 			series1m.addBar(new BaseBar(Duration.ofMinutes(1),
 					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
 					candle.open(),
@@ -1399,11 +1409,13 @@ public class CtiLbStrategy {
 			atr14Value = atr14_1m.getValue(index).doubleValue();
 			atrSma20Value = atrSma20_1m.getValue(index).doubleValue();
 			volumeSma10Value = volumeSma10_1m.getValue(index).doubleValue();
-			fiveMinuteAggregator.update(candle)
-					.ifPresent(this::updateFiveMinuteIndicators);
 		}
 
 		private void updateFiveMinuteIndicators(Candle candle) {
+			if (candle.closeTime() <= last5mCloseTime) {
+				return;
+			}
+			last5mCloseTime = candle.closeTime();
 			series5m.addBar(new BaseBar(Duration.ofMinutes(5),
 					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
 					candle.open(),
@@ -1668,9 +1680,10 @@ public class CtiLbStrategy {
 				signal.score1m(),
 				signal.score5m(),
 				signal.hamCtiScore(),
-				signal.adxBonus(),
-				scoreLong(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
-				scoreShort(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
+				signal.ctiDirScore(),
+				signal.macdScore(),
+				scoreLong(signal.score1m(), signal.score5m(), signal.macdScore()),
+				scoreShort(signal.score1m(), signal.score5m(), signal.macdScore()),
 				signal.adjustedScore(),
 				signal.bias(),
 				recommendationRaw,
@@ -2005,8 +2018,8 @@ public class CtiLbStrategy {
 				signal.closeTime(),
 				BigDecimal.valueOf(price),
 				signal.adjustedScore(),
-				scoreLong(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
-				scoreShort(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
+				scoreLong(signal.score1m(), signal.score5m(), signal.macdScore()),
+				scoreShort(signal.score1m(), signal.score5m(), signal.macdScore()),
 				rec,
 				confirmedRec,
 				signal.cti1mValue(),
@@ -2166,18 +2179,18 @@ public class CtiLbStrategy {
 		return counter.longValue() % every == 0;
 	}
 
-	private int scoreLong(int score1m, int score5m, int adxBonus, int hamScore) {
+	private int scoreLong(int score1m, int score5m, int macdScore) {
 		int longScore = (score1m > 0 ? 1 : 0) + (score5m > 0 ? 1 : 0);
-		if (hamScore > 0) {
-			longScore += adxBonus;
+		if (macdScore > 0) {
+			longScore += 1;
 		}
 		return longScore;
 	}
 
-	private int scoreShort(int score1m, int score5m, int adxBonus, int hamScore) {
+	private int scoreShort(int score1m, int score5m, int macdScore) {
 		int shortScore = (score1m < 0 ? 1 : 0) + (score5m < 0 ? 1 : 0);
-		if (hamScore < 0) {
-			shortScore += adxBonus;
+		if (macdScore < 0) {
+			shortScore += 1;
 		}
 		return shortScore;
 	}

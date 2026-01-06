@@ -1,11 +1,12 @@
 package com.binance.strategy;
 
-import java.util.Optional;
-
 import org.ta4j.core.BarSeries;
 import org.ta4j.core.BaseBar;
 import org.ta4j.core.BaseBarSeriesBuilder;
+import org.ta4j.core.indicators.EMAIndicator;
+import org.ta4j.core.indicators.MACDIndicator;
 import org.ta4j.core.indicators.adx.ADXIndicator;
+import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
 
 public class ScoreSignalIndicator {
 
@@ -14,7 +15,10 @@ public class ScoreSignalIndicator {
 	private final String symbol;
 	private final CtiScoreCalculator scoreCalculator;
 	private final boolean enableTieBreakBias;
-	private final FiveMinuteCandleAggregator fiveMinuteAggregator = new FiveMinuteCandleAggregator();
+	private final BarSeries macdSeries = new BaseBarSeriesBuilder().withName("macd1m").build();
+	private final ClosePriceIndicator macdClose = new ClosePriceIndicator(macdSeries);
+	private final MACDIndicator macdIndicator = new MACDIndicator(macdClose, 12, 26);
+	private final EMAIndicator macdSignal = new EMAIndicator(macdIndicator, 9);
 	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m").build();
 	private final ADXIndicator adxIndicator = new ADXIndicator(adxSeries, ADX_PERIOD);
 	private CtiDirection lastCti5mDir = CtiDirection.NEUTRAL;
@@ -38,11 +42,20 @@ public class ScoreSignalIndicator {
 		this.enableTieBreakBias = enableTieBreakBias;
 	}
 
-	public ScoreSignal onClosedCandle(Candle candle) {
+	public ScoreSignal onClosedOneMinuteCandle(Candle candle) {
 		if (candle.closeTime() <= last1mCloseTime) {
 			return null;
 		}
 		last1mCloseTime = candle.closeTime();
+		macdSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(1),
+				java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
+				candle.open(),
+				candle.high(),
+				candle.low(),
+				candle.close(),
+				candle.volume()));
+		int macdIndex = macdSeries.getEndIndex();
+		int macdScore = resolveMacdScore(macdIndex);
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
 		double cti1mValue = cti1mSignal.bfr();
 		double cti1mPrev = cti1mSignal.bfrPrev();
@@ -50,9 +63,6 @@ public class ScoreSignalIndicator {
 		lastCti1mValue = cti1mValue;
 		lastCti1mPrev = cti1mPrev;
 		lastCti1mDir = cti1mDir;
-
-		Optional<Candle> fiveMinuteClosed = fiveMinuteAggregator.update(candle);
-		fiveMinuteClosed.ifPresent(this::updateFiveMinute);
 
 		int score5m = lastCti5mDir == CtiDirection.LONG ? 1 : lastCti5mDir == CtiDirection.SHORT ? -1 : 0;
 		int score1m = cti1mDir == CtiDirection.LONG ? 1 : cti1mDir == CtiDirection.SHORT ? -1 : 0;
@@ -63,6 +73,7 @@ public class ScoreSignalIndicator {
 		boolean has5mTrend = cti5mReady && lastCti5mDir != CtiDirection.NEUTRAL;
 		CtiScoreCalculator.ScoreResult scoreResult = scoreCalculator.calculate(
 				hamCtiScore,
+				macdScore,
 				adx5mReady ? lastAdx5m : null,
 				adx5mReady,
 				cti5mReady,
@@ -78,6 +89,8 @@ public class ScoreSignalIndicator {
 				cti1mDir,
 				lastCti5mDir,
 				hamCtiScore,
+				scoreResult.ctiDirScore(),
+				scoreResult.macdScore(),
 				score1m,
 				score5m,
 				cti1mValue,
@@ -85,9 +98,8 @@ public class ScoreSignalIndicator {
 				bfr5mValue,
 				bfr5mPrev,
 				adx5mValue,
-				scoreResult.adxBonus(),
 				scoreResult.trendWeight(),
-				scoreResult.adjustedScore(),
+				scoreResult.finalScore(),
 				scoreResult.recommendation(),
 				bias,
 				scoreResult.recReason(),
@@ -109,6 +121,13 @@ public class ScoreSignalIndicator {
 			return;
 		}
 		last1mCloseTime = candle.closeTime();
+		macdSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(1),
+				java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
+				candle.open(),
+				candle.high(),
+				candle.low(),
+				candle.close(),
+				candle.volume()));
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
 		lastCti1mValue = cti1mSignal.bfr();
 		lastCti1mPrev = cti1mSignal.bfrPrev();
@@ -116,6 +135,13 @@ public class ScoreSignalIndicator {
 	}
 
 	public void warmupFiveMinuteCandle(Candle candle) {
+		if (candle.closeTime() <= last5mCloseTime) {
+			return;
+		}
+		updateFiveMinute(candle);
+	}
+
+	public void onClosedFiveMinuteCandle(Candle candle) {
 		if (candle.closeTime() <= last5mCloseTime) {
 			return;
 		}
@@ -168,6 +194,24 @@ public class ScoreSignalIndicator {
 			lastAdx5m = adxIndicator.getValue(index).doubleValue();
 			hasAdx = true;
 		}
+	}
+
+	private int resolveMacdScore(int index) {
+		if (macdSeries.getBarCount() < 35) {
+			return 0;
+		}
+		double macdValue = macdIndicator.getValue(index).doubleValue();
+		double signalValue = macdSignal.getValue(index).doubleValue();
+		if (Double.isNaN(macdValue) || Double.isNaN(signalValue)) {
+			return 0;
+		}
+		if (macdValue > signalValue) {
+			return 1;
+		}
+		if (macdValue < signalValue) {
+			return -1;
+		}
+		return 0;
 	}
 
 	private CtiDirection resolveRawDirection(double ctiValue, double ctiPrevValue) {
