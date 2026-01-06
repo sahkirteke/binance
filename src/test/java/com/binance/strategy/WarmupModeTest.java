@@ -74,6 +74,7 @@ class WarmupModeTest {
 				1,
 				1,
 				1,
+				2,
 				true,
 				2000L,
 				45,

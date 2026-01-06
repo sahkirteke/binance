@@ -44,7 +44,7 @@ class CtiLbStrategyPullbackEntryTest {
 
 		CtiLbStrategy.EntryFilterState state = CtiLbStrategy.buildEntryFilterState(inputs, properties);
 		CtiLbStrategy.EntryDecision decision = CtiLbStrategy.evaluateEntryDecision(
-				PositionState.NONE,
+				CtiLbStrategy.PositionState.NONE,
 				state,
 				0,
 				properties);
@@ -86,7 +86,7 @@ class CtiLbStrategyPullbackEntryTest {
 
 		CtiLbStrategy.EntryFilterState state = CtiLbStrategy.buildEntryFilterState(inputs, properties);
 		CtiLbStrategy.EntryDecision decision = CtiLbStrategy.evaluateEntryDecision(
-				PositionState.NONE,
+				CtiLbStrategy.PositionState.NONE,
 				state,
 				0,
 				properties);
@@ -128,7 +128,7 @@ class CtiLbStrategyPullbackEntryTest {
 
 		CtiLbStrategy.EntryFilterState state = CtiLbStrategy.buildEntryFilterState(inputs, properties);
 		CtiLbStrategy.EntryDecision decision = CtiLbStrategy.evaluateEntryDecision(
-				PositionState.NONE,
+				CtiLbStrategy.PositionState.NONE,
 				state,
 				0,
 				properties);
@@ -199,6 +199,7 @@ class CtiLbStrategyPullbackEntryTest {
 				1,
 				1,
 				1,
+				2,
 				true,
 				2000L,
 				45,

@@ -72,6 +72,7 @@ public record StrategyProperties(
 		int confirmBarsEarly,
 		int confirmBarsNormal,
 		int confirmBarsExit,
+		int exitReversalConfirmBars,
 		boolean enableFlipOnOppositeExit,
 		long oppositeExitFlipCooldownMs,
 		double rsiLongMin,
