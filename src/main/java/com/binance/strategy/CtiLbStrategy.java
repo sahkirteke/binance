@@ -193,8 +193,8 @@ public class CtiLbStrategy {
 			if (shouldLogWarmupDecision(symbol)) {
 				logDecision(symbol, signal, close, SignalAction.HOLD, confirmedRec, recommendationUsed,
 						recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE", TrailState.empty(),
-						ContinuationState.empty(), null, 0, qualityScoreForLog,
-						qualityConfirmReason, false, null, 0, false, TpTrailingState.empty(),
+						ContinuationState.empty(), null, qualityScoreForLog, qualityConfirmReason,
+						false, null, 0, TpTrailingState.empty(),
 						trendAlignedWithPosition, false);
 			}
 			return;
