@@ -40,7 +40,6 @@ strategy:
   poll-interval-ms: 500
   tick-interval-ms: 100
   rolling-window-ms: 800
-  confirm-bars: 1
   depth-levels: 12
   weight-lambda: 0.25
   obi-entry: 0.055
@@ -80,10 +79,6 @@ strategy:
   late-limit-minutes: 12
   moved-dir-pct-late-gate: 1.0
   chase-max-move-pct: 0.40
-  confirm-bars-early: 1
-  confirm-bars-normal: 1
-  confirm-bars-exit: 1
-  exit-reversal-confirm-bars: 2
   enable-flip-on-opposite-exit: true
   opposite-exit-flip-cooldown-ms: 2000
   flip-spread-max-bps: 12
@@ -96,7 +91,6 @@ strategy:
   vol-spike-mult: 1.3
   atr-cap-mult: 2.2
   entry-quality-min: 55
-  low-quality-extra-confirm: 1
   extreme-rsi-block: true
   extreme-rsi-high: 85
   extreme-rsi-low: 15
@@ -108,13 +102,10 @@ strategy:
   continuation-min-bars: 3
   continuation-max-retrace-pct: 0.35
   flip-fast-quality: 70
-  flip-confirm-bars: 2
-  flip-confirm-reset-on-neutral: true
   trend-hold-enabled: true
   trend-hold-min-adx: 20
   ema20-hold-buffer-pct: 0.0015
   flip-quality-min: 60
-  flip-extra-confirm-bars: 1
   trend-hold-max-bars: 40
   tp-trailing-enabled: true
   tp-start-pct: 0.25

@@ -147,7 +147,7 @@ public class HistoricalWarmupService {
 						if ("5m".equals(interval)) {
 							strategyRouter.warmupFiveMinuteCandle(symbol, candle);
 						} else {
-							strategyRouter.onClosedCandle(symbol, candle);
+							strategyRouter.onClosedOneMinuteCandle(symbol, candle);
 						}
 					}
 				})

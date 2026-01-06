@@ -16,7 +16,7 @@ public final class CtiLbDecisionEngine {
 
 	public static ExitDecision evaluateExit(CtiDirection side, BigDecimal entryPrice, double currentPrice,
 			BigDecimal stopLossBps, BigDecimal takeProfitBps, BigDecimal feeBps, BigDecimal spreadBps,
-			BigDecimal slippageBps, long nowMs, Long entryTimeMs, long minHoldMs) {
+			BigDecimal slippageBps, long nowMs, Long entryTimeMs, long minHoldMs, boolean scoreExitConfirmed) {
 		if (side == null || entryPrice == null || entryPrice.signum() <= 0 || currentPrice <= 0) {
 			return new ExitDecision(false, null, 0.0);
 		}
@@ -32,6 +32,9 @@ public final class CtiLbDecisionEngine {
 
 		if (entryTimeMs != null && minHoldMs > 0 && nowMs - entryTimeMs < minHoldMs) {
 			return new ExitDecision(false, "BLOCK_MIN_HOLD_EXIT", pnlBps);
+		}
+		if (scoreExitConfirmed) {
+			return new ExitDecision(true, "SCORE_REVERSAL_CONFIRMED", pnlBps);
 		}
 
 		if (effectiveStopLossBps > 0) {
