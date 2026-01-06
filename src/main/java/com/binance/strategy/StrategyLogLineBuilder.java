@@ -80,6 +80,8 @@ public final class StrategyLogLineBuilder {
 				.append(" retracePct=").append(num(dto.retracePct()))
 				.append(" flipConfirmCounter=").append(na(dto.flipConfirmCounter()))
 				.append(" flipGateReason=").append(na(dto.flipGateReason()))
+				.append(" qualityScore=").append(na(dto.qualityScore()))
+				.append(" qualityConfirmReason=").append(na(dto.qualityConfirmReason()))
 				.append(" cMissed=").append(nl(dto.cMissed()))
 				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));

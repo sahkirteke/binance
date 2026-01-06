@@ -78,7 +78,9 @@ public final class StrategyLogV1 {
 			Double bestFavorablePrice,
 			Double retracePct,
 			Integer flipConfirmCounter,
-			String flipGateReason) {
+			String flipGateReason,
+			Integer qualityScore,
+			String qualityConfirmReason) {
 	}
 
 	public record ConfirmHitLogDto(

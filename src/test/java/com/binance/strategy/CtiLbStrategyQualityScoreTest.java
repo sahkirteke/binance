@@ -10,66 +10,101 @@ import org.junit.jupiter.api.Test;
 class CtiLbStrategyQualityScoreTest {
 
 	@Test
-	void pullbackForcesConfirmBarsOneEvenIfQualityLow() {
+	void qualityScoreDoesNotPenalizeMissingVolume() {
 		StrategyProperties properties = buildProperties();
-		CtiLbStrategy.QualityScoreResult quality = CtiLbStrategy.evaluateQualityScore(
+		CtiLbStrategy.EntryQualityEvaluation quality = CtiLbStrategy.evaluateEntryQuality(
 				1,
+				110.0,
+				105.0,
 				true,
+				100.0,
+				true,
+				60.0,
+				true,
+				100.0,
+				Double.NaN,
 				false,
+				1.0,
 				true,
-				100.0,
-				Double.NaN,
-				Double.NaN,
-				Double.NaN,
-				100.0,
-				Double.NaN,
-				Double.NaN,
-				Double.NaN,
+				1.0,
+				true,
+				true,
 				properties);
-		int confirmBars = CtiLbStrategy.resolveConfirmBarsUsedDynamic(quality, true, properties);
-		assertEquals(1, confirmBars);
+		assertEquals(90, quality.qualityScore());
 	}
 
 	@Test
 	void lowQualityAddsExtraConfirmBars() {
 		StrategyProperties properties = buildProperties();
-		CtiLbStrategy.QualityScoreResult quality = CtiLbStrategy.evaluateQualityScore(
+		CtiLbStrategy.EntryQualityEvaluation quality = CtiLbStrategy.evaluateEntryQuality(
 				1,
-				true,
-				true,
-				false,
 				100.0,
 				105.0,
+				true,
 				110.0,
-				60.0,
+				true,
+				30.0,
+				true,
 				100.0,
-				120.0,
-				5.0,
-				2.0,
+				100.0,
+				true,
+				2.5,
+				true,
+				1.0,
+				true,
+				true,
 				properties);
-		int confirmBars = CtiLbStrategy.resolveConfirmBarsUsedDynamic(quality, false, properties);
+		int confirmBars = CtiLbStrategy.resolveConfirmBarsUsedDynamic(1, true, quality, properties);
 		assertEquals(2, confirmBars);
+		assertEquals(null, quality.blockReason());
 	}
 
 	@Test
-	void highQualityKeepsConfirmBarsAtOne() {
+	void extremeRsiBlockTriggersOnlyAtExtreme() {
 		StrategyProperties properties = buildProperties();
-		CtiLbStrategy.QualityScoreResult quality = CtiLbStrategy.evaluateQualityScore(
+		CtiLbStrategy.EntryQualityEvaluation quality = CtiLbStrategy.evaluateEntryQuality(
 				1,
-				true,
-				true,
-				false,
-				110.0,
 				100.0,
+				95.0,
+				true,
 				90.0,
-				55.0,
-				200.0,
+				true,
+				90.0,
+				true,
 				100.0,
-				1.5,
+				100.0,
+				true,
 				1.0,
+				true,
+				1.0,
+				true,
+				true,
 				properties);
-		int confirmBars = CtiLbStrategy.resolveConfirmBarsUsedDynamic(quality, false, properties);
-		assertEquals(1, confirmBars);
+		assertEquals("ENTRY_BLOCK_EXTREME_RSI", quality.blockReason());
+	}
+
+	@Test
+	void extremeAtrBlockTriggersOnlyWhenVeryHigh() {
+		StrategyProperties properties = buildProperties();
+		CtiLbStrategy.EntryQualityEvaluation quality = CtiLbStrategy.evaluateEntryQuality(
+				1,
+				100.0,
+				95.0,
+				true,
+				90.0,
+				true,
+				55.0,
+				true,
+				100.0,
+				100.0,
+				true,
+				3.5,
+				true,
+				1.0,
+				true,
+				true,
+				properties);
+		assertEquals("ENTRY_BLOCK_EXTREME_ATR", quality.blockReason());
 	}
 
 	private StrategyProperties buildProperties() {
@@ -135,16 +170,18 @@ class CtiLbStrategyQualityScoreTest {
 				1,
 				true,
 				2000L,
-				70,
-				40,
 				45,
 				75,
 				25,
 				55,
-				1.5,
-				2.0,
-				2,
+				1.3,
+				2.2,
+				55,
 				1,
+				true,
+				85,
+				15,
+				3.0,
 				0.35,
 				0.20,
 				0.15,
