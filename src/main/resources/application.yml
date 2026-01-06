@@ -79,8 +79,6 @@ strategy:
   late-limit-minutes: 12
   moved-dir-pct-late-gate: 1.0
   chase-max-move-pct: 0.40
-  exit-confirm-bars: 2
-  exit-reversal-confirm-bars: 2
   enable-flip-on-opposite-exit: true
   opposite-exit-flip-cooldown-ms: 2000
   flip-spread-max-bps: 12
@@ -104,7 +102,6 @@ strategy:
   continuation-min-bars: 3
   continuation-max-retrace-pct: 0.35
   flip-fast-quality: 70
-  flip-confirm-reset-on-neutral: true
   trend-hold-enabled: true
   trend-hold-min-adx: 20
   ema20-hold-buffer-pct: 0.0015

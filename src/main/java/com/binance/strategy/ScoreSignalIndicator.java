@@ -1,7 +1,11 @@
 package com.binance.strategy;
 
 import java.util.Optional;
-import java.util.OptionalDouble;
+
+import org.ta4j.core.BarSeries;
+import org.ta4j.core.BaseBar;
+import org.ta4j.core.BaseBarSeriesBuilder;
+import org.ta4j.core.indicators.adx.ADXIndicator;
 
 public class ScoreSignalIndicator {
 
@@ -11,7 +15,8 @@ public class ScoreSignalIndicator {
 	private final CtiScoreCalculator scoreCalculator;
 	private final boolean enableTieBreakBias;
 	private final FiveMinuteCandleAggregator fiveMinuteAggregator = new FiveMinuteCandleAggregator();
-	private final AdxIndicator adxIndicator = new AdxIndicator(ADX_PERIOD);
+	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m").build();
+	private final ADXIndicator adxIndicator = new ADXIndicator(adxSeries, ADX_PERIOD);
 	private CtiDirection lastCti5mDir = CtiDirection.NEUTRAL;
 	private Double lastCti5mValue;
 	private Double lastCti5mPrev;
@@ -150,10 +155,17 @@ public class ScoreSignalIndicator {
 		has5mCti = true;
 		cti5mBarsSeen++;
 		last5mCloseTime = fiveMinute.closeTime();
-		OptionalDouble adx = adxIndicator.update(fiveMinute.high(), fiveMinute.low(), fiveMinute.close());
+		adxSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(5),
+				java.time.Instant.ofEpochMilli(fiveMinute.closeTime()).atZone(java.time.ZoneOffset.UTC),
+				fiveMinute.open(),
+				fiveMinute.high(),
+				fiveMinute.low(),
+				fiveMinute.close(),
+				fiveMinute.volume()));
 		adx5mBarsSeen++;
-		if (adx.isPresent()) {
-			lastAdx5m = adx.getAsDouble();
+		int index = adxSeries.getEndIndex();
+		if (adxSeries.getBarCount() >= ADX_PERIOD) {
+			lastAdx5m = adxIndicator.getValue(index).doubleValue();
 			hasAdx = true;
 		}
 	}

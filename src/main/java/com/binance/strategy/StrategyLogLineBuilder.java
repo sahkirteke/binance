@@ -59,9 +59,6 @@ public final class StrategyLogLineBuilder {
 				.append(" stateDesync=").append(na(dto.stateDesync()))
 				.append(" decisionBlockReason=").append(na(dto.decisionBlockReason()))
 				.append(" trendAligned=").append(na(dto.trendAlignedWithPosition()))
-				.append(" exitReversalConfirm=").append(na(dto.exitReversalConfirmCounter()))
-				.append(" exitPending=").append(na(dto.exitPending()))
-				.append(" exitConfirmBars=").append(na(dto.exitConfirmBars()))
 				.append(" exitBlockedByTrendAligned=").append(na(dto.exitBlockedByTrendAligned()))
 				.append(" openOrders=").append(na(dto.openOrders()))
 				.append(" pendingFlipDir=").append(na(dto.pendingFlipDir()))
@@ -77,63 +74,15 @@ public final class StrategyLogLineBuilder {
 				.append(" continuationBars=").append(na(dto.continuationBars()))
 				.append(" bestFavorablePrice=").append(num(dto.bestFavorablePrice()))
 				.append(" retracePct=").append(num(dto.retracePct()))
-				.append(" flipConfirmCounter=").append(na(dto.flipConfirmCounter()))
 				.append(" flipGateReason=").append(na(dto.flipGateReason()))
 				.append(" qualityScore=").append(na(dto.qualityScore()))
 				.append(" qualityConfirmReason=").append(na(dto.qualityConfirmReason()))
 				.append(" trendHoldActive=").append(na(dto.trendHoldActive()))
 				.append(" trendHoldReason=").append(na(dto.trendHoldReason()))
 				.append(" flipQualityScore=").append(na(dto.flipQualityScore()))
-				.append(" flipExtraConfirmApplied=").append(na(dto.flipExtraConfirmApplied()))
 				.append(" tpTrailingActive=").append(na(dto.tpTrailingActive()))
 				.append(" maxPnlSeenPct=").append(num(dto.maxPnlSeenPct()))
 				.append(" trailingStopPct=").append(num(dto.trailingStopPct()))
-				.append(" cFlip=").append(nl(dto.cFlip()));
-		return builder.toString();
-	}
-
-	public static String buildConfirmHitLine(StrategyLogV1.ConfirmHitLogDto dto) {
-		StringBuilder builder = new StringBuilder(384);
-		builder.append("EVENT=CONFIRM_HIT")
-				.append(" strategy=CTI_SCORE")
-				.append(" symbol=").append(na(dto.symbol()))
-				.append(" tf=1m")
-				.append(" confirmedRec=").append(recDir(dto.confirmedRec()))
-				.append(" firstSeenAt=").append(nl(dto.firstSeenAt()))
-				.append(" firstPrice=").append(num(dto.firstPrice()))
-				.append(" hitAt=").append(nl(dto.hitAt()))
-				.append(" hitPrice=").append(num(dto.hitPrice()))
-				.append(" barsToConfirm=").append(na(dto.barsToConfirm()))
-				.append(" confirmBars=").append(na(dto.confirmBars()))
-				.append(" bfr1m=").append(num(dto.bfr1m()))
-				.append(" bfr5m=").append(num(dto.bfr5m()))
-				.append(" adx5m=").append(num(dto.adx5m()))
-				.append(" action=HOLD")
-				.append(" cMissed=").append(nl(dto.cMissed()))
-				.append(" cConfirm=").append(nl(dto.cConfirm()))
-				.append(" cFlip=").append(nl(dto.cFlip()));
-		return builder.toString();
-	}
-
-	public static String buildMissedMoveLine(StrategyLogV1.MissedMoveLogDto dto) {
-		StringBuilder builder = new StringBuilder(384);
-		builder.append("EVENT=MISSED_MOVE")
-				.append(" strategy=CTI_SCORE")
-				.append(" symbol=").append(na(dto.symbol()))
-				.append(" tf=1m")
-				.append(" pending=").append(recDir(dto.pending()))
-				.append(" firstSeenAt=").append(nl(dto.firstSeenAt()))
-				.append(" firstPrice=").append(num(dto.firstPrice()))
-				.append(" nowAt=").append(nl(dto.nowAt()))
-				.append(" nowPrice=").append(num(dto.nowPrice()))
-				.append(" streakBeforeReset=").append(na(dto.streakBeforeReset()))
-				.append(" confirmBars=").append(na(dto.confirmBars()))
-				.append(" bfr1m=").append(num(dto.bfr1m()))
-				.append(" bfr5m=").append(num(dto.bfr5m()))
-				.append(" adx5m=").append(num(dto.adx5m()))
-				.append(" action=RESET_PENDING")
-				.append(" cMissed=").append(nl(dto.cMissed()))
-				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));
 		return builder.toString();
 	}
@@ -161,8 +110,6 @@ public final class StrategyLogLineBuilder {
 				.append(" qtyBefore=").append(num(dto.qtyBefore()))
 				.append(" orderPlaced=").append(dto.orderPlaced())
 				.append(" orderId=").append(na(dto.orderId()))
-				.append(" cMissed=").append(nl(dto.cMissed()))
-				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));
 		return builder.toString();
 	}
@@ -173,12 +120,7 @@ public final class StrategyLogLineBuilder {
 				.append(" strategy=CTI_SCORE")
 				.append(" window=15m")
 				.append(" symbols=").append(na(dto.symbols()))
-				.append(" cFlip=").append(nl(dto.cFlip()))
-				.append(" cConfirm=").append(nl(dto.cConfirm()))
-				.append(" cMissed=").append(nl(dto.cMissed()))
-				.append(" missRate=").append(num(dto.missRate()))
-				.append(" confirmRate=").append(num(dto.confirmRate()))
-				.append(" topMissed=").append(na(dto.topMissed()));
+				.append(" cFlip=").append(nl(dto.cFlip()));
 		return builder.toString();
 	}
 
