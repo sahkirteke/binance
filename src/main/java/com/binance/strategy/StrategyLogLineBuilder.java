@@ -66,6 +66,8 @@ public final class StrategyLogLineBuilder {
 				.append(" decisionBlockReason=").append(na(dto.decisionBlockReason()))
 				.append(" trendAligned=").append(na(dto.trendAlignedWithPosition()))
 				.append(" exitReversalConfirm=").append(na(dto.exitReversalConfirmCounter()))
+				.append(" exitPending=").append(na(dto.exitPending()))
+				.append(" exitConfirmBars=").append(na(dto.exitConfirmBars()))
 				.append(" exitBlockedByTrendAligned=").append(na(dto.exitBlockedByTrendAligned()))
 				.append(" openOrders=").append(na(dto.openOrders()))
 				.append(" pendingFlipDir=").append(na(dto.pendingFlipDir()))

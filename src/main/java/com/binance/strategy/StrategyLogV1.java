@@ -58,6 +58,8 @@ public final class StrategyLogV1 {
 			String decisionBlockReason,
 			Boolean trendAlignedWithPosition,
 			Integer exitReversalConfirmCounter,
+			Boolean exitPending,
+			Integer exitConfirmBars,
 			Boolean exitBlockedByTrendAligned,
 			CtiDirection trend,
 			Integer confirmCounter,
