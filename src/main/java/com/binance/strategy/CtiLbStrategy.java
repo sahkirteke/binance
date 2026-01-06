@@ -147,6 +147,7 @@ public class CtiLbStrategy {
 				signal.cti1mPrev(),
 				prevClose,
 				close,
+				candle.open(),
 				candle.volume(),
 				closeTime,
 				symbolState);
@@ -962,7 +963,7 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} lateIgnoredPullback={} lateIgnoredMoveGate={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} confirmBarsUsedDynamic={} qualityBlockReason={} lowQualityExtraConfirm={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} lateIgnoredPullback={} lateIgnoredMoveGate={} flipPrice={} movedDirPct={} chaseRisk={} prevClose1m={} pullbackTriggered={} pullbackExtraOk={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} scoreConfirmBoosted={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} confirmBarsUsedDynamic={} qualityBlockReason={} lowQualityExtraConfirm={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -976,14 +977,17 @@ public class CtiLbStrategy {
 				entryFilterState.flipPrice() == 0.0 ? "NA" : String.format("%.8f", entryFilterState.flipPrice()),
 				Double.isNaN(entryFilterState.movedDirPct()) ? "NA" : String.format("%.4f",
 						entryFilterState.movedDirPct()),
+				entryFilterState.chaseRisk(),
 				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose),
 				entryFilterState.pullbackTriggered(),
+				entryFilterState.pullbackExtraOk(),
 				entryFilterState.scoreAligned(),
 				entryFilterState.entryTrigger(),
 				entryFilterState.triggerReason(),
 				entryDecision.entryMode(),
 				entryDecision.confirmBarsUsed(),
 				entryDecision.confirmCounter(),
+				entryDecision.scoreConfirmBoosted(),
 				entryDecision.blockReason(),
 				Double.isNaN(entryFilterState.ema20_1m()) ? "NA" : String.format("%.8f", entryFilterState.ema20_1m()),
 				Double.isNaN(entryFilterState.ema200_5m()) ? "NA" : String.format("%.8f",
@@ -1007,38 +1011,104 @@ public class CtiLbStrategy {
 	}
 
 	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double bfr1m, double bfrPrev,
-			double prevClose, double close, double volume1m, long nowMs, SymbolState state) {
-		long armingWindowMs = strategyProperties.armingWindowMinutes() * 60_000L;
-		long lateLimitMs = strategyProperties.lateLimitMinutes() * 60_000L;
-		boolean hasDir = fiveMinDir != 0;
-		long sinceFlipMs = state.fiveMinFlipTimeMs == 0L ? Long.MAX_VALUE : nowMs - state.fiveMinFlipTimeMs;
+			double prevClose, double close, double open, double volume1m, long nowMs, SymbolState state) {
+		EntryFilterInputs inputs = new EntryFilterInputs(
+				fiveMinDir,
+				score1m,
+				bfr1m,
+				bfrPrev,
+				prevClose,
+				close,
+				open,
+				volume1m,
+				nowMs,
+				state.fiveMinFlipTimeMs,
+				state.fiveMinFlipPrice,
+				state.ema20_1mValue,
+				state.ema20_1m.isReady(),
+				state.ema200_5mValue,
+				state.ema200_5m.isReady(),
+				state.rsi9Value,
+				state.rsi9_1m.isReady(),
+				state.volumeSma10Value,
+				state.volumeSma10_1m.isReady(),
+				state.atr14Value,
+				state.atr14_1m.isReady(),
+				state.atrSma20Value,
+				state.atrSma20_1m.isReady());
+		return buildEntryFilterState(inputs, strategyProperties);
+	}
+
+	static EntryFilterState buildEntryFilterState(EntryFilterInputs inputs, StrategyProperties properties) {
+		long armingWindowMs = properties.armingWindowMinutes() * 60_000L;
+		long lateLimitMs = properties.lateLimitMinutes() * 60_000L;
+		boolean hasDir = inputs.fiveMinDir() != 0;
+		long sinceFlipMs = inputs.fiveMinFlipTimeMs() == 0L ? Long.MAX_VALUE : inputs.nowMs() - inputs.fiveMinFlipTimeMs();
 		boolean inArming = hasDir && sinceFlipMs <= armingWindowMs;
-		double minutesSinceFlip = state.fiveMinFlipTimeMs == 0L ? Double.NaN : sinceFlipMs / 60000.0;
+		double minutesSinceFlip = inputs.fiveMinFlipTimeMs() == 0L ? Double.NaN : sinceFlipMs / 60000.0;
 		double movedDirPct = Double.NaN;
-		if (state.fiveMinFlipPrice > 0) {
-			double movedSinceFlipPct = (close - state.fiveMinFlipPrice) / state.fiveMinFlipPrice * 100.0;
-			movedDirPct = fiveMinDir == 1
+		if (inputs.fiveMinFlipPrice() > 0) {
+			double movedSinceFlipPct = (inputs.close() - inputs.fiveMinFlipPrice()) / inputs.fiveMinFlipPrice() * 100.0;
+			movedDirPct = inputs.fiveMinDir() == 1
 					? movedSinceFlipPct
-					: (state.fiveMinFlipPrice - close) / state.fiveMinFlipPrice * 100.0;
+					: (inputs.fiveMinFlipPrice() - inputs.close()) / inputs.fiveMinFlipPrice() * 100.0;
 		}
-		boolean prevCloseValid = !Double.isNaN(prevClose);
-		boolean pullbackLong = fiveMinDir == 1 && prevCloseValid && prevClose < bfrPrev && close > bfr1m;
-		boolean pullbackShort = fiveMinDir == -1 && prevCloseValid && prevClose > bfrPrev && close < bfr1m;
-		boolean scoreAlignedLong = score1m == 1;
-		boolean scoreAlignedShort = score1m == -1;
+		boolean prevCloseValid = !Double.isNaN(inputs.prevClose());
+		boolean pullbackBaseLong = inputs.fiveMinDir() == 1 && prevCloseValid
+				&& inputs.prevClose() < inputs.bfrPrev() && inputs.close() > inputs.bfr1m();
+		boolean pullbackBaseShort = inputs.fiveMinDir() == -1 && prevCloseValid
+				&& inputs.prevClose() > inputs.bfrPrev() && inputs.close() < inputs.bfr1m();
+		double openValue = inputs.open();
+		boolean openValid = openValue > 0 && Double.isFinite(openValue);
+		boolean candleRed = openValid
+				? inputs.close() < openValue
+				: prevCloseValid && inputs.close() < inputs.prevClose();
+		boolean candleGreen = openValid
+				? inputs.close() > openValue
+				: prevCloseValid && inputs.close() > inputs.prevClose();
+		boolean nearEma20 = inputs.ema20Ready()
+				&& Double.isFinite(inputs.ema20_1m())
+				&& inputs.close() > 0
+				&& Math.abs(inputs.close() - inputs.ema20_1m()) / inputs.close() <= 0.0015;
+		boolean pullbackExtraOk = false;
+		if (inputs.fiveMinDir() == 1) {
+			pullbackExtraOk = nearEma20 || candleRed;
+		} else if (inputs.fiveMinDir() == -1) {
+			pullbackExtraOk = nearEma20 || candleGreen;
+		}
+		boolean pullbackTriggered = false;
+		if (inputs.fiveMinDir() == 1) {
+			pullbackTriggered = pullbackBaseLong && pullbackExtraOk;
+		} else if (inputs.fiveMinDir() == -1) {
+			pullbackTriggered = pullbackBaseShort && pullbackExtraOk;
+		}
+		boolean scoreAlignedLong = inputs.score1m() == 1;
+		boolean scoreAlignedShort = inputs.score1m() == -1;
 		boolean entryTrigger = false;
 		String triggerReason = "NONE";
 		boolean scoreAligned = false;
-		boolean pullbackTriggered = false;
 
-		if (fiveMinDir == 1) {
+		boolean pullbackQualityOk = true;
+		if (inputs.rsiReady()) {
+			if (inputs.fiveMinDir() == 1 && inputs.rsi9() >= 80.0) {
+				pullbackQualityOk = false;
+			} else if (inputs.fiveMinDir() == -1 && inputs.rsi9() <= 20.0) {
+				pullbackQualityOk = false;
+			}
+		}
+		if (pullbackQualityOk && inputs.atrReady() && inputs.atrSmaReady() && inputs.atrSma20() > 0) {
+			if (inputs.atr14() > inputs.atrSma20() * 2.5) {
+				pullbackQualityOk = false;
+			}
+		}
+
+		boolean pullbackAllowed = pullbackTriggered && pullbackQualityOk;
+		if (inputs.fiveMinDir() == 1) {
 			scoreAligned = scoreAlignedLong;
-			pullbackTriggered = pullbackLong;
-			entryTrigger = scoreAlignedLong || pullbackLong;
-		} else if (fiveMinDir == -1) {
+			entryTrigger = scoreAlignedLong || pullbackAllowed;
+		} else if (inputs.fiveMinDir() == -1) {
 			scoreAligned = scoreAlignedShort;
-			pullbackTriggered = pullbackShort;
-			entryTrigger = scoreAlignedShort || pullbackShort;
+			entryTrigger = scoreAlignedShort || pullbackAllowed;
 		}
 
 		LateBlockDecision lateBlockDecision = resolveLateBlockDecision(
@@ -1047,47 +1117,52 @@ public class CtiLbStrategy {
 				lateLimitMs,
 				pullbackTriggered,
 				movedDirPct,
-				strategyProperties.movedDirPctLateGate());
+				properties.movedDirPctLateGate());
 
-		if (pullbackTriggered) {
+		boolean movedDirGateHit = properties.movedDirPctLateGate() != null
+				&& !Double.isNaN(movedDirPct)
+				&& movedDirPct >= properties.movedDirPctLateGate().doubleValue();
+		boolean chaseRisk = lateBlockDecision.lateBlocked() || movedDirGateHit;
+
+		if (pullbackAllowed) {
 			triggerReason = "PULLBACK";
 		} else if (scoreAligned) {
 			triggerReason = "SCORE";
 		}
 		EntryQualityEvaluation qualityEvaluation = evaluateEntryQuality(
-				fiveMinDir,
-				close,
-				state.ema20_1mValue,
-				state.ema20_1m.isReady(),
-				state.ema200_5mValue,
-				state.ema200_5m.isReady(),
-				state.rsi9Value,
-				state.rsi9_1m.isReady(),
-				volume1m,
-				state.volumeSma10Value,
-				state.volumeSma10_1m.isReady(),
-				state.atr14Value,
-				state.atr14_1m.isReady(),
-				state.atrSma20Value,
-				state.atrSma20_1m.isReady(),
+				inputs.fiveMinDir(),
+				inputs.close(),
+				inputs.ema20_1m(),
+				inputs.ema20Ready(),
+				inputs.ema200_5m(),
+				inputs.ema200Ready(),
+				inputs.rsi9(),
+				inputs.rsiReady(),
+				inputs.volume1m(),
+				inputs.volumeSma10(),
+				inputs.volumeSmaReady(),
+				inputs.atr14(),
+				inputs.atrReady(),
+				inputs.atrSma20(),
+				inputs.atrSmaReady(),
 				entryTrigger,
-				strategyProperties);
+				properties);
 		int baseConfirmBarsUsed = inArming
-				? strategyProperties.confirmBarsEarly()
-				: strategyProperties.confirmBarsNormal();
+				? properties.confirmBarsEarly()
+				: properties.confirmBarsNormal();
 		int confirmBarsUsedDynamic = resolveConfirmBarsUsedDynamic(
 				baseConfirmBarsUsed,
 				entryTrigger,
 				qualityEvaluation,
-				strategyProperties);
-		return new EntryFilterState(fiveMinDir, inArming, lateBlockDecision.lateBlocked(),
+				properties);
+		return new EntryFilterState(inputs.fiveMinDir(), inArming, lateBlockDecision.lateBlocked(),
 				lateBlockDecision.ignoredPullback(), lateBlockDecision.ignoredMoveGate(), movedDirPct,
-				entryTrigger, pullbackTriggered, scoreAligned, triggerReason, state.fiveMinFlipTimeMs,
-				minutesSinceFlip, state.fiveMinFlipPrice, state.ema20_1mValue, state.ema200_5mValue,
-				state.rsi9Value, volume1m, state.volumeSma10Value, state.atr14Value, state.atrSma20Value,
-				qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(), qualityEvaluation.ema20Ok(),
-				qualityEvaluation.rsiOk(), qualityEvaluation.volOk(), qualityEvaluation.atrOk(),
-				confirmBarsUsedDynamic, qualityEvaluation.blockReason(),
+				chaseRisk, entryTrigger, pullbackTriggered, pullbackExtraOk, pullbackQualityOk, scoreAligned,
+				triggerReason, inputs.fiveMinFlipTimeMs(), minutesSinceFlip, inputs.fiveMinFlipPrice(),
+				inputs.ema20_1m(), inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(),
+				inputs.atr14(), inputs.atrSma20(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
+				qualityEvaluation.ema20Ok(), qualityEvaluation.rsiOk(), qualityEvaluation.volOk(),
+				qualityEvaluation.atrOk(), confirmBarsUsedDynamic, qualityEvaluation.blockReason(),
 				qualityEvaluation.lowQualityExtraConfirmApplied());
 	}
 
@@ -1247,54 +1322,64 @@ public class CtiLbStrategy {
 	}
 
 	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state, EntryFilterState entryFilterState) {
+		EntryDecision decision = evaluateEntryDecision(current, entryFilterState, state.confirmCounter,
+				strategyProperties);
+		state.confirmCounter = decision.confirmCounter();
+		return decision;
+	}
+
+	static EntryDecision evaluateEntryDecision(PositionState current, EntryFilterState entryFilterState,
+			int confirmCounter, StrategyProperties properties) {
 		if (current != PositionState.NONE) {
-			state.confirmCounter = 0;
-			return EntryDecision.defaultDecision();
+			return new EntryDecision(null, "NORMAL", 0, 0, false, null, null);
 		}
 		if (entryFilterState.fiveMinDir() == 0) {
-			state.confirmCounter = 0;
-			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, "NO_5M_SUPPORT", "NO_5M_SUPPORT");
+			return new EntryDecision(null, "NORMAL", 0, 0, false, "NO_5M_SUPPORT", "NO_5M_SUPPORT");
 		}
 		if (entryFilterState.lateBlocked()) {
-			state.confirmCounter = 0;
-			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, "ENTRY_BLOCK_LATE", "ENTRY_BLOCK_LATE");
+			return new EntryDecision(null, "NORMAL", 0, 0, false, "ENTRY_BLOCK_LATE", "ENTRY_BLOCK_LATE");
 		}
 		if (entryFilterState.qualityBlockReason() != null) {
-			state.confirmCounter = 0;
-			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, entryFilterState.qualityBlockReason(),
+			return new EntryDecision(null, "NORMAL", 0, 0, false, entryFilterState.qualityBlockReason(),
 					entryFilterState.qualityBlockReason());
 		}
-		BigDecimal chaseMaxMovePct = strategyProperties.chaseMaxMovePct();
+		BigDecimal chaseMaxMovePct = properties.chaseMaxMovePct();
 		boolean chaseBlocked = !entryFilterState.inArming()
 				&& chaseMaxMovePct != null
 				&& !Double.isNaN(entryFilterState.movedDirPct())
 				&& entryFilterState.movedDirPct() > chaseMaxMovePct.doubleValue();
 		if (chaseBlocked) {
-			state.confirmCounter = 0;
-			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, "ENTRY_BLOCK_CHASE",
+			return new EntryDecision(null, "NORMAL", 0, 0, false, "ENTRY_BLOCK_CHASE",
 					"ENTRY_BLOCK_CHASE");
 		}
+		boolean pullbackAllowed = entryFilterState.pullbackTriggered() && entryFilterState.pullbackQualityOk();
 		int confirmBarsUsed = entryFilterState.confirmBarsUsedDynamic();
-		if (entryFilterState.entryTrigger()) {
-			state.confirmCounter += 1;
-		} else {
-			state.confirmCounter = 0;
+		boolean scoreConfirmBoosted = false;
+		if (pullbackAllowed) {
+			confirmBarsUsed = 1;
+		} else if (entryFilterState.scoreAligned() && entryFilterState.chaseRisk()) {
+			confirmBarsUsed = Math.max(confirmBarsUsed, 2);
+			scoreConfirmBoosted = true;
 		}
-		if (state.confirmCounter >= Math.max(1, confirmBarsUsed)) {
+		if (entryFilterState.entryTrigger()) {
+			confirmCounter += 1;
+		} else {
+			confirmCounter = 0;
+		}
+		if (confirmCounter >= Math.max(1, confirmBarsUsed)) {
 			CtiDirection confirmed = entryFilterState.fiveMinDir() == 1 ? CtiDirection.LONG : CtiDirection.SHORT;
-			String entryMode = entryFilterState.inArming() ? "ARMED_EARLY" : "NORMAL";
+			String entryMode = pullbackAllowed ? "PULLBACK" : "NORMAL";
 			String reason;
 			if (entryFilterState.inArming()) {
-				reason = entryFilterState.triggerReason().equals("PULLBACK")
-						? "ENTRY_ARMED_PULLBACK"
-						: "ENTRY_ARMED_SCORE";
+				reason = pullbackAllowed ? "ENTRY_ARMED_PULLBACK" : "ENTRY_ARMED_SCORE";
 			} else {
-				reason = "ENTRY_NORMAL_SCORE_CONFIRMED";
+				reason = pullbackAllowed ? "ENTRY_PULLBACK" : "ENTRY_NORMAL_SCORE_CONFIRMED";
 			}
-			return new EntryDecision(confirmed, entryMode, confirmBarsUsed, state.confirmCounter, null, reason);
+			return new EntryDecision(confirmed, entryMode, confirmBarsUsed, confirmCounter, scoreConfirmBoosted,
+					null, reason);
 		}
-		String entryMode = entryFilterState.inArming() ? "ARMED_EARLY" : "NORMAL";
-		return new EntryDecision(null, entryMode, confirmBarsUsed, state.confirmCounter, null, null);
+		String entryMode = pullbackAllowed ? "PULLBACK" : "NORMAL";
+		return new EntryDecision(null, entryMode, confirmBarsUsed, confirmCounter, scoreConfirmBoosted, null, null);
 	}
 
 	private EntryDecision applyPendingFlipGate(String symbol, PositionState current, EntryDecision entryDecision,
@@ -1330,8 +1415,11 @@ public class CtiLbStrategy {
 			boolean lateBlockedIgnoredPullback,
 			boolean lateBlockedIgnoredMoveGate,
 			double movedDirPct,
+			boolean chaseRisk,
 			boolean entryTrigger,
 			boolean pullbackTriggered,
+			boolean pullbackExtraOk,
+			boolean pullbackQualityOk,
 			boolean scoreAligned,
 			String triggerReason,
 			long flipTimeMs,
@@ -1355,23 +1443,50 @@ public class CtiLbStrategy {
 			boolean lowQualityExtraConfirmApplied) {
 	}
 
+	record EntryFilterInputs(
+			int fiveMinDir,
+			int score1m,
+			double bfr1m,
+			double bfrPrev,
+			double prevClose,
+			double close,
+			double open,
+			double volume1m,
+			long nowMs,
+			long fiveMinFlipTimeMs,
+			double fiveMinFlipPrice,
+			double ema20_1m,
+			boolean ema20Ready,
+			double ema200_5m,
+			boolean ema200Ready,
+			double rsi9,
+			boolean rsiReady,
+			double volumeSma10,
+			boolean volumeSmaReady,
+			double atr14,
+			boolean atrReady,
+			double atrSma20,
+			boolean atrSmaReady) {
+	}
+
 	record LateBlockDecision(boolean lateBlocked, boolean ignoredPullback, boolean ignoredMoveGate) {
 	}
 
-	private record EntryDecision(
+	record EntryDecision(
 			CtiDirection confirmedRec,
 			String entryMode,
 			int confirmBarsUsed,
 			int confirmCounter,
+			boolean scoreConfirmBoosted,
 			String blockReason,
 			String decisionActionReason) {
 		static EntryDecision defaultDecision() {
-			return new EntryDecision(null, "NORMAL", 0, 0, null, null);
+			return new EntryDecision(null, "NORMAL", 0, 0, false, null, null);
 		}
 
 		EntryDecision withBlockReason(String reason) {
-			return new EntryDecision(confirmedRec, entryMode, confirmBarsUsed, confirmCounter, reason,
-					decisionActionReason);
+			return new EntryDecision(confirmedRec, entryMode, confirmBarsUsed, confirmCounter, scoreConfirmBoosted,
+					reason, decisionActionReason);
 		}
 	}
 
