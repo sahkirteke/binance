@@ -330,19 +330,22 @@ public class CtiLbStrategy {
 			if (exitQty == null || exitQty.signum() <= 0) {
 				return;
 			}
+			final String decisionActionReasonFinal = decisionActionReason;
+			final BigDecimal exitQtyFinal = exitQty;
+			final PositionState currentFinal = current;
 			orderClient.fetchHedgeModeEnabled()
 					.flatMap(hedgeMode -> {
 						String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT_OPPOSITE");
-						return closePosition(symbol, current, exitQty, hedgeMode, correlationId)
+						return closePosition(symbol, currentFinal, exitQtyFinal, hedgeMode, correlationId)
 								.doOnNext(response -> {
 									orderTracker.registerSubmitted(symbol, correlationId, response, true);
-									logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
-											current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-											hedgeMode ? current.name() : "", correlationId, response, null);
+									logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
+											currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
+											hedgeMode ? currentFinal.name() : "", correlationId, response, null);
 								})
-								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
-										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-										hedgeMode ? current.name() : "", correlationId, null, error.getMessage()));
+								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
+										currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
+										hedgeMode ? currentFinal.name() : "", correlationId, null, error.getMessage()));
 					})
 					.doOnNext(response -> {
 						positionStates.put(symbol, PositionState.NONE);
@@ -441,19 +444,22 @@ public class CtiLbStrategy {
 			if (exitQty == null || exitQty.signum() <= 0) {
 				return;
 			}
+			final String decisionActionReasonFinal = decisionActionReason;
+			final BigDecimal exitQtyFinal = exitQty;
+			final PositionState currentFinal = current;
 			orderClient.fetchHedgeModeEnabled()
 					.flatMap(hedgeMode -> {
 						String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT");
-						return closePosition(symbol, current, exitQty, hedgeMode, correlationId)
+						return closePosition(symbol, currentFinal, exitQtyFinal, hedgeMode, correlationId)
 								.doOnNext(response -> {
 									orderTracker.registerSubmitted(symbol, correlationId, response, true);
-									logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
-											current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-											hedgeMode ? current.name() : "", correlationId, response, null);
+									logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
+											currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
+											hedgeMode ? currentFinal.name() : "", correlationId, response, null);
 								})
-								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReason,
-										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-										hedgeMode ? current.name() : "", correlationId, null, error.getMessage()));
+								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
+										currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
+										hedgeMode ? currentFinal.name() : "", correlationId, null, error.getMessage()));
 					})
 					.doOnNext(response -> {
 						positionStates.put(symbol, PositionState.NONE);
