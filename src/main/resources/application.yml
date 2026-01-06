@@ -81,13 +81,26 @@ strategy:
   moved-dir-pct-late-gate: 1.0
   chase-max-move-pct: 0.40
   confirm-bars-early: 1
-  confirm-bars-normal: 2
+  confirm-bars-normal: 1
   confirm-bars-exit: 1
   enable-flip-on-opposite-exit: true
   opposite-exit-flip-cooldown-ms: 2000
   flip-spread-max-bps: 12
   max-trades-per-5-min: 10
   hard-trade-cooldown-ms: 2500
+  quality-fast-threshold: 70
+  quality-slow-threshold: 40
+  rsi-long-min: 45
+  rsi-long-max: 75
+  rsi-short-min: 25
+  rsi-short-max: 55
+  vol-spike-mult: 1.5
+  atr-max-mult: 2.0
+  confirm-bars-low-quality: 2
+  confirm-bars-high-quality: 1
+  trail-activate-pct: 0.35
+  trail-retrace-pct: 0.20
+  trend-hold-min-profit-pct: 0.15
 
 warmup:
   enabled: true

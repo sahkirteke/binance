@@ -73,7 +73,20 @@ public record StrategyProperties(
 		int confirmBarsNormal,
 		int confirmBarsExit,
 		boolean enableFlipOnOppositeExit,
-		long oppositeExitFlipCooldownMs) {
+		long oppositeExitFlipCooldownMs,
+		int qualityFastThreshold,
+		int qualitySlowThreshold,
+		double rsiLongMin,
+		double rsiLongMax,
+		double rsiShortMin,
+		double rsiShortMax,
+		double volSpikeMult,
+		double atrMaxMult,
+		int confirmBarsLowQuality,
+		int confirmBarsHighQuality,
+		double trailActivatePct,
+		double trailRetracePct,
+		double trendHoldMinProfitPct) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

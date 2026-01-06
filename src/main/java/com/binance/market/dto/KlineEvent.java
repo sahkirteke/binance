@@ -15,6 +15,7 @@ public record KlineEvent(
 			@JsonProperty("h") double high,
 			@JsonProperty("l") double low,
 			@JsonProperty("c") double close,
+			@JsonProperty("v") double volume,
 			@JsonProperty("T") long closeTime,
 			@JsonProperty("x") boolean closed) {
 	}

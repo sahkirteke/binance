@@ -65,7 +65,14 @@ public final class StrategyLogV1 {
 			Long flipCooldownRemainingMs,
 			Long cMissed,
 			Long cConfirm,
-			Long cFlip) {
+			Long cFlip,
+			boolean trailActive,
+			Double peakPriceSinceEntry,
+			Double troughPriceSinceEntry,
+			Double trailStop,
+			Double profitPct,
+			boolean trendStillStrong,
+			boolean exitHoldApplied) {
 	}
 
 	public record ConfirmHitLogDto(

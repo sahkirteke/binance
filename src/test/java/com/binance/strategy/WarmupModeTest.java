@@ -72,10 +72,23 @@ class WarmupModeTest {
 				BigDecimal.valueOf(1.0),
 				BigDecimal.valueOf(0.40),
 				1,
-				2,
+				1,
 				1,
 				true,
-				2000L);
+				2000L,
+				70,
+				40,
+				45,
+				75,
+				25,
+				55,
+				1.5,
+				2.0,
+				2,
+				1,
+				0.35,
+				0.20,
+				0.15);
 		WarmupProperties warmupProperties = new WarmupProperties(true, 240, 120, 3, false, 0);
 		SymbolFilterService filterService = new SymbolFilterService(orderClient, properties);
 		OrderTracker orderTracker = new OrderTracker();
@@ -111,7 +124,8 @@ class WarmupModeTest {
 				0L,
 				1_000_000L,
 				false);
-		strategy.onScoreSignal("BTCUSDT", signal, 100.0);
+		Candle candle = new Candle(100.0, 101.0, 99.0, 100.0, 1200.0, 1_000_000L);
+		strategy.onScoreSignal("BTCUSDT", signal, candle);
 
 		verifyNoInteractions(orderClient);
 	}

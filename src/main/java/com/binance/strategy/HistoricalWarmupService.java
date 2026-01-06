@@ -142,6 +142,7 @@ public class HistoricalWarmupService {
 								kline.high().doubleValue(),
 								kline.low().doubleValue(),
 								kline.close().doubleValue(),
+								kline.volume().doubleValue(),
 								kline.closeTime());
 						if ("5m".equals(interval)) {
 							strategyRouter.warmupFiveMinuteCandle(symbol, candle);

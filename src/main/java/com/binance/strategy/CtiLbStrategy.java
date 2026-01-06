@@ -26,6 +26,12 @@ import reactor.util.retry.Retry;
 public class CtiLbStrategy {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(CtiLbStrategy.class);
+	private static final int EMA_20_PERIOD = 20;
+	private static final int EMA_200_PERIOD = 200;
+	private static final int RSI_9_PERIOD = 9;
+	private static final int ATR_14_PERIOD = 14;
+	private static final int ATR_SMA_20_PERIOD = 20;
+	private static final int VOLUME_SMA_10_PERIOD = 10;
 
 	private final BinanceFuturesOrderClient orderClient;
 	private final StrategyProperties strategyProperties;
@@ -103,7 +109,7 @@ public class CtiLbStrategy {
 						.then());
 	}
 
-	public void onScoreSignal(String symbol, ScoreSignal signal, double close) {
+	public void onScoreSignal(String symbol, ScoreSignal signal, Candle candle) {
 		if (signal == null) {
 			return;
 		}
@@ -115,8 +121,10 @@ public class CtiLbStrategy {
 		}
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
+		double close = candle.close();
 		double prevClose = symbolState.prevClose1m;
 		int fiveMinDir = symbolState.lastFiveMinDir;
+		symbolState.updateIndicators(candle);
 		if (signal.cti5mReady()) {
 			int newDir = resolveFiveMinDir(signal.score5m());
 			if (newDir != 0 && newDir != symbolState.lastFiveMinDir) {
@@ -135,6 +143,7 @@ public class CtiLbStrategy {
 				signal.cti1mPrev(),
 				prevClose,
 				close,
+				candle.volume(),
 				closeTime,
 				symbolState);
 		EntryDecision entryDecision = resolveEntryDecision(current, symbolState, entryFilterState);
@@ -161,7 +170,8 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			if (shouldLogWarmupDecision(symbol)) {
 				logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
-						recommendationUsed, recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE");
+						recommendationUsed, recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE",
+						TrailState.empty());
 			}
 			return;
 		}
@@ -178,6 +188,8 @@ public class CtiLbStrategy {
 
 		syncPositionIfNeeded(symbol, closeTime);
 		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
+		TrailState trailState = resolveTrailState(symbolState, current, entryState, fiveMinDir, close);
+		TrailState decisionTrailState = trailState;
 		OppositeExitDecision oppositeExit = resolveOppositeExit(symbolState, current);
 		if (current != PositionState.NONE && oppositeExit.exit()) {
 			if (strategyProperties.enableFlipOnOppositeExit()) {
@@ -190,7 +202,8 @@ public class CtiLbStrategy {
 			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
 			logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
-					recommendationRaw, exitQty, entryState, null, decisionActionReason, decisionBlockReason);
+					recommendationRaw, exitQty, entryState, null, decisionActionReason, decisionBlockReason,
+					decisionTrailState);
 			if (!effectiveEnableOrders()) {
 				return;
 			}
@@ -241,9 +254,30 @@ public class CtiLbStrategy {
 			String decisionActionReason = exitDecision.reason();
 			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
+			boolean stopLossExit = isStopLossExit(decisionActionReason);
+			boolean holdExit = shouldHoldTrendStrong(
+					entryState == null ? null : entryState.side(),
+					entryState == null ? null : entryState.entryPrice(),
+					close,
+					fiveMinDir,
+					symbolState.ema20_1mValue,
+					symbolState.ema200_5mValue,
+					symbolState.isTrendEmaReady(),
+					trailState.trailStopHit(),
+					stopLossExit,
+					confirmedRec,
+					confirm1m,
+					CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
+					strategyProperties.trendHoldMinProfitPct());
+			if (holdExit) {
+				decisionActionReason = "EXIT_HOLD_TREND_STRONG";
+				decisionBlockReason = "EXIT_HOLD_TREND_STRONG";
+				decisionTrailState = decisionTrailState.withExitHoldApplied(true);
+			}
 			logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
-					recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason, decisionBlockReason);
-			if (!effectiveEnableOrders()) {
+					recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason, decisionBlockReason,
+					decisionTrailState);
+			if (holdExit || !effectiveEnableOrders()) {
 				return;
 			}
 			if (exitQty == null || exitQty.signum() <= 0) {
@@ -290,6 +324,28 @@ public class CtiLbStrategy {
 			decisionActionReason = entryDecision.blockReason();
 			decisionBlockReason = entryDecision.blockReason();
 		}
+		if (current != PositionState.NONE && action != SignalAction.HOLD) {
+			boolean holdExit = shouldHoldTrendStrong(
+					entryState == null ? null : entryState.side(),
+					entryState == null ? null : entryState.entryPrice(),
+					close,
+					fiveMinDir,
+					symbolState.ema20_1mValue,
+					symbolState.ema200_5mValue,
+					symbolState.isTrendEmaReady(),
+					trailState.trailStopHit(),
+					false,
+					confirmedRec,
+					confirm1m,
+					CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
+					strategyProperties.trendHoldMinProfitPct());
+			if (holdExit) {
+				action = SignalAction.HOLD;
+				decisionActionReason = "EXIT_HOLD_TREND_STRONG";
+				decisionBlockReason = "EXIT_HOLD_TREND_STRONG";
+				decisionTrailState = decisionTrailState.withExitHoldApplied(true);
+			}
+		}
 		if (current == PositionState.NONE && entryDecision.decisionActionReason() != null
 				&& action != SignalAction.HOLD) {
 			decisionActionReason = entryDecision.decisionActionReason();
@@ -320,7 +376,7 @@ public class CtiLbStrategy {
 			action = SignalAction.HOLD;
 			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
 					recommendationRaw, resolvedQty, entryState, estimatedPnlPct, decisionActionReason,
-					decisionBlockReason);
+					decisionBlockReason, decisionTrailState);
 			return;
 		}
 
@@ -329,7 +385,7 @@ public class CtiLbStrategy {
 			action = SignalAction.HOLD;
 			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
 					recommendationRaw, resolvedQty, entryState, estimatedPnlPct, minTradeBlockReason,
-					"OK_EXECUTED");
+					"OK_EXECUTED", decisionTrailState);
 			return;
 		}
 
@@ -341,7 +397,7 @@ public class CtiLbStrategy {
 			decisionBlockReason = "QTY_ZERO_AFTER_STEP";
 			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
 					recommendationRaw, resolvedQty, entryState, estimatedPnlPct, decisionActionReason,
-					decisionBlockReason);
+					decisionBlockReason, decisionTrailState);
 			return;
 		}
 
@@ -354,12 +410,13 @@ public class CtiLbStrategy {
 		PositionState currentForLog = current;
 		PositionState targetForLog = target;
 		CtiDirection confirmedRecForLog = confirmedRec;
+		TrailState trailStateForLog = decisionTrailState;
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					hedgeModeBySymbol.put(symbol, hedgeMode);
 					logDecision(symbol, signal, close, actionForLog, confirm1m, confirmedRecForLog, recUpdate,
 							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
-							estimatedPnlPct, decisionActionReasonForLog, decisionBlock);
+							estimatedPnlPct, decisionActionReasonForLog, decisionBlock, trailStateForLog);
 					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
 						String correlationId = orderTracker.nextCorrelationId(symbol, "ENTRY");
 						return openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode, correlationId)
@@ -422,10 +479,15 @@ public class CtiLbStrategy {
 					LOGGER.warn("Failed to execute CTI LB action {}: {}", actionForLog, error.getMessage());
 					logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRecForLog, recUpdate,
 							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
-							estimatedPnlPct, decisionActionReasonForLog, "ORDER_ERROR");
+							estimatedPnlPct, decisionActionReasonForLog, "ORDER_ERROR", trailStateForLog);
 				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
+	}
+
+	public void onWarmupFiveMinuteCandle(String symbol, Candle candle) {
+		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
+		symbolState.updateFiveMinuteIndicators(candle);
 	}
 
 	private int resolveFiveMinDir(int score5m) {
@@ -438,12 +500,116 @@ public class CtiLbStrategy {
 		return 0;
 	}
 
+	private TrailState resolveTrailState(SymbolState state, PositionState current, EntryState entryState,
+			int fiveMinDir, double close) {
+		if (current == PositionState.NONE || entryState == null || entryState.entryPrice() == null
+				|| entryState.entryPrice().signum() <= 0) {
+			state.resetTrailState();
+			return TrailState.empty();
+		}
+		if (state.entryTimeMs != entryState.entryTimeMs()) {
+			state.peakPriceSinceEntry = close;
+			state.troughPriceSinceEntry = close;
+			state.trailActive = false;
+			state.entryTimeMs = entryState.entryTimeMs();
+		}
+		if (current == PositionState.LONG) {
+			state.peakPriceSinceEntry = Double.isNaN(state.peakPriceSinceEntry)
+					? close
+					: Math.max(state.peakPriceSinceEntry, close);
+		} else {
+			state.troughPriceSinceEntry = Double.isNaN(state.troughPriceSinceEntry)
+					? close
+					: Math.min(state.troughPriceSinceEntry, close);
+		}
+		double profitPct = resolveProfitPct(entryState.side(), entryState.entryPrice(), close);
+		if (!Double.isNaN(profitPct) && profitPct >= strategyProperties.trailActivatePct()) {
+			state.trailActive = true;
+		}
+		Double trailStop = null;
+		boolean trailStopHit = false;
+		if (state.trailActive) {
+			double retracePct = strategyProperties.trailRetracePct() / 100.0;
+			if (current == PositionState.LONG) {
+				double peak = Double.isNaN(state.peakPriceSinceEntry) ? close : state.peakPriceSinceEntry;
+				trailStop = peak * (1.0 - retracePct);
+				trailStopHit = close <= trailStop;
+			} else {
+				double trough = Double.isNaN(state.troughPriceSinceEntry) ? close : state.troughPriceSinceEntry;
+				trailStop = trough * (1.0 + retracePct);
+				trailStopHit = close >= trailStop;
+			}
+		}
+		boolean trendStillStrong = resolveTrendStillStrong(entryState.side(), fiveMinDir, close, state);
+		return new TrailState(state.trailActive, state.peakPriceSinceEntry, state.troughPriceSinceEntry, trailStop,
+				profitPct, trendStillStrong, false, trailStopHit);
+	}
+
+	static boolean shouldHoldTrendStrong(CtiDirection side, BigDecimal entryPrice, double close,
+			int fiveMinDir, double ema20, double ema200, boolean emaReady, boolean trailStopHit,
+			boolean stopLossExit, CtiDirection confirmedRec, int confirmCounter, int confirmBars,
+			double trendHoldMinProfitPct) {
+		if (side == null || entryPrice == null || entryPrice.signum() <= 0 || close <= 0 || stopLossExit
+				|| trailStopHit) {
+			return false;
+		}
+		if (!emaReady) {
+			return false;
+		}
+		double profitPct = resolveProfitPct(side, entryPrice, close);
+		if (Double.isNaN(profitPct) || profitPct < trendHoldMinProfitPct) {
+			return false;
+		}
+		boolean trendStillStrong = false;
+		if (side == CtiDirection.LONG) {
+			trendStillStrong = fiveMinDir == 1 && close > ema20 && close > ema200;
+		} else if (side == CtiDirection.SHORT) {
+			trendStillStrong = fiveMinDir == -1 && close < ema20 && close < ema200;
+		}
+		if (!trendStillStrong) {
+			return false;
+		}
+		boolean oppositeStrong = false;
+		if (side == CtiDirection.LONG) {
+			oppositeStrong = confirmedRec == CtiDirection.SHORT && confirmCounter >= confirmBars;
+		} else if (side == CtiDirection.SHORT) {
+			oppositeStrong = confirmedRec == CtiDirection.LONG && confirmCounter >= confirmBars;
+		}
+		return !oppositeStrong;
+	}
+
+	private boolean resolveTrendStillStrong(CtiDirection side, int fiveMinDir, double close, SymbolState state) {
+		if (side == null || !state.isTrendEmaReady()) {
+			return false;
+		}
+		if (side == CtiDirection.LONG) {
+			return fiveMinDir == 1 && close > state.ema20_1mValue && close > state.ema200_5mValue;
+		}
+		if (side == CtiDirection.SHORT) {
+			return fiveMinDir == -1 && close < state.ema20_1mValue && close < state.ema200_5mValue;
+		}
+		return false;
+	}
+
+	private static double resolveProfitPct(CtiDirection side, BigDecimal entryPrice, double close) {
+		if (side == null || entryPrice == null || entryPrice.signum() <= 0 || close <= 0) {
+			return Double.NaN;
+		}
+		double entry = entryPrice.doubleValue();
+		double profitPct = (close - entry) / entry * 100.0;
+		return side == CtiDirection.SHORT ? -profitPct : profitPct;
+	}
+
+	private static boolean isStopLossExit(String reason) {
+		return reason != null && reason.startsWith("EXIT_STOP_LOSS");
+	}
+
 	private void logEntryFilterState(String symbol, SymbolState state, long nowMs, double close, double prevClose,
 			EntryFilterState entryFilterState, EntryDecision entryDecision) {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} lateIgnoredPullback={} lateIgnoredMoveGate={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} blockReason={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} lateIgnoredPullback={} lateIgnoredMoveGate={} flipPrice={} movedDirPct={} prevClose1m={} pullbackTriggered={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} confirmBarsUsedDynamic={} qualityTier={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -465,11 +631,24 @@ public class CtiLbStrategy {
 				entryDecision.entryMode(),
 				entryDecision.confirmBarsUsed(),
 				entryDecision.confirmCounter(),
-				entryDecision.blockReason());
+				entryDecision.blockReason(),
+				Double.isNaN(entryFilterState.ema20_1m()) ? "NA" : String.format("%.8f", entryFilterState.ema20_1m()),
+				Double.isNaN(entryFilterState.ema200_5m()) ? "NA" : String.format("%.8f",
+						entryFilterState.ema200_5m()),
+				Double.isNaN(entryFilterState.rsi9()) ? "NA" : String.format("%.2f", entryFilterState.rsi9()),
+				Double.isNaN(entryFilterState.volume()) ? "NA" : String.format("%.2f", entryFilterState.volume()),
+				Double.isNaN(entryFilterState.volumeSma10()) ? "NA" : String.format("%.2f",
+						entryFilterState.volumeSma10()),
+				Double.isNaN(entryFilterState.atr14()) ? "NA" : String.format("%.6f", entryFilterState.atr14()),
+				Double.isNaN(entryFilterState.atrSma20()) ? "NA" : String.format("%.6f",
+						entryFilterState.atrSma20()),
+				entryFilterState.qualityScore(),
+				entryFilterState.confirmBarsUsedDynamic(),
+				entryFilterState.qualityTier());
 	}
 
 	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double bfr1m, double bfrPrev,
-			double prevClose, double close, long nowMs, SymbolState state) {
+			double prevClose, double close, double volume1m, long nowMs, SymbolState state) {
 		long armingWindowMs = strategyProperties.armingWindowMinutes() * 60_000L;
 		long lateLimitMs = strategyProperties.lateLimitMinutes() * 60_000L;
 		boolean hasDir = fiveMinDir != 0;
@@ -516,10 +695,30 @@ public class CtiLbStrategy {
 		} else if (scoreAligned) {
 			triggerReason = "SCORE";
 		}
+		QualityScoreResult qualityResult = evaluateQualityScore(
+				fiveMinDir,
+				entryTrigger,
+				scoreAligned,
+				pullbackTriggered,
+				close,
+				state.ema20_1mValue,
+				state.ema200_5mValue,
+				state.rsi9Value,
+				volume1m,
+				state.volumeSma10Value,
+				state.atr14Value,
+				state.atrSma20Value,
+				strategyProperties);
+		int confirmBarsUsedDynamic = resolveConfirmBarsUsedDynamic(
+				qualityResult,
+				pullbackTriggered,
+				strategyProperties);
 		return new EntryFilterState(fiveMinDir, inArming, lateBlockDecision.lateBlocked(),
 				lateBlockDecision.ignoredPullback(), lateBlockDecision.ignoredMoveGate(), movedDirPct,
 				entryTrigger, pullbackTriggered, scoreAligned, triggerReason, state.fiveMinFlipTimeMs,
-				minutesSinceFlip, state.fiveMinFlipPrice);
+				minutesSinceFlip, state.fiveMinFlipPrice, state.ema20_1mValue, state.ema200_5mValue,
+				state.rsi9Value, volume1m, state.volumeSma10Value, state.atr14Value, state.atrSma20Value,
+				qualityResult.qualityScore(), confirmBarsUsedDynamic, qualityResult.qualityTier());
 	}
 
 	static LateBlockDecision resolveLateBlockDecision(boolean hasDir, long sinceFlipMs, long lateLimitMs,
@@ -539,6 +738,87 @@ public class CtiLbStrategy {
 		}
 		boolean lateBlocked = lateLimitExceeded && gatePassed && !pullbackTriggered;
 		return new LateBlockDecision(lateBlocked, ignoredPullback, ignoredMoveGate);
+	}
+
+	static QualityScoreResult evaluateQualityScore(
+			int fiveMinDir,
+			boolean entryTrigger,
+			boolean scoreAligned,
+			boolean pullbackTriggered,
+			double close,
+			double ema20,
+			double ema200,
+			double rsi9,
+			double volume,
+			double volSma10,
+			double atr14,
+			double atrSma20,
+			StrategyProperties properties) {
+		int score = 0;
+		if (pullbackTriggered) {
+			score += 35;
+		} else if (scoreAligned) {
+			score += 30;
+		} else if (entryTrigger) {
+			score += 15;
+		}
+		if (fiveMinDir == 1) {
+			if (!Double.isNaN(ema200) && close > ema200) {
+				score += 15;
+			}
+			if (!Double.isNaN(ema20) && close > ema20) {
+				score += 10;
+			}
+		} else if (fiveMinDir == -1) {
+			if (!Double.isNaN(ema200) && close < ema200) {
+				score += 15;
+			}
+			if (!Double.isNaN(ema20) && close < ema20) {
+				score += 10;
+			}
+		}
+		if (!Double.isNaN(rsi9)) {
+			if (fiveMinDir == 1 && rsi9 >= properties.rsiLongMin() && rsi9 <= properties.rsiLongMax()) {
+				score += 15;
+			} else if (fiveMinDir == -1 && rsi9 >= properties.rsiShortMin() && rsi9 <= properties.rsiShortMax()) {
+				score += 15;
+			}
+			if (fiveMinDir == 1 && rsi9 > 80.0) {
+				score -= 15;
+			} else if (fiveMinDir == -1 && rsi9 < 20.0) {
+				score -= 15;
+			}
+		}
+		if (volSma10 > 0 && volume > volSma10 * properties.volSpikeMult()) {
+			score += 10;
+		}
+		if (atrSma20 > 0 && !Double.isNaN(atr14)) {
+			if (atr14 < atrSma20 * properties.atrMaxMult()) {
+				score += 10;
+			} else {
+				score -= 10;
+			}
+		}
+		int clamped = Math.max(0, Math.min(100, score));
+		String tier = clamped >= properties.qualityFastThreshold()
+				? "HIGH"
+				: clamped <= properties.qualitySlowThreshold() ? "LOW" : "NORMAL";
+		return new QualityScoreResult(clamped, tier);
+	}
+
+	static int resolveConfirmBarsUsedDynamic(QualityScoreResult qualityResult, boolean pullbackTriggered,
+			StrategyProperties properties) {
+		if (pullbackTriggered) {
+			return 1;
+		}
+		if (qualityResult == null) {
+			return Math.max(1, properties.confirmBarsNormal());
+		}
+		return switch (qualityResult.qualityTier()) {
+			case "HIGH" -> Math.max(1, properties.confirmBarsHighQuality());
+			case "LOW" -> Math.max(1, properties.confirmBarsLowQuality());
+			default -> Math.max(1, properties.confirmBarsNormal());
+		};
 	}
 
 	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state, EntryFilterState entryFilterState) {
@@ -564,9 +844,7 @@ public class CtiLbStrategy {
 			return new EntryDecision(null, "NORMAL", 0, state.confirmCounter, "ENTRY_BLOCK_CHASE",
 					"ENTRY_BLOCK_CHASE");
 		}
-		int confirmBarsUsed = entryFilterState.inArming()
-				? strategyProperties.confirmBarsEarly()
-				: strategyProperties.confirmBarsNormal();
+		int confirmBarsUsed = entryFilterState.confirmBarsUsedDynamic();
 		if (entryFilterState.entryTrigger()) {
 			state.confirmCounter += 1;
 		} else {
@@ -615,7 +893,7 @@ public class CtiLbStrategy {
 		return entryDecision;
 	}
 
-	private record EntryFilterState(
+	record EntryFilterState(
 			int fiveMinDir,
 			boolean inArming,
 			boolean lateBlocked,
@@ -628,7 +906,17 @@ public class CtiLbStrategy {
 			String triggerReason,
 			long flipTimeMs,
 			double minutesSinceFlip,
-			double flipPrice) {
+			double flipPrice,
+			double ema20_1m,
+			double ema200_5m,
+			double rsi9,
+			double volume,
+			double volumeSma10,
+			double atr14,
+			double atrSma20,
+			int qualityScore,
+			int confirmBarsUsedDynamic,
+			String qualityTier) {
 	}
 
 	record LateBlockDecision(boolean lateBlocked, boolean ignoredPullback, boolean ignoredMoveGate) {
@@ -651,6 +939,28 @@ public class CtiLbStrategy {
 		}
 	}
 
+	private record TrailState(
+			boolean trailActive,
+			double peakPriceSinceEntry,
+			double troughPriceSinceEntry,
+			Double trailStop,
+			double profitPct,
+			boolean trendStillStrong,
+			boolean exitHoldApplied,
+			boolean trailStopHit) {
+		static TrailState empty() {
+			return new TrailState(false, Double.NaN, Double.NaN, null, Double.NaN, false, false, false);
+		}
+
+		TrailState withExitHoldApplied(boolean applied) {
+			return new TrailState(trailActive, peakPriceSinceEntry, troughPriceSinceEntry, trailStop, profitPct,
+					trendStillStrong, applied, trailStopHit);
+		}
+	}
+
+	record QualityScoreResult(int qualityScore, String qualityTier) {
+	}
+
 	private static class SymbolState {
 		private int lastFiveMinDir;
 		private int prevFiveMinDir;
@@ -659,6 +969,48 @@ public class CtiLbStrategy {
 		private double prevClose1m = Double.NaN;
 		private int confirmCounter;
 		private int exitConfirmCounter;
+		private double peakPriceSinceEntry = Double.NaN;
+		private double troughPriceSinceEntry = Double.NaN;
+		private boolean trailActive;
+		private long entryTimeMs;
+		private final FiveMinuteCandleAggregator fiveMinuteAggregator = new FiveMinuteCandleAggregator();
+		private final Ema ema20_1m = new Ema(EMA_20_PERIOD);
+		private final Ema ema200_5m = new Ema(EMA_200_PERIOD);
+		private final WilderRsi rsi9_1m = new WilderRsi(RSI_9_PERIOD);
+		private final WilderAtr atr14_1m = new WilderAtr(ATR_14_PERIOD);
+		private final RollingSma atrSma20_1m = new RollingSma(ATR_SMA_20_PERIOD);
+		private final RollingSma volumeSma10_1m = new RollingSma(VOLUME_SMA_10_PERIOD);
+		private double ema20_1mValue = Double.NaN;
+		private double ema200_5mValue = Double.NaN;
+		private double rsi9Value = Double.NaN;
+		private double atr14Value = Double.NaN;
+		private double atrSma20Value = Double.NaN;
+		private double volumeSma10Value = Double.NaN;
+
+		private void updateIndicators(Candle candle) {
+			ema20_1mValue = ema20_1m.update(candle.close());
+			rsi9Value = rsi9_1m.update(candle.close());
+			atr14Value = atr14_1m.update(candle.high(), candle.low(), candle.close());
+			atrSma20Value = atrSma20_1m.update(atr14Value);
+			volumeSma10Value = volumeSma10_1m.update(candle.volume());
+			fiveMinuteAggregator.update(candle)
+					.ifPresent(this::updateFiveMinuteIndicators);
+		}
+
+		private void updateFiveMinuteIndicators(Candle candle) {
+			ema200_5mValue = ema200_5m.update(candle.close());
+		}
+
+		private boolean isTrendEmaReady() {
+			return ema20_1m.isReady() && ema200_5m.isReady();
+		}
+
+		private void resetTrailState() {
+			peakPriceSinceEntry = Double.NaN;
+			troughPriceSinceEntry = Double.NaN;
+			trailActive = false;
+			entryTimeMs = 0L;
+		}
 	}
 
 	private OppositeExitDecision resolveOppositeExit(SymbolState state, PositionState current) {
@@ -807,7 +1159,8 @@ public class CtiLbStrategy {
 	private void logDecision(String symbol, ScoreSignal signal, double close, SignalAction action,
 			int confirm1m, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate,
 			CtiDirection recommendationUsed, CtiDirection recommendationRaw, BigDecimal resolvedQty,
-			EntryState entryState, Double estimatedPnlPct, String decisionActionReason, String decisionBlockReason) {
+			EntryState entryState, Double estimatedPnlPct, String decisionActionReason, String decisionBlockReason,
+			TrailState trailState) {
 		logSummaryIfNeeded(signal.closeTime());
 		String decisionAction = recUpdate.missedMove() ? "RESET_PENDING" : resolveDecisionAction(action);
 		String insufficientReason = resolveInsufficientReason(signal);
@@ -818,6 +1171,7 @@ public class CtiLbStrategy {
 		int openOrders = orderTracker.openOrdersCount(symbol);
 		Integer pendingFlipDir = pendingFlipDirs.getOrDefault(symbol, 0);
 		Long cooldownRemainingMs = resolveFlipCooldownRemaining(symbol, signal.closeTime());
+		TrailState effectiveTrail = trailState == null ? TrailState.empty() : trailState;
 		DecisionLogDto dto = new DecisionLogDto(
 				symbol,
 				signal.closeTime(),
@@ -876,7 +1230,14 @@ public class CtiLbStrategy {
 				cooldownRemainingMs,
 				missedMoveCount.longValue(),
 				confirmHitCount.longValue(),
-				flipCount.longValue());
+				flipCount.longValue(),
+				effectiveTrail.trailActive(),
+				effectiveTrail.peakPriceSinceEntry(),
+				effectiveTrail.troughPriceSinceEntry(),
+				effectiveTrail.trailStop(),
+				effectiveTrail.profitPct(),
+				effectiveTrail.trendStillStrong(),
+				effectiveTrail.exitHoldApplied());
 		LOGGER.info(StrategyLogLineBuilder.buildDecisionLine(dto));
 	}
 
@@ -1310,6 +1671,146 @@ public class CtiLbStrategy {
 			return "FLIP_SHORT_TO_LONG";
 		}
 		return "FLIP_LONG_TO_SHORT";
+	}
+
+	private static class Ema {
+		private final int period;
+		private final double alpha;
+		private double value = Double.NaN;
+		private int count;
+
+		private Ema(int period) {
+			this.period = period;
+			this.alpha = 2.0 / (period + 1.0);
+		}
+
+		private double update(double price) {
+			if (Double.isNaN(value)) {
+				value = price;
+			} else {
+				value = value + alpha * (price - value);
+			}
+			count++;
+			return value;
+		}
+
+		private boolean isReady() {
+			return count >= period;
+		}
+	}
+
+	private static class WilderRsi {
+		private final int period;
+		private double prevClose = Double.NaN;
+		private int count;
+		private double sumGain;
+		private double sumLoss;
+		private double avgGain = Double.NaN;
+		private double avgLoss = Double.NaN;
+		private double value = Double.NaN;
+
+		private WilderRsi(int period) {
+			this.period = period;
+		}
+
+		private double update(double close) {
+			if (Double.isNaN(prevClose)) {
+				prevClose = close;
+				return value;
+			}
+			double change = close - prevClose;
+			double gain = Math.max(change, 0.0);
+			double loss = Math.max(-change, 0.0);
+			prevClose = close;
+			if (count < period) {
+				sumGain += gain;
+				sumLoss += loss;
+				count++;
+				if (count == period) {
+					avgGain = sumGain / period;
+					avgLoss = sumLoss / period;
+					value = resolveRsi(avgGain, avgLoss);
+				}
+				return value;
+			}
+			avgGain = (avgGain * (period - 1.0) + gain) / period;
+			avgLoss = (avgLoss * (period - 1.0) + loss) / period;
+			value = resolveRsi(avgGain, avgLoss);
+			return value;
+		}
+
+		private double resolveRsi(double avgGainValue, double avgLossValue) {
+			if (avgLossValue == 0.0) {
+				return 100.0;
+			}
+			double rs = avgGainValue / avgLossValue;
+			return 100.0 - (100.0 / (1.0 + rs));
+		}
+	}
+
+	private static class WilderAtr {
+		private final int period;
+		private double prevClose = Double.NaN;
+		private int count;
+		private double sum;
+		private double value = Double.NaN;
+
+		private WilderAtr(int period) {
+			this.period = period;
+		}
+
+		private double update(double high, double low, double close) {
+			if (Double.isNaN(prevClose)) {
+				prevClose = close;
+				return value;
+			}
+			double tr = Math.max(high - low,
+					Math.max(Math.abs(high - prevClose), Math.abs(low - prevClose)));
+			prevClose = close;
+			if (count < period) {
+				sum += tr;
+				count++;
+				if (count == period) {
+					value = sum / period;
+				}
+				return value;
+			}
+			value = (value * (period - 1.0) + tr) / period;
+			return value;
+		}
+	}
+
+	private static class RollingSma {
+		private final double[] window;
+		private int index;
+		private int count;
+		private double sum;
+
+		private RollingSma(int size) {
+			this.window = new double[size];
+		}
+
+		private double update(double value) {
+			if (Double.isNaN(value)) {
+				return current();
+			}
+			if (count < window.length) {
+				window[index] = value;
+				sum += value;
+				count++;
+				index = (index + 1) % window.length;
+			} else {
+				sum -= window[index];
+				window[index] = value;
+				sum += value;
+				index = (index + 1) % window.length;
+			}
+			return current();
+		}
+
+		private double current() {
+			return count == window.length ? sum / window.length : Double.NaN;
+		}
 	}
 
 	private enum PositionState {

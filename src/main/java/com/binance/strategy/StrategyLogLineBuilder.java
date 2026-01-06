@@ -67,6 +67,13 @@ public final class StrategyLogLineBuilder {
 				.append(" openOrders=").append(na(dto.openOrders()))
 				.append(" pendingFlipDir=").append(na(dto.pendingFlipDir()))
 				.append(" flipCooldownRemainingMs=").append(nl(dto.flipCooldownRemainingMs()))
+				.append(" trailActive=").append(dto.trailActive())
+				.append(" peakPriceSinceEntry=").append(num(dto.peakPriceSinceEntry()))
+				.append(" troughPriceSinceEntry=").append(num(dto.troughPriceSinceEntry()))
+				.append(" trailStop=").append(num(dto.trailStop()))
+				.append(" profitPct=").append(num(dto.profitPct()))
+				.append(" trendStillStrong=").append(dto.trendStillStrong())
+				.append(" exitHoldApplied=").append(dto.exitHoldApplied())
 				.append(" cMissed=").append(nl(dto.cMissed()))
 				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));

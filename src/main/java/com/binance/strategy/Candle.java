@@ -5,5 +5,6 @@ public record Candle(
 		double high,
 		double low,
 		double close,
+		double volume,
 		long closeTime) {
 }
