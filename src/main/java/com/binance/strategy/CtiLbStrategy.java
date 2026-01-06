@@ -769,6 +769,19 @@ public class CtiLbStrategy {
 		return false;
 	}
 
+	private boolean isEma20Break(PositionState current, SymbolState state, double close) {
+		if (current == null || current == PositionState.NONE || !state.isEma20Ready()) {
+			return false;
+		}
+		if (current == PositionState.LONG) {
+			return close < state.ema20_1mValue;
+		}
+		if (current == PositionState.SHORT) {
+			return close > state.ema20_1mValue;
+		}
+		return false;
+	}
+
 	private boolean resolveTrendAlignedWithPosition(PositionState current, int fiveMinDir, double bfr1m,
 			double bfrPrev) {
 		if (current == PositionState.LONG) {

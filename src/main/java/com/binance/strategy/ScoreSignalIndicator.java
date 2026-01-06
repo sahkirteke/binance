@@ -5,6 +5,8 @@ import org.ta4j.core.BaseBar;
 import org.ta4j.core.BaseBarSeriesBuilder;
 import org.ta4j.core.indicators.MACDIndicator;
 import org.ta4j.core.indicators.SMAIndicator;
+import org.ta4j.core.indicators.EMAIndicator;
+import org.ta4j.core.indicators.MACDIndicator;
 import org.ta4j.core.indicators.adx.ADXIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
 
@@ -19,6 +21,7 @@ public class ScoreSignalIndicator {
 	private final ClosePriceIndicator macdClose = new ClosePriceIndicator(macdSeries);
 	private final MACDIndicator macdIndicator = new MACDIndicator(macdClose, 12, 26);
 	private final SMAIndicator macdSignal = new SMAIndicator(macdIndicator, 9);
+	private final EMAIndicator macdSignal = new EMAIndicator(macdIndicator, 9);
 	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m").build();
 	private final ADXIndicator adxIndicator = new ADXIndicator(adxSeries, ADX_PERIOD);
 	private CtiDirection lastCti5mDir = CtiDirection.NEUTRAL;

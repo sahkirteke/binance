@@ -75,6 +75,10 @@ strategy:
   enable-tie-break-bias: false
   startup-smoke-test-enabled: false
   filter-refresh-ttl-ms: 300000
+  arming-window-minutes: 5
+  late-limit-minutes: 12
+  moved-dir-pct-late-gate: 1.0
+  chase-max-move-pct: 0.40
   enable-flip-on-opposite-exit: true
   opposite-exit-flip-cooldown-ms: 2000
   flip-spread-max-bps: 12
