@@ -67,6 +67,7 @@ public record StrategyProperties(
 		long filterRefreshTtlMs,
 		int armingWindowMinutes,
 		int lateLimitMinutes,
+		BigDecimal movedDirPctLateGate,
 		BigDecimal chaseMaxMovePct,
 		int confirmBarsEarly,
 		int confirmBarsNormal,
