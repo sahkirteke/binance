@@ -28,20 +28,16 @@ public final class StrategyLogV1 {
 			Integer score1m,
 			Integer score5m,
 			Integer hamScore,
-			Integer adxBonus,
+			Integer ctiDirScore,
+			Integer macdScore,
 			Integer scoreLong,
 			Integer scoreShort,
 			Double adjScore,
 			CtiDirection bias,
 			CtiDirection recommendationRaw,
 			CtiDirection recommendationUsed,
-			Integer streak,
-			Integer confirmBars,
 			CtiDirection confirmedRec,
 			String recReason,
-			CtiDirection recPending,
-			Long recFirstSeenAt,
-			BigDecimal recFirstSeenPrice,
 			String action,
 			String decisionActionReason,
 			boolean enableOrders,
@@ -57,17 +53,13 @@ public final class StrategyLogV1 {
 			Boolean stateDesync,
 			String decisionBlockReason,
 			Boolean trendAlignedWithPosition,
-			Integer exitReversalConfirmCounter,
 			Boolean exitBlockedByTrendAligned,
 			CtiDirection trend,
-			Integer confirmCounter,
 			String positionSide,
 			BigDecimal positionQty,
 			Integer openOrders,
 			Integer pendingFlipDir,
 			Long flipCooldownRemainingMs,
-			Long cMissed,
-			Long cConfirm,
 			Long cFlip,
 			boolean trailActive,
 			Double peakPriceSinceEntry,
@@ -80,51 +72,15 @@ public final class StrategyLogV1 {
 			Integer continuationBars,
 			Double bestFavorablePrice,
 			Double retracePct,
-			Integer flipConfirmCounter,
 			String flipGateReason,
 			Integer qualityScore,
 			String qualityConfirmReason,
 			Boolean trendHoldActive,
 			String trendHoldReason,
 			Integer flipQualityScore,
-			Boolean flipExtraConfirmApplied,
 			Boolean tpTrailingActive,
 			Double maxPnlSeenPct,
 			Double trailingStopPct) {
-	}
-
-	public record ConfirmHitLogDto(
-			String symbol,
-			CtiDirection confirmedRec,
-			Long firstSeenAt,
-			BigDecimal firstPrice,
-			Long hitAt,
-			BigDecimal hitPrice,
-			Integer barsToConfirm,
-			Integer confirmBars,
-			Double bfr1m,
-			Double bfr5m,
-			Double adx5m,
-			Long cMissed,
-			Long cConfirm,
-			Long cFlip) {
-	}
-
-	public record MissedMoveLogDto(
-			String symbol,
-			CtiDirection pending,
-			Long firstSeenAt,
-			BigDecimal firstPrice,
-			Long nowAt,
-			BigDecimal nowPrice,
-			Integer streakBeforeReset,
-			Integer confirmBars,
-			Double bfr1m,
-			Double bfr5m,
-			Double adx5m,
-			Long cMissed,
-			Long cConfirm,
-			Long cFlip) {
 	}
 
 	public record FlipLogDto(
@@ -146,19 +102,12 @@ public final class StrategyLogV1 {
 			BigDecimal qtyBefore,
 			boolean orderPlaced,
 			String orderId,
-			Long cMissed,
-			Long cConfirm,
 			Long cFlip) {
 	}
 
 	public record SummaryLogDto(
 			Integer symbols,
-			Long cFlip,
-			Long cConfirm,
-			Long cMissed,
-			Double missRate,
-			Double confirmRate,
-			String topMissed) {
+			Long cFlip) {
 	}
 
 	public record PositionSyncLogDto(
@@ -171,12 +120,10 @@ public final class StrategyLogV1 {
 
 	/*
 	Example decision:
-	EVENT=DECISION strategy=CTI_SCORE symbol=BTCUSDT tf=1m closeTime=1700000000000 close=43000 bfr1m=0.12 bfr5m=-0.05 adx5m=25 adxGate=true adxGateReason=ADX5M>20 adx5mReady=true scoreLong=1 scoreShort=1 adjScore=0 bias=NEUTRAL rec=NONE streak=0 confirmBars=2 confirmedRec=NONE recReason=SCORE_RULES recPending=NONE recFirstSeenAt=0 recFirstSeenPrice=0 action=HOLD positionSide=FLAT positionQty=0 openOrders=0 cMissed=0 cConfirm=0 cFlip=0
+	EVENT=DECISION strategy=CTI_SCORE symbol=BTCUSDT tf=1m closeTime=1700000000000 close=43000 bfr1m=0.12 bfr5m=-0.05 adx5m=25 adxGate=true adxGateReason=ADX5M>20 adx5mReady=true score1m=1 score5m=0 hamScore=1 ctiDirScore=1 macdScore=0 adjScore=1 bias=NEUTRAL rec=LONG confirmedRec=LONG recReason=SCORE_RULES action=HOLD positionSide=FLAT positionQty=0 openOrders=0 cFlip=0
 	Example flip:
-	EVENT=FLIP strategy=CTI_SCORE symbol=BTCUSDT tf=1m from=FLAT to=LONG at=1700000000000 price=43000 adjScore=2 scoreLong=2 scoreShort=0 rec=LONG confirmedRec=LONG bfr1m=0.12 bfr5m=0.2 adx5m=25 action=FLIP_TO_LONG positionBefore=FLAT qtyBefore=0 orderPlaced=false orderId=NONE cMissed=0 cConfirm=1 cFlip=1
-	Example confirm hit:
-	EVENT=CONFIRM_HIT strategy=CTI_SCORE symbol=BTCUSDT tf=1m confirmedRec=LONG firstSeenAt=1700000000000 firstPrice=43000 hitAt=1700000060000 hitPrice=43050 barsToConfirm=2 confirmBars=2 bfr1m=0.12 bfr5m=0.2 adx5m=25 action=HOLD cMissed=0 cConfirm=1 cFlip=0
-	Example missed move:
-	EVENT=MISSED_MOVE strategy=CTI_SCORE symbol=BTCUSDT tf=1m pending=LONG firstSeenAt=1700000000000 firstPrice=43000 nowAt=1700000060000 nowPrice=42980 streakBeforeReset=1 confirmBars=2 bfr1m=0.12 bfr5m=-0.05 adx5m=18 action=RESET_PENDING cMissed=1 cConfirm=0 cFlip=0
+	EVENT=FLIP strategy=CTI_SCORE symbol=BTCUSDT tf=1m from=FLAT to=LONG at=1700000000000 price=43000 adjScore=2 scoreLong=2 scoreShort=0 rec=LONG confirmedRec=LONG bfr1m=0.12 bfr5m=0.2 adx5m=25 action=FLIP_TO_LONG positionBefore=FLAT qtyBefore=0 orderPlaced=false orderId=NONE cFlip=1
+	Example summary:
+	EVENT=SUMMARY strategy=CTI_SCORE window=15m symbols=5 cFlip=12
 	*/
 }

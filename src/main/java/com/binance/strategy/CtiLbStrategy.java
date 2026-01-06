@@ -1,30 +1,42 @@
 package com.binance.strategy;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.MathContext;
+import java.net.SocketTimeoutException;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import com.binance.exchange.BinanceFuturesOrderClient;
 import com.binance.exchange.dto.OrderResponse;
-import com.binance.strategy.indicators.AtrWilder;
-import com.binance.strategy.indicators.EmaIndicator;
-import com.binance.strategy.indicators.RsiWilder;
-import com.binance.strategy.indicators.SmaRolling;
-import com.binance.strategy.StrategyLogV1.ConfirmHitLogDto;
 import com.binance.strategy.StrategyLogV1.DecisionLogDto;
 import com.binance.strategy.StrategyLogV1.FlipLogDto;
-import com.binance.strategy.StrategyLogV1.MissedMoveLogDto;
 import com.binance.strategy.StrategyLogV1.SummaryLogDto;
+import org.ta4j.core.BarSeries;
+import org.ta4j.core.BaseBar;
+import org.ta4j.core.BaseBarSeriesBuilder;
+import org.ta4j.core.indicators.EMAIndicator;
+import org.ta4j.core.indicators.RSIIndicator;
+import org.ta4j.core.indicators.SMAIndicator;
+import org.ta4j.core.indicators.ATRIndicator;
+import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
+import org.ta4j.core.indicators.helpers.VolumeIndicator;
 
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
+import reactor.netty.http.client.PrematureCloseException;
 
 @Component
 public class CtiLbStrategy {
@@ -36,6 +48,17 @@ public class CtiLbStrategy {
 	private static final int ATR_14_PERIOD = 14;
 	private static final int ATR_SMA_20_PERIOD = 20;
 	private static final int VOLUME_SMA_10_PERIOD = 10;
+	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
+	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
+	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
+			-1013,
+			-1111,
+			-1102,
+			-2010,
+			-2011,
+			-2019,
+			-2022
+	);
 
 	private final BinanceFuturesOrderClient orderClient;
 	private final StrategyProperties strategyProperties;
@@ -45,11 +68,7 @@ public class CtiLbStrategy {
 	private final Map<String, Long> lastCloseTimes = new ConcurrentHashMap<>();
 	private final Map<String, PositionState> positionStates = new ConcurrentHashMap<>();
 	private final Map<String, EntryState> entryStates = new ConcurrentHashMap<>();
-	private final Map<String, RecStreakTracker> recTrackers = new ConcurrentHashMap<>();
-	private final LongAdder missedMoveCount = new LongAdder();
 	private final LongAdder flipCount = new LongAdder();
-	private final LongAdder confirmHitCount = new LongAdder();
-	private final Map<String, LongAdder> missedBySymbol = new ConcurrentHashMap<>();
 	private final java.util.concurrent.atomic.AtomicLong lastSummaryAtMs = new java.util.concurrent.atomic.AtomicLong();
 	private final Map<String, Long> lastPositionSyncMs = new ConcurrentHashMap<>();
 	private final Map<String, Long> lastFlipTimes = new ConcurrentHashMap<>();
@@ -128,7 +147,7 @@ public class CtiLbStrategy {
 		double close = candle.close();
 		double prevClose = symbolState.prevClose1m;
 		int fiveMinDir = symbolState.lastFiveMinDir;
-		symbolState.updateIndicators(candle);
+		symbolState.updateOneMinuteIndicators(candle);
 		if (signal.cti5mReady()) {
 			int newDir = resolveFiveMinDir(signal.score5m());
 			if (newDir != 0 && newDir != symbolState.lastFiveMinDir) {
@@ -143,11 +162,7 @@ public class CtiLbStrategy {
 		EntryFilterState entryFilterState = resolveEntryFilterState(
 				fiveMinDir,
 				signal.score1m(),
-				signal.cti1mValue(),
-				signal.cti1mPrev(),
-				prevClose,
 				close,
-				candle.open(),
 				candle.volume(),
 				closeTime,
 				symbolState);
@@ -157,17 +172,7 @@ public class CtiLbStrategy {
 
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
-		RecStreakTracker tracker = recTrackers.computeIfAbsent(symbol, ignored -> new RecStreakTracker());
-		int confirmBars = CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars());
-		RecStreakTracker.RecUpdate recUpdate = tracker.update(
-				recommendationUsed,
-				signal.closeTime(),
-				BigDecimal.valueOf(close),
-				confirmBars);
-		int confirm1m = recUpdate.streakCount();
-		CtiDirection confirmedRec = confirm1m >= confirmBars
-				? recUpdate.lastRec()
-				: CtiDirection.NEUTRAL;
+		CtiDirection confirmedRec = recommendationUsed;
 		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
 			confirmedRec = entryDecision.confirmedRec();
 		}
@@ -177,44 +182,33 @@ public class CtiLbStrategy {
 				fiveMinDir,
 				signal.cti1mValue(),
 				signal.cti1mPrev());
-		int exitReversalConfirmCounter = resolveExitReversalConfirmCounter(
-				symbolState,
-				current,
-				fiveMinDir,
-				confirmedRec,
-				signal.cti1mValue(),
-				signal.cti1mPrev());
-		boolean exitReversalConfirmed = exitReversalConfirmCounter >= strategyProperties.exitReversalConfirmBars();
+		int finalScore = signal.finalScore();
+		boolean finalScoreOpposite = (current == PositionState.LONG && finalScore <= -1)
+				|| (current == PositionState.SHORT && finalScore >= 1);
+		boolean scoreExitConfirmed = current != PositionState.NONE && finalScoreOpposite;
 
 		int qualityScoreForLog = entryFilterState.qualityScore();
-		String qualityConfirmReason = entryFilterState.lowQualityExtraConfirmApplied()
-				? "LOW_QUALITY_EXTRA_CONFIRM"
-				: null;
+		String qualityConfirmReason = null;
 		if (warmupMode) {
 			if (shouldLogWarmupDecision(symbol)) {
-				logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
-						recommendationUsed, recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE",
-						TrailState.empty(), ContinuationState.empty(), null, 0, qualityScoreForLog,
+				logDecision(symbol, signal, close, SignalAction.HOLD, confirmedRec, recommendationUsed,
+						recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE", TrailState.empty(),
+						ContinuationState.empty(), null, 0, qualityScoreForLog,
 						qualityConfirmReason, false, null, 0, false, TpTrailingState.empty(),
-						trendAlignedWithPosition, exitReversalConfirmCounter, false);
+						trendAlignedWithPosition, false);
 			}
 			return;
-		}
-
-		if (recUpdate.missedMove()) {
-			missedMoveCount.increment();
-			missedBySymbol.computeIfAbsent(symbol, ignored -> new LongAdder()).increment();
-			logMissedMove(symbol, recUpdate, signal, close);
-		}
-		if (recUpdate.confirmHit()) {
-			confirmHitCount.increment();
-			logConfirmHit(symbol, confirmedRec, recUpdate, signal, close);
 		}
 
 		syncPositionIfNeeded(symbol, closeTime);
 		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
 		TrailState trailState = resolveTrailState(symbolState, current, entryState, fiveMinDir, close);
 		TrailState decisionTrailState = trailState;
+		boolean trendStillStrong = resolveTrendStillStrong(entryState == null ? null : entryState.side(),
+				fiveMinDir, close, symbolState);
+		boolean confirmedOpposite = current == PositionState.LONG
+				? confirmedRec == CtiDirection.SHORT
+				: current == PositionState.SHORT && confirmedRec == CtiDirection.LONG;
 		TpTrailingState tpTrailingState = resolveTpTrailingState(symbolState, current, entryState, close);
 		TpTrailingState decisionTpTrailingState = tpTrailingState;
 		ContinuationState continuationState = resolveContinuationState(
@@ -228,17 +222,16 @@ public class CtiLbStrategy {
 				closeTime);
 		ContinuationState decisionContinuationState = continuationState;
 		String flipGateReason = null;
-		boolean flipExtraConfirmApplied = false;
 		int flipQualityScore = 0;
 		boolean exitBlockedByTrendAlignedAction = false;
 		int barsInPosition = resolveBarsInPosition(entryState, closeTime);
 		IndicatorsSnapshot indicatorsSnapshot = new IndicatorsSnapshot(
 				symbolState.ema200_5mValue,
-				symbolState.ema200_5m.isReady(),
+				symbolState.isEma200Ready(),
 				symbolState.ema20_1mValue,
-				symbolState.ema20_1m.isReady(),
+				symbolState.isEma20Ready(),
 				symbolState.rsi9Value,
-				symbolState.rsi9_1m.isReady(),
+				symbolState.isRsiReady(),
 				signal.adx5m(),
 				signal.adxReady(),
 				signal.cti1mDir());
@@ -251,113 +244,6 @@ public class CtiLbStrategy {
 				barsInPosition,
 				strategyProperties);
 		String trendHoldReason = null;
-		if (current == PositionState.NONE) {
-			symbolState.resetFlipConfirm();
-		} else if (strategyProperties.flipConfirmResetOnNeutral()) {
-			boolean resetFlipConfirm = confirmedRec == CtiDirection.NEUTRAL
-					|| (current == PositionState.LONG && confirmedRec == CtiDirection.LONG)
-					|| (current == PositionState.SHORT && confirmedRec == CtiDirection.SHORT);
-			if (resetFlipConfirm) {
-				symbolState.resetFlipConfirm();
-			}
-		}
-		OppositeExitDecision oppositeExit = resolveOppositeExit(symbolState, current);
-		if (current != PositionState.NONE && oppositeExit.exit()) {
-			if (!exitReversalConfirmed) {
-				String decisionActionReason = trendAlignedWithPosition ? "HOLD_TREND_ALIGNED" : "EXIT_WAIT_REVERSAL";
-				String decisionBlockReason = decisionActionReason;
-				boolean exitBlockedByTrendAligned = trendAlignedWithPosition;
-				logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
-						recommendationUsed, recommendationRaw, null, entryState, null, decisionActionReason,
-						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-						symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-						trendHoldReason, flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState,
-						trendAlignedWithPosition, exitReversalConfirmCounter, exitBlockedByTrendAligned);
-				return;
-			}
-			TrendHoldFlipDecision trendHoldFlipDecision = evaluateTrendHoldFlipDecision(
-					trendHoldActive,
-					resolveDir(confirmedRec),
-					resolveOppositeDir(current),
-					resolveFlipQualityScore(current, close, entryFilterState, symbolState),
-					confirm1m,
-					confirmBars,
-					strategyProperties.flipExtraConfirmBars(),
-					strategyProperties.flipQualityMin());
-			flipQualityScore = trendHoldFlipDecision.flipQualityScore();
-			flipExtraConfirmApplied = trendHoldFlipDecision.flipExtraConfirmApplied();
-			if (!trendHoldFlipDecision.allowFlip()) {
-				String decisionActionReason = "TREND_HOLD_ACTIVE";
-				String decisionBlockReason = "TREND_HOLD_ACTIVE";
-				trendHoldReason = "TREND_HOLD_ACTIVE";
-				logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
-						recommendationUsed, recommendationRaw, null, entryState, null, decisionActionReason,
-						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-						symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason,
-						trendHoldActive, trendHoldReason, flipQualityScore, flipExtraConfirmApplied,
-						decisionTpTrailingState, trendAlignedWithPosition, exitReversalConfirmCounter, false);
-				return;
-			}
-			if (decisionContinuationState.holdApplied()) {
-				String decisionActionReason = "EXIT_HOLD_CONTINUATION";
-				String decisionBlockReason = "EXIT_HOLD_CONTINUATION";
-				logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRec, recUpdate,
-						recommendationUsed, recommendationRaw, null, entryState, null, decisionActionReason,
-						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-						symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-						trendHoldReason, flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState,
-						trendAlignedWithPosition, exitReversalConfirmCounter, false);
-				return;
-			}
-			if (strategyProperties.enableFlipOnOppositeExit()) {
-				lastOppositeExitAtMs.put(symbol, closeTime);
-				pendingFlipDirs.put(symbol, symbolState.lastFiveMinDir);
-				LOGGER.info("EVENT=PENDING_FLIP symbol={} setDir={} at={}", symbol, symbolState.lastFiveMinDir, closeTime);
-			}
-			SignalAction exitAction = SignalAction.HOLD;
-			String decisionActionReason = oppositeExit.reason();
-			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
-			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
-			logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
-					recommendationRaw, exitQty, entryState, null, decisionActionReason, decisionBlockReason,
-					decisionTrailState, decisionContinuationState, flipGateReason, symbolState.flipConfirmCounter,
-					qualityScoreForLog, qualityConfirmReason, trendHoldActive, trendHoldReason, flipQualityScore,
-					flipExtraConfirmApplied, decisionTpTrailingState, trendAlignedWithPosition,
-					exitReversalConfirmCounter, false);
-			if (!effectiveEnableOrders()) {
-				return;
-			}
-			if (exitQty == null || exitQty.signum() <= 0) {
-				return;
-			}
-			final String decisionActionReasonFinal = decisionActionReason;
-			final BigDecimal exitQtyFinal = exitQty;
-			final PositionState currentFinal = current;
-			orderClient.fetchHedgeModeEnabled()
-					.flatMap(hedgeMode -> {
-						String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT_OPPOSITE");
-						return closePosition(symbol, currentFinal, exitQtyFinal, hedgeMode, correlationId)
-								.doOnNext(response -> {
-									orderTracker.registerSubmitted(symbol, correlationId, response, true);
-									logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
-											currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
-											hedgeMode ? currentFinal.name() : "", correlationId, response, null);
-								})
-								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
-										currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
-										hedgeMode ? currentFinal.name() : "", correlationId, null, error.getMessage()));
-					})
-					.doOnNext(response -> {
-						positionStates.put(symbol, PositionState.NONE);
-						entryStates.remove(symbol);
-						recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
-					})
-					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB opposite exit {}: {}",
-							decisionActionReason, error.getMessage()))
-					.onErrorResume(error -> Mono.empty())
-					.subscribe();
-			return;
-		}
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
 				entryState == null ? null : entryState.entryPrice(),
@@ -369,7 +255,8 @@ public class CtiLbStrategy {
 				strategyProperties.flipSpreadMaxBps(),
 				closeTime,
 				entryState == null ? null : entryState.entryTimeMs(),
-				resolveMinHoldMs());
+				resolveMinHoldMs(),
+				scoreExitConfirmed);
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
 
 		if (current != PositionState.NONE && exitDecision.exit()) {
@@ -385,27 +272,27 @@ public class CtiLbStrategy {
 					decisionActionReason = "TREND_HOLD_ACTIVE";
 					decisionBlockReason = "TREND_HOLD_ACTIVE";
 					trendHoldReason = "TREND_HOLD_ACTIVE";
-					logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+					logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
 							recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
 							decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-							symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-							trendHoldReason, flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState,
-							trendAlignedWithPosition, exitReversalConfirmCounter, false);
+							qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+							trendHoldReason, flipQualityScore, decisionTpTrailingState,
+						trendAlignedWithPosition, false);
 					return;
 				}
 			}
-			ExitHoldDecision exitHoldDecision = evaluateExitHoldDecision(stopLossExit, exitReversalConfirmed,
+			ExitHoldDecision exitHoldDecision = evaluateExitHoldDecision(stopLossExit, scoreExitConfirmed,
 					trendAlignedWithPosition);
 			if (exitHoldDecision.hold()) {
 				decisionActionReason = exitHoldDecision.reason();
 				decisionBlockReason = exitHoldDecision.reason();
 				exitBlockedByTrendAligned = exitHoldDecision.exitBlockedByTrendAligned();
-				logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+				logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
 						recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
 						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-						symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-						trendHoldReason, flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState,
-						trendAlignedWithPosition, exitReversalConfirmCounter, exitBlockedByTrendAligned);
+						qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+						trendHoldReason, flipQualityScore, decisionTpTrailingState,
+					trendAlignedWithPosition, exitBlockedByTrendAligned);
 				return;
 			}
 			boolean continuationHold = decisionContinuationState.holdApplied() && !stopLossExit;
@@ -420,8 +307,6 @@ public class CtiLbStrategy {
 					trailState.trailStopHit(),
 					stopLossExit,
 					confirmedRec,
-					confirm1m,
-					CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
 					strategyProperties.trendHoldMinProfitPct());
 			if (continuationHold) {
 				decisionActionReason = "EXIT_HOLD_CONTINUATION";
@@ -432,12 +317,12 @@ public class CtiLbStrategy {
 				decisionBlockReason = "EXIT_HOLD_TREND_STRONG";
 				decisionTrailState = decisionTrailState.withExitHoldApplied(true);
 			}
-			logDecision(symbol, signal, close, exitAction, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+			logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
 					recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason, decisionBlockReason,
-					decisionTrailState, decisionContinuationState, flipGateReason, symbolState.flipConfirmCounter,
+					decisionTrailState, decisionContinuationState, flipGateReason,
 					qualityScoreForLog, qualityConfirmReason, trendHoldActive, trendHoldReason,
-					flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState, trendAlignedWithPosition,
-					exitReversalConfirmCounter, exitBlockedByTrendAligned);
+					flipQualityScore, decisionTpTrailingState, trendAlignedWithPosition,
+					exitBlockedByTrendAligned);
 			if (continuationHold || holdExit || !effectiveEnableOrders()) {
 				return;
 			}
@@ -502,29 +387,19 @@ public class CtiLbStrategy {
 					resolveDir(confirmedRec),
 					resolveOppositeDir(current),
 					resolveFlipQualityScore(current, close, entryFilterState, symbolState),
-					confirm1m,
-					confirmBars,
-					strategyProperties.flipExtraConfirmBars(),
 					strategyProperties.flipQualityMin());
 			flipQualityScore = trendHoldFlipDecision.flipQualityScore();
-			flipExtraConfirmApplied = trendHoldFlipDecision.flipExtraConfirmApplied();
-			if (!trendHoldFlipDecision.allowFlip()) {
+				if (!trendHoldFlipDecision.allowFlip()) {
 				action = SignalAction.HOLD;
 				decisionActionReason = "TREND_HOLD_ACTIVE";
 				decisionBlockReason = "TREND_HOLD_ACTIVE";
 				trendHoldReason = "TREND_HOLD_ACTIVE";
 			}
 		}
-		if (current != PositionState.NONE && action != SignalAction.HOLD && !exitReversalConfirmed) {
+		if (current != PositionState.NONE && action != SignalAction.HOLD && confirmedOpposite && !scoreExitConfirmed) {
 			action = SignalAction.HOLD;
-			if (trendAlignedWithPosition) {
-				decisionActionReason = "HOLD_TREND_ALIGNED";
-				decisionBlockReason = "HOLD_TREND_ALIGNED";
-				exitBlockedByTrendAlignedAction = true;
-			} else {
-				decisionActionReason = "EXIT_WAIT_REVERSAL";
-				decisionBlockReason = "EXIT_WAIT_REVERSAL";
-			}
+			decisionActionReason = "HOLD_SCORE_NEUTRAL";
+			decisionBlockReason = "HOLD_SCORE_NEUTRAL";
 		}
 		if (current != PositionState.NONE && action != SignalAction.HOLD) {
 			boolean holdExit = shouldHoldTrendStrong(
@@ -538,8 +413,6 @@ public class CtiLbStrategy {
 					trailState.trailStopHit(),
 					false,
 					confirmedRec,
-					confirm1m,
-					CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
 					strategyProperties.trendHoldMinProfitPct());
 			if (holdExit) {
 				action = SignalAction.HOLD;
@@ -561,20 +434,12 @@ public class CtiLbStrategy {
 			} else {
 				FlipGateResult flipGate = evaluateFlipGate(
 						entryFilterState.qualityScore(),
-						strategyProperties.flipFastQuality(),
-						strategyProperties.flipConfirmBars(),
-						target == PositionState.LONG ? 1 : -1,
-						symbolState.flipConfirmCounter,
-						symbolState.flipConfirmDir);
-				symbolState.flipConfirmCounter = flipGate.flipConfirmCounter();
-				symbolState.flipConfirmDir = flipGate.flipConfirmDir();
+						strategyProperties.flipFastQuality());
 				if (!flipGate.allowFlip()) {
 					action = SignalAction.HOLD;
 					decisionActionReason = "FLIP_BLOCK_QUALITY_GATE";
 					decisionBlockReason = "FLIP_BLOCK_QUALITY_GATE";
 					flipGateReason = flipGate.reason();
-				} else {
-					symbolState.resetFlipConfirm();
 				}
 			}
 		}
@@ -602,24 +467,24 @@ public class CtiLbStrategy {
 		}
 		if (action == SignalAction.HOLD || !"OK_EXECUTED".equals(decisionBlockReason)) {
 			action = SignalAction.HOLD;
-			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+			logDecision(symbol, signal, close, action, confirmedRec, recommendationUsed,
 					recommendationRaw, resolvedQty, entryState, estimatedPnlPct, decisionActionReason,
 					decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-					symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-					trendHoldReason, flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState,
-					trendAlignedWithPosition, exitReversalConfirmCounter, exitBlockedByTrendAlignedAction);
+					qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+					trendHoldReason, flipQualityScore, decisionTpTrailingState,
+					trendAlignedWithPosition, exitBlockedByTrendAlignedAction);
 			return;
 		}
 
 		String minTradeBlockReason = validateMinTrade(symbol, resolvedQty, close);
 		if (minTradeBlockReason != null) {
 			action = SignalAction.HOLD;
-			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+			logDecision(symbol, signal, close, action, confirmedRec, recommendationUsed,
 					recommendationRaw, resolvedQty, entryState, estimatedPnlPct, minTradeBlockReason,
 					"OK_EXECUTED", decisionTrailState, decisionContinuationState, flipGateReason,
-					symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-					trendHoldReason, flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState,
-					trendAlignedWithPosition, exitReversalConfirmCounter, exitBlockedByTrendAlignedAction);
+					qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+					trendHoldReason, flipQualityScore, decisionTpTrailingState,
+					trendAlignedWithPosition, exitBlockedByTrendAlignedAction);
 			return;
 		}
 
@@ -629,12 +494,12 @@ public class CtiLbStrategy {
 			action = SignalAction.HOLD;
 			decisionActionReason = "QTY_ZERO_AFTER_STEP";
 			decisionBlockReason = "QTY_ZERO_AFTER_STEP";
-			logDecision(symbol, signal, close, action, confirm1m, confirmedRec, recUpdate, recommendationUsed,
+			logDecision(symbol, signal, close, action, confirmedRec, recommendationUsed,
 					recommendationRaw, resolvedQty, entryState, estimatedPnlPct, decisionActionReason,
 					decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-					symbolState.flipConfirmCounter, qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-					trendHoldReason, flipQualityScore, flipExtraConfirmApplied, decisionTpTrailingState,
-					trendAlignedWithPosition, exitReversalConfirmCounter, exitBlockedByTrendAlignedAction);
+					qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+					trendHoldReason, flipQualityScore, decisionTpTrailingState,
+					trendAlignedWithPosition, exitBlockedByTrendAlignedAction);
 			return;
 		}
 
@@ -650,28 +515,24 @@ public class CtiLbStrategy {
 		TrailState trailStateForLog = decisionTrailState;
 		ContinuationState continuationStateForLog = decisionContinuationState;
 		String flipGateReasonForLog = flipGateReason;
-		int flipConfirmCounterForLog = symbolState.flipConfirmCounter;
 		int qualityScoreForLogFinal = qualityScoreForLog;
 		String qualityConfirmReasonForLog = qualityConfirmReason;
 		boolean trendHoldActiveForLog = trendHoldActive;
 		String trendHoldReasonForLog = trendHoldReason;
 		int flipQualityScoreForLog = flipQualityScore;
-		boolean flipExtraConfirmAppliedForLog = flipExtraConfirmApplied;
 		TpTrailingState tpTrailingStateForLog = decisionTpTrailingState;
 		final boolean trendAlignedWithPositionFinal = trendAlignedWithPosition;
-		final int exitReversalConfirmCounterFinal = exitReversalConfirmCounter;
 		final boolean exitBlockedByTrendAlignedActionFinal = exitBlockedByTrendAlignedAction;
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					hedgeModeBySymbol.put(symbol, hedgeMode);
-					logDecision(symbol, signal, close, actionForLog, confirm1m, confirmedRecForLog, recUpdate,
+					logDecision(symbol, signal, close, actionForLog, confirmedRecForLog,
 							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
 							estimatedPnlPct, decisionActionReasonForLog, decisionBlock, trailStateForLog,
-							continuationStateForLog, flipGateReasonForLog, flipConfirmCounterForLog,
-							qualityScoreForLogFinal, qualityConfirmReasonForLog, trendHoldActiveForLog,
-							trendHoldReasonForLog, flipQualityScoreForLog, flipExtraConfirmAppliedForLog,
-							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitReversalConfirmCounterFinal,
-							exitBlockedByTrendAlignedActionFinal);
+							continuationStateForLog, flipGateReasonForLog, qualityScoreForLogFinal,
+							qualityConfirmReasonForLog, trendHoldActiveForLog,
+							trendHoldReasonForLog, flipQualityScoreForLog,
+							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitBlockedByTrendAlignedActionFinal);
 					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
 						String correlationId = orderTracker.nextCorrelationId(symbol, "ENTRY");
 						return openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode, correlationId)
@@ -732,20 +593,24 @@ public class CtiLbStrategy {
 				})
 				.doOnError(error -> {
 					LOGGER.warn("Failed to execute CTI LB action {}: {}", actionForLog, error.getMessage());
-					logDecision(symbol, signal, close, SignalAction.HOLD, confirm1m, confirmedRecForLog, recUpdate,
+					logDecision(symbol, signal, close, SignalAction.HOLD, confirmedRecForLog,
 							recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
 							estimatedPnlPct, decisionActionReasonForLog, "ORDER_ERROR", trailStateForLog,
-							continuationStateForLog, flipGateReasonForLog, flipConfirmCounterForLog,
-							qualityScoreForLogFinal, qualityConfirmReasonForLog, trendHoldActiveForLog,
-							trendHoldReasonForLog, flipQualityScoreForLog, flipExtraConfirmAppliedForLog,
-							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitReversalConfirmCounterFinal,
-							exitBlockedByTrendAlignedActionFinal);
+							continuationStateForLog, flipGateReasonForLog, qualityScoreForLogFinal,
+							qualityConfirmReasonForLog, trendHoldActiveForLog,
+							trendHoldReasonForLog, flipQualityScoreForLog,
+							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitBlockedByTrendAlignedActionFinal);
 				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
 	}
 
 	public void onWarmupFiveMinuteCandle(String symbol, Candle candle) {
+		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
+		symbolState.updateFiveMinuteIndicators(candle);
+	}
+
+	public void onClosedFiveMinuteCandle(String symbol, Candle candle) {
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
 		symbolState.updateFiveMinuteIndicators(candle);
 	}
@@ -864,8 +729,7 @@ public class CtiLbStrategy {
 
 	static boolean shouldHoldTrendStrong(CtiDirection side, BigDecimal entryPrice, double close,
 			int fiveMinDir, double ema20, double ema200, boolean emaReady, boolean trailStopHit,
-			boolean stopLossExit, CtiDirection confirmedRec, int confirmCounter, int confirmBars,
-			double trendHoldMinProfitPct) {
+			boolean stopLossExit, CtiDirection confirmedRec, double trendHoldMinProfitPct) {
 		if (side == null || entryPrice == null || entryPrice.signum() <= 0 || close <= 0 || stopLossExit
 				|| trailStopHit) {
 			return false;
@@ -886,12 +750,9 @@ public class CtiLbStrategy {
 		if (!trendStillStrong) {
 			return false;
 		}
-		boolean oppositeStrong = false;
-		if (side == CtiDirection.LONG) {
-			oppositeStrong = confirmedRec == CtiDirection.SHORT && confirmCounter >= confirmBars;
-		} else if (side == CtiDirection.SHORT) {
-			oppositeStrong = confirmedRec == CtiDirection.LONG && confirmCounter >= confirmBars;
-		}
+		boolean oppositeStrong = side == CtiDirection.LONG
+				? confirmedRec == CtiDirection.SHORT
+				: side == CtiDirection.SHORT && confirmedRec == CtiDirection.LONG;
 		return !oppositeStrong;
 	}
 
@@ -919,21 +780,6 @@ public class CtiLbStrategy {
 		return false;
 	}
 
-	private int resolveExitReversalConfirmCounter(SymbolState state, PositionState current, int fiveMinDir,
-			CtiDirection confirmedRec, double bfr1m, double bfrPrev) {
-		ExitReversalConfirm update = updateExitReversalConfirm(
-				state.exitReversalConfirmCounter,
-				state.exitReversalConfirmDir,
-				current,
-				fiveMinDir,
-				confirmedRec,
-				bfr1m,
-				bfrPrev);
-		state.exitReversalConfirmCounter = update.counter();
-		state.exitReversalConfirmDir = update.dir();
-		return update.counter();
-	}
-
 	private static double resolveProfitPct(CtiDirection side, BigDecimal entryPrice, double close) {
 		if (side == null || entryPrice == null || entryPrice.signum() <= 0 || close <= 0) {
 			return Double.NaN;
@@ -951,42 +797,18 @@ public class CtiLbStrategy {
 		return reason != null && reason.startsWith("EXIT_TAKE_PROFIT");
 	}
 
-	static ExitHoldDecision evaluateExitHoldDecision(boolean stopLossExit, boolean exitReversalConfirmed,
+	static ExitHoldDecision evaluateExitHoldDecision(boolean stopLossExit, boolean scoreExitConfirmed,
 			boolean trendAlignedWithPosition) {
 		if (stopLossExit) {
 			return new ExitHoldDecision(false, null, false);
 		}
-		if (!exitReversalConfirmed) {
+		if (!scoreExitConfirmed) {
 			if (trendAlignedWithPosition) {
 				return new ExitHoldDecision(true, "HOLD_TREND_ALIGNED", true);
 			}
 			return new ExitHoldDecision(true, "EXIT_WAIT_REVERSAL", false);
 		}
 		return new ExitHoldDecision(false, null, false);
-	}
-
-	static ExitReversalConfirm updateExitReversalConfirm(int currentCounter, int currentDir, PositionState current,
-			int fiveMinDir, CtiDirection confirmedRec, double bfr1m, double bfrPrev) {
-		if (current == PositionState.NONE) {
-			return new ExitReversalConfirm(0, 0);
-		}
-		int targetDir = current == PositionState.LONG ? -1 : 1;
-		boolean trendOpposite = fiveMinDir == targetDir;
-		boolean bfrReversal = false;
-		if (Double.isFinite(bfr1m) && Double.isFinite(bfrPrev)) {
-			bfrReversal = targetDir == -1 ? bfr1m < bfrPrev : bfr1m > bfrPrev;
-		}
-		boolean confirmedOpposite = targetDir == -1
-				? confirmedRec == CtiDirection.SHORT
-				: confirmedRec == CtiDirection.LONG;
-		boolean reversalCandidate = trendOpposite && (confirmedOpposite || bfrReversal);
-		if (!reversalCandidate) {
-			return new ExitReversalConfirm(0, 0);
-		}
-		if (currentDir != targetDir) {
-			return new ExitReversalConfirm(1, targetDir);
-		}
-		return new ExitReversalConfirm(currentCounter + 1, targetDir);
 	}
 
 	static int resolveDir(CtiDirection direction) {
@@ -1054,17 +876,13 @@ public class CtiLbStrategy {
 	}
 
 	static TrendHoldFlipDecision evaluateTrendHoldFlipDecision(boolean trendHoldActive, int confirmedRecDir,
-			int oppositeDir, int flipQualityScore, int confirm1m, int confirmBars, int flipExtraConfirmBars,
-			int flipQualityMin) {
+			int oppositeDir, int flipQualityScore, int flipQualityMin) {
 		if (!trendHoldActive) {
-			return new TrendHoldFlipDecision(true, flipQualityScore, false);
+			return new TrendHoldFlipDecision(true, flipQualityScore);
 		}
-		int requiredConfirm = confirmBars + Math.max(0, flipExtraConfirmBars);
-		boolean extraConfirmApplied = confirm1m < requiredConfirm;
 		boolean allowFlip = confirmedRecDir == oppositeDir
-				&& flipQualityScore >= flipQualityMin
-				&& confirm1m >= requiredConfirm;
-		return new TrendHoldFlipDecision(allowFlip, flipQualityScore, extraConfirmApplied);
+				&& flipQualityScore >= flipQualityMin;
+		return new TrendHoldFlipDecision(allowFlip, flipQualityScore);
 	}
 
 	private int resolveFlipQualityScore(PositionState current, double close, EntryFilterState entryFilterState,
@@ -1099,31 +917,15 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} minutesSinceFlip={} inArming={} lateBlocked={} lateIgnoredPullback={} lateIgnoredMoveGate={} flipPrice={} movedDirPct={} chaseRisk={} prevClose1m={} pullbackTriggered={} pullbackExtraOk={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} confirmBarsUsed={} confirmCounter={} scoreConfirmBoosted={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} confirmBarsUsedDynamic={} qualityBlockReason={} lowQualityExtraConfirm={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
 				entryFilterState.flipTimeMs() == 0L ? "NA" : entryFilterState.flipTimeMs(),
-				Double.isNaN(entryFilterState.minutesSinceFlip()) ? "NA" : String.format("%.2f",
-						entryFilterState.minutesSinceFlip()),
-				entryFilterState.inArming(),
-				entryFilterState.lateBlocked(),
-				entryFilterState.lateBlockedIgnoredPullback(),
-				entryFilterState.lateBlockedIgnoredMoveGate(),
-				entryFilterState.flipPrice() == 0.0 ? "NA" : String.format("%.8f", entryFilterState.flipPrice()),
-				Double.isNaN(entryFilterState.movedDirPct()) ? "NA" : String.format("%.4f",
-						entryFilterState.movedDirPct()),
-				entryFilterState.chaseRisk(),
 				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose),
-				entryFilterState.pullbackTriggered(),
-				entryFilterState.pullbackExtraOk(),
 				entryFilterState.scoreAligned(),
 				entryFilterState.entryTrigger(),
 				entryFilterState.triggerReason(),
-				entryDecision.entryMode(),
-				entryDecision.confirmBarsUsed(),
-				entryDecision.confirmCounter(),
-				entryDecision.scoreConfirmBoosted(),
 				entryDecision.blockReason(),
 				Double.isNaN(entryFilterState.ema20_1m()) ? "NA" : String.format("%.8f", entryFilterState.ema20_1m()),
 				Double.isNaN(entryFilterState.ema200_5m()) ? "NA" : String.format("%.8f",
@@ -1141,128 +943,50 @@ public class CtiLbStrategy {
 				entryFilterState.rsiOk(),
 				entryFilterState.volOk(),
 				entryFilterState.atrOk(),
-				entryFilterState.confirmBarsUsedDynamic(),
-				entryFilterState.qualityBlockReason(),
-				entryFilterState.lowQualityExtraConfirmApplied());
+				entryFilterState.qualityBlockReason());
 	}
 
-	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double bfr1m, double bfrPrev,
-			double prevClose, double close, double open, double volume1m, long nowMs, SymbolState state) {
+	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double close, double volume1m,
+			long nowMs, SymbolState state) {
 		EntryFilterInputs inputs = new EntryFilterInputs(
 				fiveMinDir,
 				score1m,
-				bfr1m,
-				bfrPrev,
-				prevClose,
 				close,
-				open,
 				volume1m,
 				nowMs,
 				state.fiveMinFlipTimeMs,
 				state.fiveMinFlipPrice,
 				state.ema20_1mValue,
-				state.ema20_1m.isReady(),
+				state.isEma20Ready(),
 				state.ema200_5mValue,
-				state.ema200_5m.isReady(),
+				state.isEma200Ready(),
 				state.rsi9Value,
-				state.rsi9_1m.isReady(),
+				state.isRsiReady(),
 				state.volumeSma10Value,
-				state.volumeSma10_1m.isReady(),
+				state.isVolumeSmaReady(),
 				state.atr14Value,
-				state.atr14_1m.isReady(),
+				state.isAtrReady(),
 				state.atrSma20Value,
-				state.atrSma20_1m.isReady());
+				state.isAtrSmaReady());
 		return buildEntryFilterState(inputs, strategyProperties);
 	}
 
 	static EntryFilterState buildEntryFilterState(EntryFilterInputs inputs, StrategyProperties properties) {
-		long armingWindowMs = properties.armingWindowMinutes() * 60_000L;
-		long lateLimitMs = properties.lateLimitMinutes() * 60_000L;
 		boolean hasDir = inputs.fiveMinDir() != 0;
-		long sinceFlipMs = inputs.fiveMinFlipTimeMs() == 0L ? Long.MAX_VALUE : inputs.nowMs() - inputs.fiveMinFlipTimeMs();
-		boolean inArming = hasDir && sinceFlipMs <= armingWindowMs;
-		double minutesSinceFlip = inputs.fiveMinFlipTimeMs() == 0L ? Double.NaN : sinceFlipMs / 60000.0;
-		double movedDirPct = Double.NaN;
-		if (inputs.fiveMinFlipPrice() > 0) {
-			double movedSinceFlipPct = (inputs.close() - inputs.fiveMinFlipPrice()) / inputs.fiveMinFlipPrice() * 100.0;
-			movedDirPct = inputs.fiveMinDir() == 1
-					? movedSinceFlipPct
-					: (inputs.fiveMinFlipPrice() - inputs.close()) / inputs.fiveMinFlipPrice() * 100.0;
-		}
-		boolean prevCloseValid = !Double.isNaN(inputs.prevClose());
-		boolean pullbackBaseLong = inputs.fiveMinDir() == 1 && prevCloseValid
-				&& inputs.prevClose() < inputs.bfrPrev() && inputs.close() > inputs.bfr1m();
-		boolean pullbackBaseShort = inputs.fiveMinDir() == -1 && prevCloseValid
-				&& inputs.prevClose() > inputs.bfrPrev() && inputs.close() < inputs.bfr1m();
-		double openValue = inputs.open();
-		boolean openValid = openValue > 0 && Double.isFinite(openValue);
-		boolean candleRed = openValid
-				? inputs.close() < openValue
-				: prevCloseValid && inputs.close() < inputs.prevClose();
-		boolean candleGreen = openValid
-				? inputs.close() > openValue
-				: prevCloseValid && inputs.close() > inputs.prevClose();
-		boolean nearEma20 = inputs.ema20Ready()
-				&& Double.isFinite(inputs.ema20_1m())
-				&& inputs.close() > 0
-				&& Math.abs(inputs.close() - inputs.ema20_1m()) / inputs.close() <= 0.0015;
-		boolean pullbackExtraOk = false;
-		if (inputs.fiveMinDir() == 1) {
-			pullbackExtraOk = nearEma20 || candleRed;
-		} else if (inputs.fiveMinDir() == -1) {
-			pullbackExtraOk = nearEma20 || candleGreen;
-		}
-		boolean pullbackTriggered = false;
-		if (inputs.fiveMinDir() == 1) {
-			pullbackTriggered = pullbackBaseLong && pullbackExtraOk;
-		} else if (inputs.fiveMinDir() == -1) {
-			pullbackTriggered = pullbackBaseShort && pullbackExtraOk;
-		}
 		boolean scoreAlignedLong = inputs.score1m() == 1;
 		boolean scoreAlignedShort = inputs.score1m() == -1;
 		boolean entryTrigger = false;
 		String triggerReason = "NONE";
 		boolean scoreAligned = false;
-
-		boolean pullbackQualityOk = true;
-		if (inputs.rsiReady()) {
-			if (inputs.fiveMinDir() == 1 && inputs.rsi9() >= 80.0) {
-				pullbackQualityOk = false;
-			} else if (inputs.fiveMinDir() == -1 && inputs.rsi9() <= 20.0) {
-				pullbackQualityOk = false;
-			}
-		}
-		if (pullbackQualityOk && inputs.atrReady() && inputs.atrSmaReady() && inputs.atrSma20() > 0) {
-			if (inputs.atr14() > inputs.atrSma20() * 2.5) {
-				pullbackQualityOk = false;
-			}
-		}
-
-		boolean pullbackAllowed = pullbackTriggered && pullbackQualityOk;
 		if (inputs.fiveMinDir() == 1) {
 			scoreAligned = scoreAlignedLong;
-			entryTrigger = scoreAlignedLong || pullbackAllowed;
+			entryTrigger = scoreAlignedLong;
 		} else if (inputs.fiveMinDir() == -1) {
 			scoreAligned = scoreAlignedShort;
-			entryTrigger = scoreAlignedShort || pullbackAllowed;
+			entryTrigger = scoreAlignedShort;
 		}
 
-		LateBlockDecision lateBlockDecision = resolveLateBlockDecision(
-				hasDir,
-				sinceFlipMs,
-				lateLimitMs,
-				pullbackTriggered,
-				movedDirPct,
-				properties.movedDirPctLateGate());
-
-		boolean movedDirGateHit = properties.movedDirPctLateGate() != null
-				&& !Double.isNaN(movedDirPct)
-				&& movedDirPct >= properties.movedDirPctLateGate().doubleValue();
-		boolean chaseRisk = lateBlockDecision.lateBlocked() || movedDirGateHit;
-
-		if (pullbackAllowed) {
-			triggerReason = "PULLBACK";
-		} else if (scoreAligned) {
+		if (scoreAligned) {
 			triggerReason = "SCORE";
 		}
 		EntryQualityEvaluation qualityEvaluation = evaluateEntryQuality(
@@ -1283,42 +1007,12 @@ public class CtiLbStrategy {
 				inputs.atrSmaReady(),
 				entryTrigger,
 				properties);
-		int baseConfirmBarsUsed = inArming
-				? properties.confirmBarsEarly()
-				: properties.confirmBarsNormal();
-		int confirmBarsUsedDynamic = resolveConfirmBarsUsedDynamic(
-				baseConfirmBarsUsed,
-				entryTrigger,
-				qualityEvaluation,
-				properties);
-		return new EntryFilterState(inputs.fiveMinDir(), inArming, lateBlockDecision.lateBlocked(),
-				lateBlockDecision.ignoredPullback(), lateBlockDecision.ignoredMoveGate(), movedDirPct,
-				chaseRisk, entryTrigger, pullbackTriggered, pullbackExtraOk, pullbackQualityOk, scoreAligned,
-				triggerReason, inputs.fiveMinFlipTimeMs(), minutesSinceFlip, inputs.fiveMinFlipPrice(),
-				inputs.ema20_1m(), inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(),
-				inputs.atr14(), inputs.atrSma20(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
+		return new EntryFilterState(inputs.fiveMinDir(), entryTrigger, scoreAligned,
+				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_1m(),
+				inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(), inputs.atr14(),
+				inputs.atrSma20(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
 				qualityEvaluation.ema20Ok(), qualityEvaluation.rsiOk(), qualityEvaluation.volOk(),
-				qualityEvaluation.atrOk(), confirmBarsUsedDynamic, qualityEvaluation.blockReason(),
-				qualityEvaluation.lowQualityExtraConfirmApplied());
-	}
-
-	static LateBlockDecision resolveLateBlockDecision(boolean hasDir, long sinceFlipMs, long lateLimitMs,
-			boolean pullbackTriggered, double movedDirPct, BigDecimal movedDirPctLateGate) {
-		boolean lateLimitExceeded = hasDir && sinceFlipMs > lateLimitMs;
-		boolean ignoredMoveGate = false;
-		boolean ignoredPullback = false;
-		boolean gatePassed = true;
-		if (lateLimitExceeded && movedDirPctLateGate != null) {
-			if (Double.isNaN(movedDirPct) || Math.abs(movedDirPct) < movedDirPctLateGate.doubleValue()) {
-				gatePassed = false;
-				ignoredMoveGate = true;
-			}
-		}
-		if (lateLimitExceeded && pullbackTriggered) {
-			ignoredPullback = true;
-		}
-		boolean lateBlocked = lateLimitExceeded && gatePassed && !pullbackTriggered;
-		return new LateBlockDecision(lateBlocked, ignoredPullback, ignoredMoveGate);
+				qualityEvaluation.atrOk(), qualityEvaluation.blockReason());
 	}
 
 	static EntryQualityEvaluation evaluateEntryQuality(
@@ -1342,8 +1036,8 @@ public class CtiLbStrategy {
 		boolean ema200Ok = ema200Ready && ((fiveMinDir == 1 && close > ema200) || (fiveMinDir == -1 && close < ema200));
 		boolean ema20Ok = ema20Ready && ((fiveMinDir == 1 && close > ema20) || (fiveMinDir == -1 && close < ema20));
 		boolean rsiOk = rsiReady
-				&& ((fiveMinDir == 1 && rsi9 >= properties.rsiLongMin() && rsi9 <= properties.rsiLongMax())
-						|| (fiveMinDir == -1 && rsi9 >= properties.rsiShortMin() && rsi9 <= properties.rsiShortMax()));
+				&& ((fiveMinDir == 1 && rsi9 >= 45.0 && rsi9 <= 65.0)
+						|| (fiveMinDir == -1 && rsi9 >= 35.0 && rsi9 <= 55.0));
 		boolean volOk = volReady && volSma10 > 0 && volume > volSma10 * properties.volSpikeMult();
 		boolean atrOk = atrReady && atrSmaReady && atrSma20 > 0 && atr14 < atrSma20 * properties.atrCapMult();
 
@@ -1365,33 +1059,27 @@ public class CtiLbStrategy {
 		}
 		int clamped = Math.max(0, Math.min(100, score));
 		String blockReason = null;
-		if (entryTrigger && properties.extremeRsiBlock() && rsiReady) {
-			boolean extremeRsi = (fiveMinDir == 1 && rsi9 >= properties.extremeRsiHigh())
-					|| (fiveMinDir == -1 && rsi9 <= properties.extremeRsiLow());
+		if (entryTrigger && rsiReady) {
+			boolean extremeRsi = rsi9 > 75.0 || rsi9 < 25.0;
 			if (extremeRsi) {
 				blockReason = "ENTRY_BLOCK_EXTREME_RSI";
 			}
+		}
+		int qualityMin = properties.entryQualityMin();
+		if (entryTrigger && blockReason == null && atrReady && atrSmaReady && atrSma20 > 0) {
+			if (atr14 < atrSma20 * 0.8) {
+				qualityMin = Math.max(0, qualityMin - 5);
+			}
+		}
+		if (entryTrigger && blockReason == null && qualityMin > 0 && clamped < qualityMin) {
+			blockReason = "ENTRY_BLOCK_LOW_QUALITY";
 		}
 		if (entryTrigger && blockReason == null && atrReady && atrSmaReady && atrSma20 > 0) {
 			if (atr14 > atrSma20 * properties.extremeAtrBlockMult()) {
 				blockReason = "ENTRY_BLOCK_EXTREME_ATR";
 			}
 		}
-		boolean lowQualityExtraConfirmApplied = entryTrigger && clamped < properties.entryQualityMin();
-		return new EntryQualityEvaluation(clamped, ema200Ok, ema20Ok, rsiOk, volOk, atrOk, blockReason,
-				lowQualityExtraConfirmApplied);
-	}
-
-	static int resolveConfirmBarsUsedDynamic(int baseConfirmBars, boolean entryTrigger,
-			EntryQualityEvaluation evaluation, StrategyProperties properties) {
-		int confirmBars = Math.max(1, baseConfirmBars);
-		if (evaluation == null || !entryTrigger) {
-			return confirmBars;
-		}
-		if (evaluation.lowQualityExtraConfirmApplied()) {
-			confirmBars += Math.max(0, properties.lowQualityExtraConfirm());
-		}
-		return Math.max(1, confirmBars);
+		return new EntryQualityEvaluation(clamped, ema200Ok, ema20Ok, rsiOk, volOk, atrOk, blockReason);
 	}
 
 	static ContinuationDecision evaluateContinuationDecision(CtiDirection side, int fiveMinDir, int score1m,
@@ -1438,84 +1126,35 @@ public class CtiLbStrategy {
 		return new ContinuationDecision(active, startTime, best, bars, retracePct, holdApplied);
 	}
 
-	static FlipGateResult evaluateFlipGate(int qualityScore, int flipFastQuality, int flipConfirmBars, int targetDir,
-			int currentCounter, int currentDir) {
+	static FlipGateResult evaluateFlipGate(int qualityScore, int flipFastQuality) {
 		if (qualityScore >= flipFastQuality) {
-			return new FlipGateResult(true, 0, 0, "FAST_QUALITY");
+			return new FlipGateResult(true, "FAST_QUALITY");
 		}
-		int counter = currentCounter;
-		int dir = currentDir;
-		if (dir != targetDir) {
-			counter = 0;
-			dir = targetDir;
-		}
-		counter += 1;
-		if (counter < Math.max(1, flipConfirmBars)) {
-			String reason = String.format("CONFIRM_%d/%d", counter, Math.max(1, flipConfirmBars));
-			return new FlipGateResult(false, counter, dir, reason);
-		}
-		return new FlipGateResult(true, 0, 0, "CONFIRMED");
+		return new FlipGateResult(false, "QUALITY_BELOW_FAST");
 	}
 
 	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state, EntryFilterState entryFilterState) {
-		EntryDecision decision = evaluateEntryDecision(current, entryFilterState, state.confirmCounter,
-				strategyProperties);
-		state.confirmCounter = decision.confirmCounter();
-		return decision;
+		return evaluateEntryDecision(current, entryFilterState, strategyProperties);
 	}
 
 	static EntryDecision evaluateEntryDecision(PositionState current, EntryFilterState entryFilterState,
-			int confirmCounter, StrategyProperties properties) {
+			StrategyProperties properties) {
 		if (current != PositionState.NONE) {
-			return new EntryDecision(null, "NORMAL", 0, 0, false, null, null);
+			return new EntryDecision(null, null, null);
 		}
 		if (entryFilterState.fiveMinDir() == 0) {
-			return new EntryDecision(null, "NORMAL", 0, 0, false, "NO_5M_SUPPORT", "NO_5M_SUPPORT");
-		}
-		if (entryFilterState.lateBlocked()) {
-			return new EntryDecision(null, "NORMAL", 0, 0, false, "ENTRY_BLOCK_LATE", "ENTRY_BLOCK_LATE");
+			return new EntryDecision(null, "NO_5M_SUPPORT", "NO_5M_SUPPORT");
 		}
 		if (entryFilterState.qualityBlockReason() != null) {
-			return new EntryDecision(null, "NORMAL", 0, 0, false, entryFilterState.qualityBlockReason(),
+			return new EntryDecision(null, entryFilterState.qualityBlockReason(),
 					entryFilterState.qualityBlockReason());
 		}
-		BigDecimal chaseMaxMovePct = properties.chaseMaxMovePct();
-		boolean chaseBlocked = !entryFilterState.inArming()
-				&& chaseMaxMovePct != null
-				&& !Double.isNaN(entryFilterState.movedDirPct())
-				&& entryFilterState.movedDirPct() > chaseMaxMovePct.doubleValue();
-		if (chaseBlocked) {
-			return new EntryDecision(null, "NORMAL", 0, 0, false, "ENTRY_BLOCK_CHASE",
-					"ENTRY_BLOCK_CHASE");
-		}
-		boolean pullbackAllowed = entryFilterState.pullbackTriggered() && entryFilterState.pullbackQualityOk();
-		int confirmBarsUsed = entryFilterState.confirmBarsUsedDynamic();
-		boolean scoreConfirmBoosted = false;
-		if (pullbackAllowed) {
-			confirmBarsUsed = 1;
-		} else if (entryFilterState.scoreAligned() && entryFilterState.chaseRisk()) {
-			confirmBarsUsed = Math.max(confirmBarsUsed, 2);
-			scoreConfirmBoosted = true;
-		}
 		if (entryFilterState.entryTrigger()) {
-			confirmCounter += 1;
-		} else {
-			confirmCounter = 0;
-		}
-		if (confirmCounter >= Math.max(1, confirmBarsUsed)) {
 			CtiDirection confirmed = entryFilterState.fiveMinDir() == 1 ? CtiDirection.LONG : CtiDirection.SHORT;
-			String entryMode = pullbackAllowed ? "PULLBACK" : "NORMAL";
-			String reason;
-			if (entryFilterState.inArming()) {
-				reason = pullbackAllowed ? "ENTRY_ARMED_PULLBACK" : "ENTRY_ARMED_SCORE";
-			} else {
-				reason = pullbackAllowed ? "ENTRY_PULLBACK" : "ENTRY_NORMAL_SCORE_CONFIRMED";
-			}
-			return new EntryDecision(confirmed, entryMode, confirmBarsUsed, confirmCounter, scoreConfirmBoosted,
-					null, reason);
+			String reason = "ENTRY_NORMAL_SCORE_CONFIRMED";
+			return new EntryDecision(confirmed, null, reason);
 		}
-		String entryMode = pullbackAllowed ? "PULLBACK" : "NORMAL";
-		return new EntryDecision(null, entryMode, confirmBarsUsed, confirmCounter, scoreConfirmBoosted, null, null);
+		return new EntryDecision(null, null, null);
 	}
 
 	private EntryDecision applyPendingFlipGate(String symbol, PositionState current, EntryDecision entryDecision,
@@ -1546,20 +1185,10 @@ public class CtiLbStrategy {
 
 	record EntryFilterState(
 			int fiveMinDir,
-			boolean inArming,
-			boolean lateBlocked,
-			boolean lateBlockedIgnoredPullback,
-			boolean lateBlockedIgnoredMoveGate,
-			double movedDirPct,
-			boolean chaseRisk,
 			boolean entryTrigger,
-			boolean pullbackTriggered,
-			boolean pullbackExtraOk,
-			boolean pullbackQualityOk,
 			boolean scoreAligned,
 			String triggerReason,
 			long flipTimeMs,
-			double minutesSinceFlip,
 			double flipPrice,
 			double ema20_1m,
 			double ema200_5m,
@@ -1574,19 +1203,13 @@ public class CtiLbStrategy {
 			boolean rsiOk,
 			boolean volOk,
 			boolean atrOk,
-			int confirmBarsUsedDynamic,
-			String qualityBlockReason,
-			boolean lowQualityExtraConfirmApplied) {
+			String qualityBlockReason) {
 	}
 
 	record EntryFilterInputs(
 			int fiveMinDir,
 			int score1m,
-			double bfr1m,
-			double bfrPrev,
-			double prevClose,
 			double close,
-			double open,
 			double volume1m,
 			long nowMs,
 			long fiveMinFlipTimeMs,
@@ -1605,31 +1228,20 @@ public class CtiLbStrategy {
 			boolean atrSmaReady) {
 	}
 
-	record LateBlockDecision(boolean lateBlocked, boolean ignoredPullback, boolean ignoredMoveGate) {
-	}
-
 	record EntryDecision(
 			CtiDirection confirmedRec,
-			String entryMode,
-			int confirmBarsUsed,
-			int confirmCounter,
-			boolean scoreConfirmBoosted,
 			String blockReason,
 			String decisionActionReason) {
 		static EntryDecision defaultDecision() {
-			return new EntryDecision(null, "NORMAL", 0, 0, false, null, null);
+			return new EntryDecision(null, null, null);
 		}
 
 		EntryDecision withBlockReason(String reason) {
-			return new EntryDecision(confirmedRec, entryMode, confirmBarsUsed, confirmCounter, scoreConfirmBoosted,
-					reason, decisionActionReason);
+			return new EntryDecision(confirmedRec, reason, decisionActionReason);
 		}
 	}
 
 	record ExitHoldDecision(boolean hold, String reason, boolean exitBlockedByTrendAligned) {
-	}
-
-	record ExitReversalConfirm(int counter, int dir) {
 	}
 
 	private record TrailState(
@@ -1675,7 +1287,7 @@ public class CtiLbStrategy {
 			boolean holdApplied) {
 	}
 
-	record FlipGateResult(boolean allowFlip, int flipConfirmCounter, int flipConfirmDir, String reason) {
+	record FlipGateResult(boolean allowFlip, String reason) {
 	}
 
 	record EntryQualityEvaluation(
@@ -1685,8 +1297,7 @@ public class CtiLbStrategy {
 			boolean rsiOk,
 			boolean volOk,
 			boolean atrOk,
-			String blockReason,
-			boolean lowQualityExtraConfirmApplied) {
+			String blockReason) {
 	}
 
 	record IndicatorsSnapshot(
@@ -1703,8 +1314,7 @@ public class CtiLbStrategy {
 
 	record TrendHoldFlipDecision(
 			boolean allowFlip,
-			int flipQualityScore,
-			boolean flipExtraConfirmApplied) {
+			int flipQualityScore) {
 	}
 
 	private record TpTrailingState(
@@ -1730,8 +1340,8 @@ public class CtiLbStrategy {
 		private long fiveMinFlipTimeMs;
 		private double fiveMinFlipPrice;
 		private double prevClose1m = Double.NaN;
-		private int confirmCounter;
-		private int exitConfirmCounter;
+		private long last1mCloseTime;
+		private long last5mCloseTime;
 		private double peakPriceSinceEntry = Double.NaN;
 		private double troughPriceSinceEntry = Double.NaN;
 		private boolean trailActive;
@@ -1743,17 +1353,17 @@ public class CtiLbStrategy {
 		private long continuationStartTimeMs;
 		private long continuationEntryTimeMs;
 		private double bestFavorablePriceSinceEntry = Double.NaN;
-		private int flipConfirmCounter;
-		private int flipConfirmDir;
-		private int exitReversalConfirmCounter;
-		private int exitReversalConfirmDir;
-		private final FiveMinuteCandleAggregator fiveMinuteAggregator = new FiveMinuteCandleAggregator();
-		private final EmaIndicator ema20_1m = new EmaIndicator(EMA_20_PERIOD);
-		private final EmaIndicator ema200_5m = new EmaIndicator(EMA_200_PERIOD);
-		private final RsiWilder rsi9_1m = new RsiWilder(RSI_9_PERIOD);
-		private final AtrWilder atr14_1m = new AtrWilder(ATR_14_PERIOD);
-		private final SmaRolling atrSma20_1m = new SmaRolling(ATR_SMA_20_PERIOD);
-		private final SmaRolling volumeSma10_1m = new SmaRolling(VOLUME_SMA_10_PERIOD);
+		private final BarSeries series1m = new BaseBarSeriesBuilder().withName("1m").build();
+		private final BarSeries series5m = new BaseBarSeriesBuilder().withName("5m").build();
+		private final ClosePriceIndicator closePrice1m = new ClosePriceIndicator(series1m);
+		private final ClosePriceIndicator closePrice5m = new ClosePriceIndicator(series5m);
+		private final EMAIndicator ema20_1m = new EMAIndicator(closePrice1m, EMA_20_PERIOD);
+		private final EMAIndicator ema200_5m = new EMAIndicator(closePrice5m, EMA_200_PERIOD);
+		private final RSIIndicator rsi9_1m = new RSIIndicator(closePrice1m, RSI_9_PERIOD);
+		private final ATRIndicator atr14_1m = new ATRIndicator(series1m, ATR_14_PERIOD);
+		private final SMAIndicator atrSma20_1m = new SMAIndicator(atr14_1m, ATR_SMA_20_PERIOD);
+		private final VolumeIndicator volume1m = new VolumeIndicator(series1m);
+		private final SMAIndicator volumeSma10_1m = new SMAIndicator(volume1m, VOLUME_SMA_10_PERIOD);
 		private double ema20_1mValue = Double.NaN;
 		private double ema200_5mValue = Double.NaN;
 		private double rsi9Value = Double.NaN;
@@ -1761,22 +1371,68 @@ public class CtiLbStrategy {
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
 
-		private void updateIndicators(Candle candle) {
-			ema20_1mValue = ema20_1m.update(candle.close());
-			rsi9Value = rsi9_1m.update(candle.close());
-			atr14Value = atr14_1m.update(candle.high(), candle.low(), candle.close());
-			atrSma20Value = atrSma20_1m.update(atr14Value);
-			volumeSma10Value = volumeSma10_1m.update(candle.volume());
-			fiveMinuteAggregator.update(candle)
-					.ifPresent(this::updateFiveMinuteIndicators);
+		private void updateOneMinuteIndicators(Candle candle) {
+			if (candle.closeTime() <= last1mCloseTime) {
+				return;
+			}
+			last1mCloseTime = candle.closeTime();
+			series1m.addBar(new BaseBar(Duration.ofMinutes(1),
+					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
+					candle.open(),
+					candle.high(),
+					candle.low(),
+					candle.close(),
+					candle.volume()));
+			int index = series1m.getEndIndex();
+			ema20_1mValue = ema20_1m.getValue(index).doubleValue();
+			rsi9Value = rsi9_1m.getValue(index).doubleValue();
+			atr14Value = atr14_1m.getValue(index).doubleValue();
+			atrSma20Value = atrSma20_1m.getValue(index).doubleValue();
+			volumeSma10Value = volumeSma10_1m.getValue(index).doubleValue();
 		}
 
 		private void updateFiveMinuteIndicators(Candle candle) {
-			ema200_5mValue = ema200_5m.update(candle.close());
+			if (candle.closeTime() <= last5mCloseTime) {
+				return;
+			}
+			last5mCloseTime = candle.closeTime();
+			series5m.addBar(new BaseBar(Duration.ofMinutes(5),
+					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
+					candle.open(),
+					candle.high(),
+					candle.low(),
+					candle.close(),
+					candle.volume()));
+			int index = series5m.getEndIndex();
+			ema200_5mValue = ema200_5m.getValue(index).doubleValue();
 		}
 
 		private boolean isTrendEmaReady() {
-			return ema20_1m.isReady() && ema200_5m.isReady();
+			return isEma20Ready() && isEma200Ready();
+		}
+
+		private boolean isEma20Ready() {
+			return series1m.getBarCount() >= EMA_20_PERIOD;
+		}
+
+		private boolean isEma200Ready() {
+			return series5m.getBarCount() >= EMA_200_PERIOD;
+		}
+
+		private boolean isRsiReady() {
+			return series1m.getBarCount() >= RSI_9_PERIOD;
+		}
+
+		private boolean isVolumeSmaReady() {
+			return series1m.getBarCount() >= VOLUME_SMA_10_PERIOD;
+		}
+
+		private boolean isAtrReady() {
+			return series1m.getBarCount() >= ATR_14_PERIOD;
+		}
+
+		private boolean isAtrSmaReady() {
+			return series1m.getBarCount() >= ATR_SMA_20_PERIOD;
 		}
 
 		private void resetTrailState() {
@@ -1797,42 +1453,6 @@ public class CtiLbStrategy {
 			continuationStartTimeMs = 0L;
 			continuationEntryTimeMs = 0L;
 			bestFavorablePriceSinceEntry = Double.NaN;
-		}
-
-		private void resetFlipConfirm() {
-			flipConfirmCounter = 0;
-			flipConfirmDir = 0;
-		}
-	}
-
-	private OppositeExitDecision resolveOppositeExit(SymbolState state, PositionState current) {
-		if (current == PositionState.NONE) {
-			state.exitConfirmCounter = 0;
-			return OppositeExitDecision.noExit();
-		}
-		boolean oppositeCandidate = (current == PositionState.LONG && state.lastFiveMinDir == -1)
-				|| (current == PositionState.SHORT && state.lastFiveMinDir == 1);
-		if (oppositeCandidate) {
-			state.exitConfirmCounter += 1;
-		} else {
-			state.exitConfirmCounter = 0;
-		}
-		int confirmBarsExit = Math.max(1, strategyProperties.confirmBarsExit());
-		if (oppositeCandidate && state.exitConfirmCounter >= confirmBarsExit) {
-			String reason = String.format(
-					"EXIT_OPPOSITE_SIGNAL fiveMinDir=%d positionSide=%s confirm=%d/%d",
-					state.lastFiveMinDir,
-					current.name(),
-					state.exitConfirmCounter,
-					confirmBarsExit);
-			return new OppositeExitDecision(true, reason);
-		}
-		return OppositeExitDecision.noExit();
-	}
-
-	private record OppositeExitDecision(boolean exit, String reason) {
-		static OppositeExitDecision noExit() {
-			return new OppositeExitDecision(false, null);
 		}
 	}
 
@@ -1876,18 +1496,57 @@ public class CtiLbStrategy {
 		}
 		String side = current == PositionState.LONG ? "SELL" : "BUY";
 		String positionSide = hedgeMode ? current.name() : "";
-		return orderClient.placeReduceOnlyMarketOrder(symbol, side, quantity, positionSide, correlationId)
-				.retryWhen(Retry.backoff(2, Duration.ofMillis(200))
-						.filter(error -> !(error instanceof IllegalArgumentException)))
-				.filter(CtiLbDecisionEngine::shouldProceedAfterClose)
-				.switchIfEmpty(Mono.error(new IllegalStateException("Close order rejected")));
+		return orderClient.fetchPosition(symbol)
+				.doOnNext(position -> applyExchangePosition(symbol, position, System.currentTimeMillis()))
+				.flatMap(position -> {
+					BigDecimal positionAmt = position.positionAmt();
+					if (positionAmt == null || positionAmt.signum() == 0) {
+						LOGGER.info("EVENT=CLOSE_SKIP_NO_POSITION symbol={} positionAmt={}", symbol, positionAmt);
+						return Mono.empty();
+					}
+					BigDecimal closeQty = resolveCloseQuantity(symbol, positionAmt.abs());
+					if (closeQty == null || closeQty.signum() <= 0) {
+						LOGGER.warn("EVENT=CLOSE_QTY_INVALID symbol={} positionAmt={} closeQty={}", symbol,
+								positionAmt, closeQty);
+						return Mono.empty();
+					}
+					return orderClient.placeReduceOnlyMarketOrder(symbol, side, closeQty, positionSide, correlationId)
+							.doOnError(error -> logReduceOnlyFailure(symbol, correlationId, error))
+							.retryWhen(Retry.backoff(2, Duration.ofMillis(200))
+									.filter(this::isRetryableCloseError))
+							.filter(CtiLbDecisionEngine::shouldProceedAfterClose)
+							.switchIfEmpty(Mono.error(new IllegalStateException("Close order rejected")));
+				});
 	}
 
 	private Mono<OrderResponse> openPosition(String symbol, PositionState target, BigDecimal quantity, boolean hedgeMode,
 			String correlationId) {
 		String side = target == PositionState.LONG ? "BUY" : "SELL";
 		String positionSide = hedgeMode ? target.name() : "";
-		return orderClient.placeMarketOrder(symbol, side, quantity, positionSide, correlationId);
+		return orderClient.placeMarketOrder(symbol, side, quantity, positionSide, correlationId)
+				.doOnError(error -> logOrderPlacementFailure(symbol, correlationId, error));
+	}
+
+	private BigDecimal resolveCloseQuantity(String symbol, BigDecimal positionAmt) {
+		if (positionAmt == null || positionAmt.signum() <= 0) {
+			return null;
+		}
+		BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
+		BigDecimal stepSize = filters != null && filters.stepSize() != null
+				? filters.stepSize()
+				: strategyProperties.quantityStep();
+		if (filters == null) {
+			triggerFilterRefresh();
+		}
+		return floorToStep(positionAmt, stepSize);
+	}
+
+	private BigDecimal floorToStep(BigDecimal value, BigDecimal step) {
+		if (value == null || step == null || step.signum() <= 0) {
+			return value;
+		}
+		BigDecimal ratio = value.divide(step, 0, java.math.RoundingMode.DOWN);
+		return ratio.multiply(step, java.math.MathContext.DECIMAL64);
 	}
 
 	private Mono<OrderResponse> openPosition(String symbol, PositionState target, BigDecimal quantity) {
@@ -1949,16 +1608,16 @@ public class CtiLbStrategy {
 	}
 
 	private void logDecision(String symbol, ScoreSignal signal, double close, SignalAction action,
-			int confirm1m, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate,
-			CtiDirection recommendationUsed, CtiDirection recommendationRaw, BigDecimal resolvedQty,
+			CtiDirection confirmedRec, CtiDirection recommendationUsed, CtiDirection recommendationRaw,
+			BigDecimal resolvedQty,
 			EntryState entryState, Double estimatedPnlPct, String decisionActionReason, String decisionBlockReason,
 			TrailState trailState, ContinuationState continuationState, String flipGateReason,
-			Integer flipConfirmCounter, Integer qualityScore, String qualityConfirmReason, Boolean trendHoldActive,
-			String trendHoldReason, Integer flipQualityScore, Boolean flipExtraConfirmApplied,
+			Integer qualityScore, String qualityConfirmReason, Boolean trendHoldActive,
+			String trendHoldReason, Integer flipQualityScore,
 			TpTrailingState tpTrailingState, Boolean trendAlignedWithPosition,
-			Integer exitReversalConfirmCounter, Boolean exitBlockedByTrendAligned) {
+			Boolean exitBlockedByTrendAligned) {
 		logSummaryIfNeeded(signal.closeTime());
-		String decisionAction = recUpdate.missedMove() ? "RESET_PENDING" : resolveDecisionAction(action);
+		String decisionAction = resolveDecisionAction(action);
 		String insufficientReason = resolveInsufficientReason(signal);
 		BinanceFuturesOrderClient.ExchangePosition exchangePosition = exchangePositions.get(symbol);
 		String exchangePositionSide = resolveExchangePositionSide(exchangePosition);
@@ -1972,16 +1631,13 @@ public class CtiLbStrategy {
 				? ContinuationState.empty()
 				: continuationState;
 		String flipGateReasonValue = flipGateReason == null ? "NA" : flipGateReason;
-		Integer flipConfirmCounterValue = flipConfirmCounter == null ? 0 : flipConfirmCounter;
 		Integer qualityScoreValue = qualityScore == null ? 0 : qualityScore;
 		String qualityConfirmReasonValue = qualityConfirmReason == null ? "NA" : qualityConfirmReason;
 		Boolean trendHoldActiveValue = trendHoldActive == null ? false : trendHoldActive;
 		String trendHoldReasonValue = trendHoldReason == null ? "NA" : trendHoldReason;
 		Integer flipQualityScoreValue = flipQualityScore == null ? 0 : flipQualityScore;
-		Boolean flipExtraConfirmAppliedValue = flipExtraConfirmApplied == null ? false : flipExtraConfirmApplied;
 		TpTrailingState effectiveTpTrailing = tpTrailingState == null ? TpTrailingState.empty() : tpTrailingState;
 		Boolean trendAlignedValue = trendAlignedWithPosition == null ? false : trendAlignedWithPosition;
-		Integer exitReversalConfirmValue = exitReversalConfirmCounter == null ? 0 : exitReversalConfirmCounter;
 		Boolean exitBlockedByTrendAlignedValue = exitBlockedByTrendAligned == null ? false : exitBlockedByTrendAligned;
 		DecisionLogDto dto = new DecisionLogDto(
 				symbol,
@@ -2004,20 +1660,16 @@ public class CtiLbStrategy {
 				signal.score1m(),
 				signal.score5m(),
 				signal.hamCtiScore(),
-				signal.adxBonus(),
-				scoreLong(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
-				scoreShort(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
+				signal.ctiDirScore(),
+				signal.macdScore(),
+				scoreLong(signal.score1m(), signal.score5m(), signal.macdScore()),
+				scoreShort(signal.score1m(), signal.score5m(), signal.macdScore()),
 				signal.adjustedScore(),
 				signal.bias(),
 				recommendationRaw,
 				recommendationUsed,
-				confirm1m,
-				CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
 				confirmedRec,
 				signal.recReason().name(),
-				recUpdate.recPending(),
-				recUpdate.recFirstSeenAtMs(),
-				recUpdate.recFirstSeenPrice(),
 				decisionAction,
 				decisionActionReason,
 				effectiveEnableOrders(),
@@ -2033,17 +1685,13 @@ public class CtiLbStrategy {
 				desync,
 				decisionBlockReason,
 				trendAlignedValue,
-				exitReversalConfirmValue,
 				exitBlockedByTrendAlignedValue,
 				recommendationRaw,
-				confirm1m,
 				formatPositionSide(positionStates.getOrDefault(symbol, PositionState.NONE)),
 				entryState == null ? null : entryState.quantity(),
 				openOrders,
 				pendingFlipDir,
 				cooldownRemainingMs,
-				missedMoveCount.longValue(),
-				confirmHitCount.longValue(),
 				flipCount.longValue(),
 				effectiveTrail.trailActive(),
 				effectiveTrail.peakPriceSinceEntry(),
@@ -2056,14 +1704,12 @@ public class CtiLbStrategy {
 				effectiveContinuation.continuationBars(),
 				effectiveContinuation.bestFavorablePrice(),
 				effectiveContinuation.retracePct(),
-				flipConfirmCounterValue,
 				flipGateReasonValue,
 				qualityScoreValue,
 				qualityConfirmReasonValue,
 				trendHoldActiveValue,
 				trendHoldReasonValue,
 				flipQualityScoreValue,
-				flipExtraConfirmAppliedValue,
 				effectiveTpTrailing.tpTrailingActive(),
 				effectiveTpTrailing.maxPnlSeenPct(),
 				effectiveTpTrailing.trailingStopPct());
@@ -2107,6 +1753,112 @@ public class CtiLbStrategy {
 		return null;
 	}
 
+	private boolean isRetryableCloseError(Throwable error) {
+		if (error instanceof TimeoutException
+				|| error instanceof SocketTimeoutException
+				|| error instanceof IOException
+				|| error instanceof PrematureCloseException
+				|| error instanceof WebClientRequestException) {
+			return true;
+		}
+		Throwable rootCause = rootCause(error);
+		if (rootCause instanceof WebClientResponseException responseException) {
+			int status = responseException.getStatusCode().value();
+			return status >= 500 || status == 429;
+		}
+		if (rootCause instanceof IllegalStateException) {
+			BinanceStatusBody statusBody = extractStatusBody(rootCause.getMessage());
+			if (statusBody != null && statusBody.status() != null) {
+				int status = statusBody.status();
+				if (status >= 500 || status == 429) {
+					return true;
+				}
+			}
+			Integer code = extractBinanceCode(statusBody == null ? null : statusBody.body());
+			if (code != null) {
+				return false;
+			}
+		}
+		return false;
+	}
+
+	private void logReduceOnlyFailure(String symbol, String correlationId, Throwable error) {
+		Throwable rootCause = rootCause(error);
+		LOGGER.error("EVENT=CLOSE_ORDER_FAILED symbol={} correlationId={} error={}", symbol, correlationId,
+				error.getMessage(), error);
+		logBinanceFailureDetails("EVENT=CLOSE_ORDER_FAILED", symbol, correlationId, rootCause);
+	}
+
+	private void logOrderPlacementFailure(String symbol, String correlationId, Throwable error) {
+		Throwable rootCause = rootCause(error);
+		LOGGER.error("EVENT=ORDER_FAILED symbol={} correlationId={} error={}", symbol, correlationId,
+				error.getMessage(), error);
+		logBinanceFailureDetails("EVENT=ORDER_FAILED", symbol, correlationId, rootCause);
+	}
+
+	private void logBinanceFailureDetails(String event, String symbol, String correlationId, Throwable rootCause) {
+		if (rootCause == null) {
+			return;
+		}
+		String message = rootCause.getMessage();
+		BinanceStatusBody statusBody = extractStatusBody(message);
+		if (statusBody != null) {
+			LOGGER.error("{}_DETAILS symbol={} correlationId={} status={} body={}", event, symbol, correlationId,
+					statusBody.status(), statusBody.body());
+		} else if (message != null) {
+			LOGGER.error("{}_DETAILS symbol={} correlationId={} message={}", event, symbol, correlationId, message);
+		}
+		if (rootCause instanceof WebClientResponseException responseException) {
+			LOGGER.error("{}_HTTP symbol={} correlationId={} status={} body={}", event, symbol, correlationId,
+					responseException.getStatusCode().value(), responseException.getResponseBodyAsString());
+		}
+	}
+
+	private Throwable rootCause(Throwable error) {
+		Throwable current = error;
+		while (current != null && current.getCause() != null && current.getCause() != current) {
+			current = current.getCause();
+		}
+		return current;
+	}
+
+	private BinanceStatusBody extractStatusBody(String message) {
+		if (message == null) {
+			return null;
+		}
+		Matcher matcher = BINANCE_STATUS_PATTERN.matcher(message);
+		if (!matcher.find()) {
+			return null;
+		}
+		Integer status = null;
+		try {
+			status = Integer.parseInt(matcher.group(1));
+		} catch (NumberFormatException ignored) {
+			status = null;
+		}
+		int bodyIndex = message.indexOf("body=");
+		String body = bodyIndex >= 0 ? message.substring(bodyIndex + 5).trim() : null;
+		return new BinanceStatusBody(status, body);
+	}
+
+	private Integer extractBinanceCode(String body) {
+		if (body == null) {
+			return null;
+		}
+		Matcher matcher = BINANCE_CODE_PATTERN.matcher(body);
+		if (!matcher.find()) {
+			return null;
+		}
+		try {
+			return Integer.parseInt(matcher.group(1));
+		} catch (NumberFormatException ignored) {
+			return null;
+		}
+	}
+
+	private record BinanceStatusBody(Integer status, String body) {
+	}
+
 	private void logOrderEvent(String event, String symbol, String reason, String side, BigDecimal qty,
 			boolean reduceOnly, String positionSide, String correlationId, OrderResponse response, String error) {
 		String orderId = response == null || response.orderId() == null ? "NA" : response.orderId().toString();
@@ -2127,11 +1879,10 @@ public class CtiLbStrategy {
 	}
 
 	private void logConfigSnapshot() {
-		LOGGER.info("EVENT=CTI_CONFIG notionalUsdt={} maxPositionUsdt={} confirmBars={} minHoldMs={} enableTieBreakBias={}"
+		LOGGER.info("EVENT=CTI_CONFIG notionalUsdt={} maxPositionUsdt={} minHoldMs={} enableTieBreakBias={}"
 				+ " flipCooldownMs={} maxFlipsPer5Min={}",
 				resolveNotionalUsdt(),
 				resolveMaxPositionUsdt(),
-				CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
 				resolveMinHoldMs(),
 				strategyProperties.enableTieBreakBias(),
 				strategyProperties.flipCooldownMs(),
@@ -2235,52 +1986,6 @@ public class CtiLbStrategy {
 		return SignalAction.HOLD;
 	}
 
-	private void logMissedMove(String symbol, RecStreakTracker.RecUpdate recUpdate, ScoreSignal signal,
-			double nowPrice) {
-		if (warmupMode) {
-			return;
-		}
-		MissedMoveLogDto dto = new MissedMoveLogDto(
-				symbol,
-				recUpdate.missedPending(),
-				recUpdate.missedFirstSeenAtMs(),
-				recUpdate.missedFirstSeenPrice(),
-				signal.closeTime(),
-				BigDecimal.valueOf(nowPrice),
-				recUpdate.streakBeforeReset(),
-				CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
-				signal.cti1mValue(),
-				signal.cti5mValue(),
-				signal.adx5m(),
-				missedMoveCount.longValue(),
-				confirmHitCount.longValue(),
-				flipCount.longValue());
-		LOGGER.info(StrategyLogLineBuilder.buildMissedMoveLine(dto));
-	}
-
-	private void logConfirmHit(String symbol, CtiDirection confirmedRec, RecStreakTracker.RecUpdate recUpdate,
-			ScoreSignal signal, double nowPrice) {
-		if (warmupMode) {
-			return;
-		}
-		ConfirmHitLogDto dto = new ConfirmHitLogDto(
-				symbol,
-				confirmedRec,
-				recUpdate.confirmFirstSeenAtMs(),
-				recUpdate.confirmFirstSeenPrice(),
-				signal.closeTime(),
-				BigDecimal.valueOf(nowPrice),
-				recUpdate.streakCount(),
-				CtiLbDecisionEngine.effectiveConfirmBars(strategyProperties.confirmBars()),
-				signal.cti1mValue(),
-				signal.cti5mValue(),
-				signal.adx5m(),
-				missedMoveCount.longValue(),
-				confirmHitCount.longValue(),
-				flipCount.longValue());
-		LOGGER.info(StrategyLogLineBuilder.buildConfirmHitLine(dto));
-	}
-
 	private void logFlip(String symbol, PositionState from, PositionState to, ScoreSignal signal, double price,
 			CtiDirection rec, CtiDirection confirmedRec, SignalAction action, Long orderId) {
 		if (warmupMode) {
@@ -2293,8 +1998,8 @@ public class CtiLbStrategy {
 				signal.closeTime(),
 				BigDecimal.valueOf(price),
 				signal.adjustedScore(),
-				scoreLong(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
-				scoreShort(signal.score1m(), signal.score5m(), signal.adxBonus(), signal.hamCtiScore()),
+				scoreLong(signal.score1m(), signal.score5m(), signal.macdScore()),
+				scoreShort(signal.score1m(), signal.score5m(), signal.macdScore()),
 				rec,
 				confirmedRec,
 				signal.cti1mValue(),
@@ -2305,8 +2010,6 @@ public class CtiLbStrategy {
 				BigDecimal.ZERO,
 				strategyProperties.enableOrders(),
 				orderId == null ? "NA" : orderId.toString(),
-				missedMoveCount.longValue(),
-				confirmHitCount.longValue(),
 				flipCount.longValue());
 		LOGGER.info(StrategyLogLineBuilder.buildFlipLine(dto));
 	}
@@ -2326,30 +2029,11 @@ public class CtiLbStrategy {
 		if (!lastSummaryAtMs.compareAndSet(last, closeTimeMs)) {
 			return;
 		}
-		long missed = missedMoveCount.longValue();
-		long confirmed = confirmHitCount.longValue();
 		long flips = flipCount.longValue();
-		double missRate = (missed + confirmed) > 0 ? (double) missed / (missed + confirmed) : 0.0;
-		double confirmRate = (missed + confirmed) > 0 ? (double) confirmed / (missed + confirmed) : 0.0;
-		String topMissed = buildTopMissed();
 		SummaryLogDto dto = new SummaryLogDto(
-				recTrackers.size(),
-				flips,
-				confirmed,
-				missed,
-				missRate,
-				confirmRate,
-				topMissed);
+				symbolStates.size(),
+				flips);
 		LOGGER.info(StrategyLogLineBuilder.buildSummaryLine(dto));
-	}
-
-	private String buildTopMissed() {
-		java.util.List<String> entries = missedBySymbol.entrySet().stream()
-				.filter(entry -> entry.getValue().longValue() > 0)
-				.sorted((left, right) -> Long.compare(right.getValue().longValue(), left.getValue().longValue()))
-				.map(entry -> entry.getKey() + ":" + entry.getValue().longValue())
-				.toList();
-		return entries.isEmpty() ? "0" : String.join(",", entries);
 	}
 
 	private String resolveDecisionAction(SignalAction action) {
@@ -2475,18 +2159,18 @@ public class CtiLbStrategy {
 		return counter.longValue() % every == 0;
 	}
 
-	private int scoreLong(int score1m, int score5m, int adxBonus, int hamScore) {
+	private int scoreLong(int score1m, int score5m, int macdScore) {
 		int longScore = (score1m > 0 ? 1 : 0) + (score5m > 0 ? 1 : 0);
-		if (hamScore > 0) {
-			longScore += adxBonus;
+		if (macdScore > 0) {
+			longScore += 1;
 		}
 		return longScore;
 	}
 
-	private int scoreShort(int score1m, int score5m, int adxBonus, int hamScore) {
+	private int scoreShort(int score1m, int score5m, int macdScore) {
 		int shortScore = (score1m < 0 ? 1 : 0) + (score5m < 0 ? 1 : 0);
-		if (hamScore < 0) {
-			shortScore += adxBonus;
+		if (macdScore < 0) {
+			shortScore += 1;
 		}
 		return shortScore;
 	}

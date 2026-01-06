@@ -14,18 +14,24 @@ public class StrategyRouter {
 
 	private final StrategyProperties strategyProperties;
 	private final CtiLbStrategy ctiLbStrategy;
+	private final TimeSyncService timeSyncService;
+	private final WarmupProperties warmupProperties;
 	private final CtiScoreCalculator scoreCalculator = new CtiScoreCalculator();
 	private final Map<String, ScoreSignalIndicator> indicators = new ConcurrentHashMap<>();
 	private final Map<String, Long> warmupFinishedAtMs = new ConcurrentHashMap<>();
 	private static final long WARMUP_DUPLICATE_WINDOW_MS = 10_000L;
 
 	public StrategyRouter(StrategyProperties strategyProperties,
-			CtiLbStrategy ctiLbStrategy) {
+			CtiLbStrategy ctiLbStrategy,
+			TimeSyncService timeSyncService,
+			WarmupProperties warmupProperties) {
 		this.strategyProperties = strategyProperties;
 		this.ctiLbStrategy = ctiLbStrategy;
+		this.timeSyncService = timeSyncService;
+		this.warmupProperties = warmupProperties;
 	}
 
-	public void onClosedCandle(String symbol, Candle candle) {
+	public void onClosedOneMinuteCandle(String symbol, Candle candle) {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			LOGGER.debug("Closed candle ignored (active={}, closeTime={})",
 					strategyProperties.active(),
@@ -39,8 +45,24 @@ public class StrategyRouter {
 				&& indicator.isDuplicate1mClose(candle.closeTime())) {
 			return;
 		}
-		ScoreSignal signal = indicator.onClosedCandle(candle);
+		if (shouldSyncLive(symbol)) {
+			timeSyncService.recordClosedOneMinute(symbol, candle)
+					.ifPresent(closed5m -> {
+						indicator.onClosedFiveMinuteCandle(closed5m);
+						ctiLbStrategy.onClosedFiveMinuteCandle(symbol, closed5m);
+					});
+		}
+		ScoreSignal signal = indicator.onClosedOneMinuteCandle(candle);
 		ctiLbStrategy.onScoreSignal(symbol, signal, candle);
+	}
+
+	public void onClosedFiveMinuteCandle(String symbol, Candle candle) {
+		if (strategyProperties.active() != StrategyType.CTI_LB) {
+			return;
+		}
+		if (shouldSyncLive(symbol)) {
+			timeSyncService.recordClosedFiveMinute(symbol, candle);
+		}
 	}
 
 	public void warmupOneMinuteCandle(String symbol, Candle candle) {
@@ -70,6 +92,13 @@ public class StrategyRouter {
 
 	public void markWarmupFinished(String symbol, long finishedAtMs) {
 		warmupFinishedAtMs.put(symbol, finishedAtMs);
+	}
+
+	private boolean shouldSyncLive(String symbol) {
+		if (!warmupProperties.enabled()) {
+			return true;
+		}
+		return warmupFinishedAtMs.containsKey(symbol);
 	}
 
 	private ScoreSignalIndicator resolveIndicator(String symbol) {

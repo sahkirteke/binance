@@ -26,7 +26,8 @@ import reactor.util.retry.Retry;
 public class KlineStreamWatcher {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(KlineStreamWatcher.class);
-	private static final String KLINE_INTERVAL = "1m";
+	private static final String KLINE_INTERVAL_1M = "1m";
+	private static final String KLINE_INTERVAL_5M = "5m";
 
 	private final BinanceProperties binanceProperties;
 	private final StrategyProperties strategyProperties;
@@ -99,9 +100,13 @@ public class KlineStreamWatcher {
 		}
 	}
 
-	private void handleKlineMessage(String payload) {
+	private void handleKlineMessage(String payload, String intervalHint) {
 		try {
-			KlineEvent event = parseKlineEvent(payload);
+			KlineMessage message = parseKlineMessage(payload, intervalHint);
+			if (message == null || message.event() == null || message.interval() == null) {
+				return;
+			}
+			KlineEvent event = message.event();
 			if (event == null || event.kline() == null) {
 				return;
 			}
@@ -111,7 +116,11 @@ public class KlineStreamWatcher {
 			}
 			Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.volume(),
 					kline.closeTime());
-			strategyRouter.onClosedCandle(event.symbol(), candle);
+			if (KLINE_INTERVAL_5M.equals(message.interval())) {
+				strategyRouter.onClosedFiveMinuteCandle(event.symbol(), candle);
+			} else {
+				strategyRouter.onClosedOneMinuteCandle(event.symbol(), candle);
+			}
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse kline message", ex);
 		}
@@ -119,20 +128,22 @@ public class KlineStreamWatcher {
 
 	private void startCombinedStream() {
 		List<String> streams = strategyProperties.resolvedTradeSymbols().stream()
-				.map(String::toLowerCase)
-				.map(symbol -> symbol + "@kline_" + KLINE_INTERVAL)
+				.flatMap(symbol -> java.util.stream.Stream.of(
+						symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1M,
+						symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_5M))
 				.toList();
 		String streamPath = streams.stream().collect(Collectors.joining("/"));
 		String streamBaseUrl = "wss://fstream.binance.com/stream?streams=";
 		URI uri = URI.create(streamBaseUrl + streamPath);
 		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
 				.map(message -> message.getPayloadAsText())
-				.doOnNext(this::handleKlineMessage)
+				.doOnNext(payload -> handleKlineMessage(payload, null))
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
 				.subscribe();
 		subscriptionRef.set(subscription);
-		LOGGER.info("Kline combined stream started for {} interval {}", streams, KLINE_INTERVAL);
+		LOGGER.info("Kline combined stream started for {} interval {}", streams,
+				List.of(KLINE_INTERVAL_1M, KLINE_INTERVAL_5M));
 	}
 
 	private void startTestnetStreams() {
@@ -140,25 +151,43 @@ public class KlineStreamWatcher {
 		List<Disposable> subscriptions = new ArrayList<>();
 		for (String symbol : strategyProperties.resolvedTradeSymbols()) {
 			String lowerSymbol = symbol.toLowerCase();
-			URI uri = URI.create(baseUrl + lowerSymbol + "@kline_" + KLINE_INTERVAL);
-			Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
-					.map(message -> message.getPayloadAsText())
-					.doOnNext(this::handleKlineMessage)
-					.then())
-					.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
-					.subscribe();
-			subscriptions.add(subscription);
-			LOGGER.info("Kline stream started for {} interval {}", lowerSymbol, KLINE_INTERVAL);
+			subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1M));
+			subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_5M));
 		}
 		testnetSubscriptionsRef.set(subscriptions);
 	}
 
-	private KlineEvent parseKlineEvent(String payload) throws Exception {
+	private Disposable startTestnetStream(String baseUrl, String symbol, String interval) {
+		URI uri = URI.create(baseUrl + symbol + "@kline_" + interval);
+		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
+				.map(message -> message.getPayloadAsText())
+				.doOnNext(payload -> handleKlineMessage(payload, interval))
+				.then())
+				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
+				.subscribe();
+		LOGGER.info("Kline stream started for {} interval {}", symbol, interval);
+		return subscription;
+	}
+
+	private KlineMessage parseKlineMessage(String payload, String intervalHint) throws Exception {
 		JsonNode node = objectMapper.readTree(payload);
-		JsonNode dataNode = node.get("data");
-		if (dataNode != null && !dataNode.isNull()) {
-			return objectMapper.treeToValue(dataNode, KlineEvent.class);
+		String interval = intervalHint;
+		JsonNode streamNode = node.get("stream");
+		if (streamNode != null && !streamNode.isNull()) {
+			String stream = streamNode.asText();
+			if (stream != null && stream.contains("@kline_")) {
+				interval = stream.substring(stream.indexOf("@kline_") + 7);
+			}
 		}
-		return objectMapper.treeToValue(node, KlineEvent.class);
+		JsonNode dataNode = node.get("data");
+		KlineEvent event = dataNode != null && !dataNode.isNull()
+				? objectMapper.treeToValue(dataNode, KlineEvent.class)
+				: objectMapper.treeToValue(node, KlineEvent.class);
+		return new KlineMessage(interval, event);
+	}
+
+	private record KlineMessage(
+			String interval,
+			KlineEvent event) {
 	}
 }
