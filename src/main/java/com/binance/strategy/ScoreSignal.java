@@ -8,6 +8,7 @@ import com.binance.strategy.CtiScoreCalculator.RecReason;
 			int hamCtiScore,
 			int ctiDirScore,
 			int macdScore,
+			int finalScore,
 			int score1m,
 			int score5m,
 			double cti1mValue,

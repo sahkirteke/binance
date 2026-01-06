@@ -182,7 +182,10 @@ public class CtiLbStrategy {
 				fiveMinDir,
 				signal.cti1mValue(),
 				signal.cti1mPrev());
-		boolean scoreExitConfirmed = false;
+		int finalScore = signal.finalScore();
+		boolean finalScoreOpposite = (current == PositionState.LONG && finalScore <= -1)
+				|| (current == PositionState.SHORT && finalScore >= 1);
+		boolean scoreExitConfirmed = current != PositionState.NONE && finalScoreOpposite;
 
 		int qualityScoreForLog = entryFilterState.qualityScore();
 		String qualityConfirmReason = null;
@@ -206,11 +209,6 @@ public class CtiLbStrategy {
 		boolean confirmedOpposite = current == PositionState.LONG
 				? confirmedRec == CtiDirection.SHORT
 				: current == PositionState.SHORT && confirmedRec == CtiDirection.LONG;
-		boolean ema20Break = isEma20Break(current, symbolState, close);
-		scoreExitConfirmed = current != PositionState.NONE
-				&& confirmedOpposite
-				&& (!trendAlignedWithPosition || !trendStillStrong)
-				&& ema20Break;
 		TpTrailingState tpTrailingState = resolveTpTrailingState(symbolState, current, entryState, close);
 		TpTrailingState decisionTpTrailingState = tpTrailingState;
 		ContinuationState continuationState = resolveContinuationState(
@@ -400,14 +398,8 @@ public class CtiLbStrategy {
 		}
 		if (current != PositionState.NONE && action != SignalAction.HOLD && confirmedOpposite && !scoreExitConfirmed) {
 			action = SignalAction.HOLD;
-			if (trendAlignedWithPosition) {
-				decisionActionReason = "HOLD_TREND_ALIGNED";
-				decisionBlockReason = "HOLD_TREND_ALIGNED";
-				exitBlockedByTrendAlignedAction = true;
-			} else {
-				decisionActionReason = "EXIT_WAIT_REVERSAL";
-				decisionBlockReason = "EXIT_WAIT_REVERSAL";
-			}
+			decisionActionReason = "HOLD_SCORE_NEUTRAL";
+			decisionBlockReason = "HOLD_SCORE_NEUTRAL";
 		}
 		if (current != PositionState.NONE && action != SignalAction.HOLD) {
 			boolean holdExit = shouldHoldTrendStrong(
@@ -938,17 +930,15 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} inArming={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} entryMode={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
 				entryFilterState.flipTimeMs() == 0L ? "NA" : entryFilterState.flipTimeMs(),
-				entryFilterState.inArming(),
 				Double.isNaN(prevClose) ? "NA" : String.format("%.8f", prevClose),
 				entryFilterState.scoreAligned(),
 				entryFilterState.entryTrigger(),
 				entryFilterState.triggerReason(),
-				entryDecision.entryMode(),
 				entryDecision.blockReason(),
 				Double.isNaN(entryFilterState.ema20_1m()) ? "NA" : String.format("%.8f", entryFilterState.ema20_1m()),
 				Double.isNaN(entryFilterState.ema200_5m()) ? "NA" : String.format("%.8f",
@@ -995,10 +985,7 @@ public class CtiLbStrategy {
 	}
 
 	static EntryFilterState buildEntryFilterState(EntryFilterInputs inputs, StrategyProperties properties) {
-		long armingWindowMs = properties.armingWindowMinutes() * 60_000L;
 		boolean hasDir = inputs.fiveMinDir() != 0;
-		long sinceFlipMs = inputs.fiveMinFlipTimeMs() == 0L ? Long.MAX_VALUE : inputs.nowMs() - inputs.fiveMinFlipTimeMs();
-		boolean inArming = hasDir && sinceFlipMs <= armingWindowMs;
 		boolean scoreAlignedLong = inputs.score1m() == 1;
 		boolean scoreAlignedShort = inputs.score1m() == -1;
 		boolean entryTrigger = false;
@@ -1033,7 +1020,7 @@ public class CtiLbStrategy {
 				inputs.atrSmaReady(),
 				entryTrigger,
 				properties);
-		return new EntryFilterState(inputs.fiveMinDir(), inArming, entryTrigger, scoreAligned,
+		return new EntryFilterState(inputs.fiveMinDir(), entryTrigger, scoreAligned,
 				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_1m(),
 				inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(), inputs.atr14(),
 				inputs.atrSma20(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
@@ -1062,8 +1049,8 @@ public class CtiLbStrategy {
 		boolean ema200Ok = ema200Ready && ((fiveMinDir == 1 && close > ema200) || (fiveMinDir == -1 && close < ema200));
 		boolean ema20Ok = ema20Ready && ((fiveMinDir == 1 && close > ema20) || (fiveMinDir == -1 && close < ema20));
 		boolean rsiOk = rsiReady
-				&& ((fiveMinDir == 1 && rsi9 >= properties.rsiLongMin() && rsi9 <= properties.rsiLongMax())
-						|| (fiveMinDir == -1 && rsi9 >= properties.rsiShortMin() && rsi9 <= properties.rsiShortMax()));
+				&& ((fiveMinDir == 1 && rsi9 >= 45.0 && rsi9 <= 65.0)
+						|| (fiveMinDir == -1 && rsi9 >= 35.0 && rsi9 <= 55.0));
 		boolean volOk = volReady && volSma10 > 0 && volume > volSma10 * properties.volSpikeMult();
 		boolean atrOk = atrReady && atrSmaReady && atrSma20 > 0 && atr14 < atrSma20 * properties.atrCapMult();
 
@@ -1085,12 +1072,20 @@ public class CtiLbStrategy {
 		}
 		int clamped = Math.max(0, Math.min(100, score));
 		String blockReason = null;
-		if (entryTrigger && properties.extremeRsiBlock() && rsiReady) {
-			boolean extremeRsi = (fiveMinDir == 1 && rsi9 >= properties.extremeRsiHigh())
-					|| (fiveMinDir == -1 && rsi9 <= properties.extremeRsiLow());
+		if (entryTrigger && rsiReady) {
+			boolean extremeRsi = rsi9 > 75.0 || rsi9 < 25.0;
 			if (extremeRsi) {
 				blockReason = "ENTRY_BLOCK_EXTREME_RSI";
 			}
+		}
+		int qualityMin = properties.entryQualityMin();
+		if (entryTrigger && blockReason == null && atrReady && atrSmaReady && atrSma20 > 0) {
+			if (atr14 < atrSma20 * 0.8) {
+				qualityMin = Math.max(0, qualityMin - 5);
+			}
+		}
+		if (entryTrigger && blockReason == null && qualityMin > 0 && clamped < qualityMin) {
+			blockReason = "ENTRY_BLOCK_LOW_QUALITY";
 		}
 		if (entryTrigger && blockReason == null && atrReady && atrSmaReady && atrSma20 > 0) {
 			if (atr14 > atrSma20 * properties.extremeAtrBlockMult()) {
@@ -1158,21 +1153,21 @@ public class CtiLbStrategy {
 	static EntryDecision evaluateEntryDecision(PositionState current, EntryFilterState entryFilterState,
 			StrategyProperties properties) {
 		if (current != PositionState.NONE) {
-			return new EntryDecision(null, "NORMAL", null, null);
+			return new EntryDecision(null, null, null);
 		}
 		if (entryFilterState.fiveMinDir() == 0) {
-			return new EntryDecision(null, "NORMAL", "NO_5M_SUPPORT", "NO_5M_SUPPORT");
+			return new EntryDecision(null, "NO_5M_SUPPORT", "NO_5M_SUPPORT");
 		}
 		if (entryFilterState.qualityBlockReason() != null) {
-			return new EntryDecision(null, "NORMAL", entryFilterState.qualityBlockReason(),
+			return new EntryDecision(null, entryFilterState.qualityBlockReason(),
 					entryFilterState.qualityBlockReason());
 		}
 		if (entryFilterState.entryTrigger()) {
 			CtiDirection confirmed = entryFilterState.fiveMinDir() == 1 ? CtiDirection.LONG : CtiDirection.SHORT;
 			String reason = "ENTRY_NORMAL_SCORE_CONFIRMED";
-			return new EntryDecision(confirmed, "NORMAL", null, reason);
+			return new EntryDecision(confirmed, null, reason);
 		}
-		return new EntryDecision(null, "NORMAL", null, null);
+		return new EntryDecision(null, null, null);
 	}
 
 	private EntryDecision applyPendingFlipGate(String symbol, PositionState current, EntryDecision entryDecision,
@@ -1203,7 +1198,6 @@ public class CtiLbStrategy {
 
 	record EntryFilterState(
 			int fiveMinDir,
-			boolean inArming,
 			boolean entryTrigger,
 			boolean scoreAligned,
 			String triggerReason,
@@ -1249,15 +1243,14 @@ public class CtiLbStrategy {
 
 	record EntryDecision(
 			CtiDirection confirmedRec,
-			String entryMode,
 			String blockReason,
 			String decisionActionReason) {
 		static EntryDecision defaultDecision() {
-			return new EntryDecision(null, "NORMAL", null, null);
+			return new EntryDecision(null, null, null);
 		}
 
 		EntryDecision withBlockReason(String reason) {
-			return new EntryDecision(confirmedRec, entryMode, reason, decisionActionReason);
+			return new EntryDecision(confirmedRec, reason, decisionActionReason);
 		}
 	}
 
