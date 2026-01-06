@@ -658,6 +658,9 @@ public class CtiLbStrategy {
 		int flipQualityScoreForLog = flipQualityScore;
 		boolean flipExtraConfirmAppliedForLog = flipExtraConfirmApplied;
 		TpTrailingState tpTrailingStateForLog = decisionTpTrailingState;
+		final boolean trendAlignedWithPositionFinal = trendAlignedWithPosition;
+		final int exitReversalConfirmCounterFinal = exitReversalConfirmCounter;
+		final boolean exitBlockedByTrendAlignedActionFinal = exitBlockedByTrendAlignedAction;
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					hedgeModeBySymbol.put(symbol, hedgeMode);
@@ -667,8 +670,8 @@ public class CtiLbStrategy {
 							continuationStateForLog, flipGateReasonForLog, flipConfirmCounterForLog,
 							qualityScoreForLogFinal, qualityConfirmReasonForLog, trendHoldActiveForLog,
 							trendHoldReasonForLog, flipQualityScoreForLog, flipExtraConfirmAppliedForLog,
-							tpTrailingStateForLog, trendAlignedWithPosition, exitReversalConfirmCounter,
-							exitBlockedByTrendAlignedAction);
+							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitReversalConfirmCounterFinal,
+							exitBlockedByTrendAlignedActionFinal);
 					if (actionForLog == SignalAction.ENTER_LONG || actionForLog == SignalAction.ENTER_SHORT) {
 						String correlationId = orderTracker.nextCorrelationId(symbol, "ENTRY");
 						return openPosition(symbol, targetForLog, resolvedQtyForLog, hedgeMode, correlationId)
@@ -735,8 +738,8 @@ public class CtiLbStrategy {
 							continuationStateForLog, flipGateReasonForLog, flipConfirmCounterForLog,
 							qualityScoreForLogFinal, qualityConfirmReasonForLog, trendHoldActiveForLog,
 							trendHoldReasonForLog, flipQualityScoreForLog, flipExtraConfirmAppliedForLog,
-							tpTrailingStateForLog, trendAlignedWithPosition, exitReversalConfirmCounter,
-							exitBlockedByTrendAlignedAction);
+							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitReversalConfirmCounterFinal,
+							exitBlockedByTrendAlignedActionFinal);
 				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
