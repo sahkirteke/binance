@@ -110,11 +110,21 @@ public class SymbolFilterService {
 	static Map<String, BinanceFuturesOrderClient.SymbolFilters> parseExchangeInfo(
 			BinanceFuturesOrderClient.ExchangeInfoResponse response,
 			Collection<String> symbols) {
+		if (response == null || symbols == null || symbols.isEmpty()) {
+			return new ConcurrentHashMap<>();
+		}
 		Set<String> targets = symbols.stream()
 				.map(SymbolFilterService::normalizeSymbol)
+				.filter(java.util.Objects::nonNull)
 				.collect(java.util.stream.Collectors.toSet());
 		Map<String, BinanceFuturesOrderClient.SymbolFilters> parsed = new ConcurrentHashMap<>();
+		if (response.symbols() == null) {
+			return parsed;
+		}
 		for (BinanceFuturesOrderClient.SymbolInfo info : response.symbols()) {
+			if (info == null) {
+				continue;
+			}
 			if (info.symbol() == null || !targets.contains(normalizeSymbol(info.symbol()))) {
 				continue;
 			}
@@ -125,7 +135,10 @@ public class SymbolFilterService {
 	}
 
 	private static String normalizeSymbol(String symbol) {
-		return symbol == null ? null : symbol.toUpperCase();
+		if (symbol == null || symbol.isBlank()) {
+			return null;
+		}
+		return symbol.toUpperCase();
 	}
 
 	private boolean shouldRefresh() {
