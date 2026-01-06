@@ -466,7 +466,7 @@ public class CtiLbStrategy {
 						entryStates.remove(symbol);
 						recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
 					})
-					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}", decisionActionReason,
+					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}", decisionActionReasonFinal,
 							error.getMessage()))
 					.onErrorResume(error -> Mono.empty())
 					.subscribe();
