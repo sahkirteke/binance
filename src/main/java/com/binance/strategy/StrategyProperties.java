@@ -94,7 +94,16 @@ public record StrategyProperties(
 		double continuationMaxRetracePct,
 		int flipFastQuality,
 		int flipConfirmBars,
-		boolean flipConfirmResetOnNeutral) {
+		boolean flipConfirmResetOnNeutral,
+		boolean trendHoldEnabled,
+		double trendHoldMinAdx,
+		double ema20HoldBufferPct,
+		int flipQualityMin,
+		int flipExtraConfirmBars,
+		int trendHoldMaxBars,
+		boolean tpTrailingEnabled,
+		double tpStartPct,
+		double tpTrailPct) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

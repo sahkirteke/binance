@@ -109,6 +109,15 @@ strategy:
   flip-fast-quality: 70
   flip-confirm-bars: 2
   flip-confirm-reset-on-neutral: true
+  trend-hold-enabled: true
+  trend-hold-min-adx: 20
+  ema20-hold-buffer-pct: 0.0015
+  flip-quality-min: 60
+  flip-extra-confirm-bars: 1
+  trend-hold-max-bars: 40
+  tp-trailing-enabled: true
+  tp-start-pct: 0.25
+  tp-trail-pct: 0.15
 
 warmup:
   enabled: true

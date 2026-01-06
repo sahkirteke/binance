@@ -80,7 +80,14 @@ public final class StrategyLogV1 {
 			Integer flipConfirmCounter,
 			String flipGateReason,
 			Integer qualityScore,
-			String qualityConfirmReason) {
+			String qualityConfirmReason,
+			Boolean trendHoldActive,
+			String trendHoldReason,
+			Integer flipQualityScore,
+			Boolean flipExtraConfirmApplied,
+			Boolean tpTrailingActive,
+			Double maxPnlSeenPct,
+			Double trailingStopPct) {
 	}
 
 	public record ConfirmHitLogDto(

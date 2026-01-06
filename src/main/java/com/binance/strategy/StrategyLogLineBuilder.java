@@ -82,6 +82,13 @@ public final class StrategyLogLineBuilder {
 				.append(" flipGateReason=").append(na(dto.flipGateReason()))
 				.append(" qualityScore=").append(na(dto.qualityScore()))
 				.append(" qualityConfirmReason=").append(na(dto.qualityConfirmReason()))
+				.append(" trendHoldActive=").append(na(dto.trendHoldActive()))
+				.append(" trendHoldReason=").append(na(dto.trendHoldReason()))
+				.append(" flipQualityScore=").append(na(dto.flipQualityScore()))
+				.append(" flipExtraConfirmApplied=").append(na(dto.flipExtraConfirmApplied()))
+				.append(" tpTrailingActive=").append(na(dto.tpTrailingActive()))
+				.append(" maxPnlSeenPct=").append(num(dto.maxPnlSeenPct()))
+				.append(" trailingStopPct=").append(num(dto.trailingStopPct()))
 				.append(" cMissed=").append(nl(dto.cMissed()))
 				.append(" cConfirm=").append(nl(dto.cConfirm()))
 				.append(" cFlip=").append(nl(dto.cFlip()));
