@@ -9,6 +9,7 @@ import org.ta4j.core.indicators.EMAIndicator;
 import org.ta4j.core.indicators.MACDIndicator;
 import org.ta4j.core.indicators.adx.ADXIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
+import org.ta4j.core.num.DoubleNum;
 
 public class ScoreSignalIndicator {
 
@@ -17,12 +18,16 @@ public class ScoreSignalIndicator {
 	private final String symbol;
 	private final CtiScoreCalculator scoreCalculator;
 	private final boolean enableTieBreakBias;
-	private final BarSeries macdSeries = new BaseBarSeriesBuilder().withName("macd1m").build();
+	private final BarSeries macdSeries = new BaseBarSeriesBuilder().withName("macd1m")
+			.withNumType(DoubleNum::valueOf)
+			.build();
 	private final ClosePriceIndicator macdClose = new ClosePriceIndicator(macdSeries);
 	private final MACDIndicator macdIndicator = new MACDIndicator(macdClose, 12, 26);
 	private final SMAIndicator macdSignal = new SMAIndicator(macdIndicator, 9);
 	private final EMAIndicator macdSignal = new EMAIndicator(macdIndicator, 9);
-	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m").build();
+	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m")
+			.withNumType(DoubleNum::valueOf)
+			.build();
 	private final ADXIndicator adxIndicator = new ADXIndicator(adxSeries, ADX_PERIOD);
 	private CtiDirection lastCti5mDir = CtiDirection.NEUTRAL;
 	private Double lastCti5mValue;

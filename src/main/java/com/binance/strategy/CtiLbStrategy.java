@@ -33,6 +33,7 @@ import org.ta4j.core.indicators.SMAIndicator;
 import org.ta4j.core.indicators.ATRIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
 import org.ta4j.core.indicators.helpers.VolumeIndicator;
+import org.ta4j.core.num.DoubleNum;
 
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
@@ -1366,8 +1367,12 @@ public class CtiLbStrategy {
 		private long continuationStartTimeMs;
 		private long continuationEntryTimeMs;
 		private double bestFavorablePriceSinceEntry = Double.NaN;
-		private final BarSeries series1m = new BaseBarSeriesBuilder().withName("1m").build();
-		private final BarSeries series5m = new BaseBarSeriesBuilder().withName("5m").build();
+		private final BarSeries series1m = new BaseBarSeriesBuilder().withName("1m")
+				.withNumType(DoubleNum::valueOf)
+				.build();
+		private final BarSeries series5m = new BaseBarSeriesBuilder().withName("5m")
+				.withNumType(DoubleNum::valueOf)
+				.build();
 		private final ClosePriceIndicator closePrice1m = new ClosePriceIndicator(series1m);
 		private final ClosePriceIndicator closePrice5m = new ClosePriceIndicator(series5m);
 		private final EMAIndicator ema20_1m = new EMAIndicator(closePrice1m, EMA_20_PERIOD);
