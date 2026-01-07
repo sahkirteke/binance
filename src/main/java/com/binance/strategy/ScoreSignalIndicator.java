@@ -9,7 +9,7 @@ import org.ta4j.core.indicators.EMAIndicator;
 import org.ta4j.core.indicators.MACDIndicator;
 import org.ta4j.core.indicators.adx.ADXIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
-import org.ta4j.core.num.DecimalNum;
+import java.math.BigDecimal;
 
 public class ScoreSignalIndicator {
 
@@ -53,11 +53,11 @@ public class ScoreSignalIndicator {
 		last1mCloseTime = candle.closeTime();
 		macdSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(1),
 				java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-				DecimalNum.valueOf(candle.open()),
-				DecimalNum.valueOf(candle.high()),
-				DecimalNum.valueOf(candle.low()),
-				DecimalNum.valueOf(candle.close()),
-				DecimalNum.valueOf(candle.volume())));
+				BigDecimal.valueOf(candle.open()),
+				BigDecimal.valueOf(candle.high()),
+				BigDecimal.valueOf(candle.low()),
+				BigDecimal.valueOf(candle.close()),
+				BigDecimal.valueOf(candle.volume())));
 		int macdIndex = macdSeries.getEndIndex();
 		int macdScore = resolveMacdScore(macdIndex);
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
@@ -128,11 +128,11 @@ public class ScoreSignalIndicator {
 		last1mCloseTime = candle.closeTime();
 		macdSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(1),
 				java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-				DecimalNum.valueOf(candle.open()),
-				DecimalNum.valueOf(candle.high()),
-				DecimalNum.valueOf(candle.low()),
-				DecimalNum.valueOf(candle.close()),
-				DecimalNum.valueOf(candle.volume())));
+				BigDecimal.valueOf(candle.open()),
+				BigDecimal.valueOf(candle.high()),
+				BigDecimal.valueOf(candle.low()),
+				BigDecimal.valueOf(candle.close()),
+				BigDecimal.valueOf(candle.volume())));
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
 		lastCti1mValue = cti1mSignal.bfr();
 		lastCti1mPrev = cti1mSignal.bfrPrev();
@@ -188,11 +188,11 @@ public class ScoreSignalIndicator {
 		last5mCloseTime = fiveMinute.closeTime();
 		adxSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(5),
 				java.time.Instant.ofEpochMilli(fiveMinute.closeTime()).atZone(java.time.ZoneOffset.UTC),
-				DecimalNum.valueOf(fiveMinute.open()),
-				DecimalNum.valueOf(fiveMinute.high()),
-				DecimalNum.valueOf(fiveMinute.low()),
-				DecimalNum.valueOf(fiveMinute.close()),
-				DecimalNum.valueOf(fiveMinute.volume())));
+				BigDecimal.valueOf(fiveMinute.open()),
+				BigDecimal.valueOf(fiveMinute.high()),
+				BigDecimal.valueOf(fiveMinute.low()),
+				BigDecimal.valueOf(fiveMinute.close()),
+				BigDecimal.valueOf(fiveMinute.volume())));
 		adx5mBarsSeen++;
 		int index = adxSeries.getEndIndex();
 		if (adxSeries.getBarCount() >= ADX_PERIOD) {
