@@ -33,7 +33,7 @@ import org.ta4j.core.indicators.SMAIndicator;
 import org.ta4j.core.indicators.ATRIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
 import org.ta4j.core.indicators.helpers.VolumeIndicator;
-import org.ta4j.core.num.DoubleNum;
+import org.ta4j.core.num.DecimalNum;
 
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
@@ -1367,12 +1367,8 @@ public class CtiLbStrategy {
 		private long continuationStartTimeMs;
 		private long continuationEntryTimeMs;
 		private double bestFavorablePriceSinceEntry = Double.NaN;
-		private final BarSeries series1m = new BaseBarSeriesBuilder().withName("1m")
-				.withNumType(DoubleNum::valueOf)
-				.build();
-		private final BarSeries series5m = new BaseBarSeriesBuilder().withName("5m")
-				.withNumType(DoubleNum::valueOf)
-				.build();
+		private final BarSeries series1m = new BaseBarSeriesBuilder().withName("1m").build();
+		private final BarSeries series5m = new BaseBarSeriesBuilder().withName("5m").build();
 		private final ClosePriceIndicator closePrice1m = new ClosePriceIndicator(series1m);
 		private final ClosePriceIndicator closePrice5m = new ClosePriceIndicator(series5m);
 		private final EMAIndicator ema20_1m = new EMAIndicator(closePrice1m, EMA_20_PERIOD);
@@ -1396,11 +1392,11 @@ public class CtiLbStrategy {
 			last1mCloseTime = candle.closeTime();
 			series1m.addBar(new BaseBar(Duration.ofMinutes(1),
 					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-					candle.open(),
-					candle.high(),
-					candle.low(),
-					candle.close(),
-					candle.volume()));
+					DecimalNum.valueOf(candle.open()),
+					DecimalNum.valueOf(candle.high()),
+					DecimalNum.valueOf(candle.low()),
+					DecimalNum.valueOf(candle.close()),
+					DecimalNum.valueOf(candle.volume())));
 			int index = series1m.getEndIndex();
 			ema20_1mValue = ema20_1m.getValue(index).doubleValue();
 			rsi9Value = rsi9_1m.getValue(index).doubleValue();
@@ -1416,11 +1412,11 @@ public class CtiLbStrategy {
 			last5mCloseTime = candle.closeTime();
 			series5m.addBar(new BaseBar(Duration.ofMinutes(5),
 					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-					candle.open(),
-					candle.high(),
-					candle.low(),
-					candle.close(),
-					candle.volume()));
+					DecimalNum.valueOf(candle.open()),
+					DecimalNum.valueOf(candle.high()),
+					DecimalNum.valueOf(candle.low()),
+					DecimalNum.valueOf(candle.close()),
+					DecimalNum.valueOf(candle.volume())));
 			int index = series5m.getEndIndex();
 			ema200_5mValue = ema200_5m.getValue(index).doubleValue();
 		}

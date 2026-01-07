@@ -9,7 +9,7 @@ import org.ta4j.core.indicators.EMAIndicator;
 import org.ta4j.core.indicators.MACDIndicator;
 import org.ta4j.core.indicators.adx.ADXIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
-import org.ta4j.core.num.DoubleNum;
+import org.ta4j.core.num.DecimalNum;
 
 public class ScoreSignalIndicator {
 
@@ -18,16 +18,12 @@ public class ScoreSignalIndicator {
 	private final String symbol;
 	private final CtiScoreCalculator scoreCalculator;
 	private final boolean enableTieBreakBias;
-	private final BarSeries macdSeries = new BaseBarSeriesBuilder().withName("macd1m")
-			.withNumType(DoubleNum::valueOf)
-			.build();
+	private final BarSeries macdSeries = new BaseBarSeriesBuilder().withName("macd1m").build();
 	private final ClosePriceIndicator macdClose = new ClosePriceIndicator(macdSeries);
 	private final MACDIndicator macdIndicator = new MACDIndicator(macdClose, 12, 26);
 	private final SMAIndicator macdSignal = new SMAIndicator(macdIndicator, 9);
 	private final EMAIndicator macdSignal = new EMAIndicator(macdIndicator, 9);
-	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m")
-			.withNumType(DoubleNum::valueOf)
-			.build();
+	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m").build();
 	private final ADXIndicator adxIndicator = new ADXIndicator(adxSeries, ADX_PERIOD);
 	private CtiDirection lastCti5mDir = CtiDirection.NEUTRAL;
 	private Double lastCti5mValue;
@@ -57,11 +53,11 @@ public class ScoreSignalIndicator {
 		last1mCloseTime = candle.closeTime();
 		macdSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(1),
 				java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-				candle.open(),
-				candle.high(),
-				candle.low(),
-				candle.close(),
-				candle.volume()));
+				DecimalNum.valueOf(candle.open()),
+				DecimalNum.valueOf(candle.high()),
+				DecimalNum.valueOf(candle.low()),
+				DecimalNum.valueOf(candle.close()),
+				DecimalNum.valueOf(candle.volume())));
 		int macdIndex = macdSeries.getEndIndex();
 		int macdScore = resolveMacdScore(macdIndex);
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
@@ -132,11 +128,11 @@ public class ScoreSignalIndicator {
 		last1mCloseTime = candle.closeTime();
 		macdSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(1),
 				java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-				candle.open(),
-				candle.high(),
-				candle.low(),
-				candle.close(),
-				candle.volume()));
+				DecimalNum.valueOf(candle.open()),
+				DecimalNum.valueOf(candle.high()),
+				DecimalNum.valueOf(candle.low()),
+				DecimalNum.valueOf(candle.close()),
+				DecimalNum.valueOf(candle.volume())));
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
 		lastCti1mValue = cti1mSignal.bfr();
 		lastCti1mPrev = cti1mSignal.bfrPrev();
@@ -192,11 +188,11 @@ public class ScoreSignalIndicator {
 		last5mCloseTime = fiveMinute.closeTime();
 		adxSeries.addBar(new BaseBar(java.time.Duration.ofMinutes(5),
 				java.time.Instant.ofEpochMilli(fiveMinute.closeTime()).atZone(java.time.ZoneOffset.UTC),
-				fiveMinute.open(),
-				fiveMinute.high(),
-				fiveMinute.low(),
-				fiveMinute.close(),
-				fiveMinute.volume()));
+				DecimalNum.valueOf(fiveMinute.open()),
+				DecimalNum.valueOf(fiveMinute.high()),
+				DecimalNum.valueOf(fiveMinute.low()),
+				DecimalNum.valueOf(fiveMinute.close()),
+				DecimalNum.valueOf(fiveMinute.volume())));
 		adx5mBarsSeen++;
 		int index = adxSeries.getEndIndex();
 		if (adxSeries.getBarCount() >= ADX_PERIOD) {
