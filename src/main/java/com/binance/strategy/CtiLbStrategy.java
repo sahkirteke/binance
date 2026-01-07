@@ -1,7 +1,6 @@
 package com.binance.strategy;
 
 import java.io.IOException;
-import java.math.BigDecimal;
 import java.math.MathContext;
 import java.net.SocketTimeoutException;
 import java.time.Duration;
@@ -33,6 +32,7 @@ import org.ta4j.core.indicators.SMAIndicator;
 import org.ta4j.core.indicators.ATRIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
 import org.ta4j.core.indicators.helpers.VolumeIndicator;
+import java.math.BigDecimal;
 
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
@@ -193,8 +193,8 @@ public class CtiLbStrategy {
 			if (shouldLogWarmupDecision(symbol)) {
 				logDecision(symbol, signal, close, SignalAction.HOLD, confirmedRec, recommendationUsed,
 						recommendationRaw, null, null, null, "WARMUP_MODE", "WARMUP_MODE", TrailState.empty(),
-						ContinuationState.empty(), null, 0, qualityScoreForLog,
-						qualityConfirmReason, false, null, 0, false, TpTrailingState.empty(),
+						ContinuationState.empty(), null, qualityScoreForLog, qualityConfirmReason,
+						false, null, 0, TpTrailingState.empty(),
 						trendAlignedWithPosition, false);
 			}
 			return;
@@ -908,18 +908,18 @@ public class CtiLbStrategy {
 				oppositeDir,
 				close,
 				state.ema20_1mValue,
-				state.ema20_1m.isReady(),
+				state.isEma20Ready(),
 				state.ema200_5mValue,
-				state.ema200_5m.isReady(),
+				state.isEma200Ready(),
 				state.rsi9Value,
-				state.rsi9_1m.isReady(),
+				state.isRsiReady(),
 				entryFilterState.volume(),
 				state.volumeSma10Value,
-				state.volumeSma10_1m.isReady(),
+				state.isVolumeSmaReady(),
 				state.atr14Value,
-				state.atr14_1m.isReady(),
+				state.isAtrReady(),
 				state.atrSma20Value,
-				state.atrSma20_1m.isReady(),
+				state.isAtrSmaReady(),
 				true,
 				strategyProperties);
 		return evaluation == null ? 0 : evaluation.qualityScore();
@@ -1391,11 +1391,11 @@ public class CtiLbStrategy {
 			last1mCloseTime = candle.closeTime();
 			series1m.addBar(new BaseBar(Duration.ofMinutes(1),
 					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-					candle.open(),
-					candle.high(),
-					candle.low(),
-					candle.close(),
-					candle.volume()));
+					BigDecimal.valueOf(candle.open()),
+					BigDecimal.valueOf(candle.high()),
+					BigDecimal.valueOf(candle.low()),
+					BigDecimal.valueOf(candle.close()),
+					BigDecimal.valueOf(candle.volume())));
 			int index = series1m.getEndIndex();
 			ema20_1mValue = ema20_1m.getValue(index).doubleValue();
 			rsi9Value = rsi9_1m.getValue(index).doubleValue();
@@ -1411,11 +1411,11 @@ public class CtiLbStrategy {
 			last5mCloseTime = candle.closeTime();
 			series5m.addBar(new BaseBar(Duration.ofMinutes(5),
 					java.time.Instant.ofEpochMilli(candle.closeTime()).atZone(java.time.ZoneOffset.UTC),
-					candle.open(),
-					candle.high(),
-					candle.low(),
-					candle.close(),
-					candle.volume()));
+					BigDecimal.valueOf(candle.open()),
+					BigDecimal.valueOf(candle.high()),
+					BigDecimal.valueOf(candle.low()),
+					BigDecimal.valueOf(candle.close()),
+					BigDecimal.valueOf(candle.volume())));
 			int index = series5m.getEndIndex();
 			ema200_5mValue = ema200_5m.getValue(index).doubleValue();
 		}

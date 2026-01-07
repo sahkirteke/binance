@@ -29,8 +29,10 @@ strategy:
   trade-symbols:
     - ETCUSDT
     - MANAUSDT
-    - XRPUSDT
-    - ADAUSDT
+    - XLMUSDT
+    - CHZUSDT
+    - RVNUSDT
+
   depth-limit: 50
   market-quantity: 0.01
   leverage: 2
