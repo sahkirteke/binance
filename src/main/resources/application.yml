@@ -15,7 +15,7 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
 
 binance:
-  base-url: https://api.binance.com
+  base-url: https://fapi.binance.com
   testnet-base-url: https://testnet.binancefuture.com
   use-testnet: false
   api-key: ${BINANCE_API_KEY:}
