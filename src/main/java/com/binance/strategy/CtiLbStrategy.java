@@ -2011,6 +2011,12 @@ public class CtiLbStrategy {
 						payload.put("entryQuantity", entryState.quantity().stripTrailingZeros().toPlainString());
 					}
 				}
+				if ("EXIT".equals(signalType)) {
+					BigDecimal realizedPnl = calculateRealizedPnl(entryState, quantity, closePrice);
+					if (realizedPnl != null) {
+						payload.put("realizedPnl", realizedPnl.stripTrailingZeros().toPlainString());
+					}
+				}
 				payload.put("decisionActionReason", decisionActionReason == null ? "NA" : decisionActionReason);
 				payload.put("decisionBlockReason", decisionBlockReason == null ? "NA" : decisionBlockReason);
 				payload.put("recommendationUsed", recommendationUsed == null ? "NA" : recommendationUsed.name());
@@ -2024,6 +2030,20 @@ public class CtiLbStrategy {
 			LOGGER.warn("EVENT=SIGNAL_SNAPSHOT_FAILED symbol={} type={} error={}", symbol, signalType,
 					error.getMessage());
 		}
+	}
+
+	private BigDecimal calculateRealizedPnl(EntryState entryState, BigDecimal quantity, double closePrice) {
+		if (entryState == null || entryState.side() == null || entryState.entryPrice() == null
+				|| entryState.entryPrice().signum() <= 0 || quantity == null || quantity.signum() <= 0
+				|| closePrice <= 0) {
+			return null;
+		}
+		BigDecimal close = BigDecimal.valueOf(closePrice);
+		BigDecimal priceDiff = close.subtract(entryState.entryPrice());
+		if (entryState.side() == CtiDirection.SHORT) {
+			priceDiff = entryState.entryPrice().subtract(close);
+		}
+		return priceDiff.multiply(quantity);
 	}
 
 	private void logConfigSnapshot() {
