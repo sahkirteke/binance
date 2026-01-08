@@ -271,6 +271,19 @@ public class CtiLbStrategy {
 				scoreExitConfirmed);
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
 
+		if (current == PositionState.NONE && !effectiveEnableOrders() && entryState != null && exitDecision.exit()) {
+			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
+			if (exitQty != null && exitQty.signum() > 0) {
+				recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, signal, closeTime, close, exitQty,
+						PositionState.NONE, null, entryState, exitDecision.reason(),
+						CtiLbDecisionEngine.resolveExitDecisionBlockReason(), recommendationUsed,
+						recommendationRaw, confirmedRec);
+				positionStates.put(symbol, PositionState.NONE);
+				entryStates.remove(symbol);
+			}
+			return;
+		}
+
 		if (current != PositionState.NONE && exitDecision.exit()) {
 			SignalAction exitAction = SignalAction.HOLD;
 			String decisionActionReason = exitDecision.reason();
