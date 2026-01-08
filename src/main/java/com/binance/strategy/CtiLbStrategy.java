@@ -1989,6 +1989,7 @@ public class CtiLbStrategy {
 				ObjectNode payload = objectMapper.createObjectNode();
 				payload.put("symbol", symbol);
 				payload.put("signalType", signalType);
+				payload.put("positionType", signalType);
 				payload.put("action", action == null ? "NA" : action.name());
 				payload.put("timestamp", closeTime);
 				payload.put("price", closePrice);
