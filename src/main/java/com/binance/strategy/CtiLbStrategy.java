@@ -2344,6 +2344,18 @@ public class CtiLbStrategy {
 	private void applyExchangePosition(String symbol, BinanceFuturesOrderClient.ExchangePosition position, long closeTime) {
 		PositionState local = positionStates.getOrDefault(symbol, PositionState.NONE);
 		PositionState updated = resolvePositionState(position.positionAmt());
+		if (!effectiveEnableOrders() && updated == PositionState.NONE && entryStates.get(symbol) != null) {
+			exchangePositions.put(symbol, position);
+			stateDesyncBySymbol.put(symbol, local != updated);
+			StrategyLogV1.PositionSyncLogDto dto = new StrategyLogV1.PositionSyncLogDto(
+					symbol,
+					formatPositionSide(local),
+					position.positionAmt(),
+					formatPositionSide(local),
+					true);
+			LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
+			return;
+		}
 		positionStates.put(symbol, updated);
 		boolean desync = local != updated;
 		exchangePositions.put(symbol, position);
