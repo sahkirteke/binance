@@ -341,6 +341,10 @@ public class CtiLbStrategy {
 						recommendationRaw, confirmedRec);
 			}
 			if (continuationHold || holdExit || !effectiveEnableOrders()) {
+				if (!effectiveEnableOrders()) {
+					positionStates.put(symbol, PositionState.NONE);
+					entryStates.remove(symbol);
+				}
 				return;
 			}
 			if (exitQty == null || exitQty.signum() <= 0) {
@@ -493,6 +497,8 @@ public class CtiLbStrategy {
 					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
 							target, target, entrySnapshot, decisionActionReason, decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
+					positionStates.put(symbol, target);
+					entryStates.put(symbol, entrySnapshot);
 				} else if (target != current) {
 					recordSignalSnapshot(symbol, "EXIT", action, signal, closeTime, close, closeQty,
 							current, target, entryState, decisionActionReason, decisionBlockReason,
@@ -505,6 +511,8 @@ public class CtiLbStrategy {
 					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
 							target, target, entrySnapshot, decisionActionReason, decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
+					positionStates.put(symbol, target);
+					entryStates.put(symbol, entrySnapshot);
 				}
 			}
 			action = SignalAction.HOLD;
@@ -574,6 +582,10 @@ public class CtiLbStrategy {
 				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
 						targetForLog, targetForLog, entrySnapshot, decisionActionReasonForLog, decisionBlock,
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
+				if (!effectiveEnableOrders()) {
+					positionStates.put(symbol, targetForLog);
+					entryStates.put(symbol, entrySnapshot);
+				}
 			} else if (targetForLog != currentForLog) {
 				recordSignalSnapshot(symbol, "EXIT", actionForLog, signal, closeTime, close, closeQty, currentForLog,
 						targetForLog, entryState, decisionActionReasonForLog, decisionBlock, recommendationUsedForLog,
@@ -586,6 +598,10 @@ public class CtiLbStrategy {
 				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
 						targetForLog, targetForLog, entrySnapshot, decisionActionReasonForLog, decisionBlock,
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
+				if (!effectiveEnableOrders()) {
+					positionStates.put(symbol, targetForLog);
+					entryStates.put(symbol, entrySnapshot);
+				}
 			}
 			if (!effectiveEnableOrders()) {
 				logDecision(symbol, signal, close, actionForLog, confirmedRecForLog,
