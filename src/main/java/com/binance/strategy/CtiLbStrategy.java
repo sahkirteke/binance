@@ -2296,6 +2296,9 @@ public class CtiLbStrategy {
 	}
 
 	private void syncPositionIfNeeded(String symbol, long closeTime) {
+		if (!effectiveEnableOrders()) {
+			return;
+		}
 		Long lastSync = lastPositionSyncMs.get(symbol);
 		if (lastSync != null && closeTime - lastSync < POSITION_SYNC_INTERVAL_MS) {
 			return;
