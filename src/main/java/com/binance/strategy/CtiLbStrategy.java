@@ -3,6 +3,9 @@ package com.binance.strategy;
 import java.io.IOException;
 import java.math.MathContext;
 import java.net.SocketTimeoutException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
@@ -23,6 +26,10 @@ import com.binance.exchange.dto.OrderResponse;
 import com.binance.strategy.StrategyLogV1.DecisionLogDto;
 import com.binance.strategy.StrategyLogV1.FlipLogDto;
 import com.binance.strategy.StrategyLogV1.SummaryLogDto;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.ta4j.core.BarSeries;
 import org.ta4j.core.BaseBar;
 import org.ta4j.core.BaseBarSeriesBuilder;
@@ -65,6 +72,7 @@ public class CtiLbStrategy {
 	private final WarmupProperties warmupProperties;
 	private final SymbolFilterService symbolFilterService;
 	private final OrderTracker orderTracker;
+	private final ObjectMapper objectMapper;
 	private final Map<String, Long> lastCloseTimes = new ConcurrentHashMap<>();
 	private final Map<String, PositionState> positionStates = new ConcurrentHashMap<>();
 	private final Map<String, EntryState> entryStates = new ConcurrentHashMap<>();
@@ -85,16 +93,20 @@ public class CtiLbStrategy {
 	private static final BigDecimal DEFAULT_NOTIONAL_USDT = BigDecimal.valueOf(50);
 	private static final long DEFAULT_MIN_HOLD_MS = 30_000L;
 	private static final BigDecimal DEFAULT_FEE_BPS = BigDecimal.valueOf(2);
+	private static final Path SIGNAL_OUTPUT_DIR = Paths.get("signals");
+	private final Map<String, Object> signalFileLocks = new ConcurrentHashMap<>();
 	private volatile boolean warmupMode;
 	private volatile boolean ordersEnabledOverride = true;
 
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties,
-			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService, OrderTracker orderTracker) {
+			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService, OrderTracker orderTracker,
+			ObjectMapper objectMapper) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
 		this.symbolFilterService = symbolFilterService;
 		this.orderTracker = orderTracker;
+		this.objectMapper = objectMapper;
 		logConfigSnapshot();
 	}
 
@@ -323,6 +335,11 @@ public class CtiLbStrategy {
 					qualityScoreForLog, qualityConfirmReason, trendHoldActive, trendHoldReason,
 					flipQualityScore, decisionTpTrailingState, trendAlignedWithPosition,
 					exitBlockedByTrendAligned);
+			if (!continuationHold && !holdExit && exitQty != null && exitQty.signum() > 0) {
+				recordSignalSnapshot(symbol, "EXIT", exitAction, signal, closeTime, close, exitQty,
+						current, null, entryState, decisionActionReason, decisionBlockReason, recommendationUsed,
+						recommendationRaw, confirmedRec);
+			}
 			if (continuationHold || holdExit || !effectiveEnableOrders()) {
 				return;
 			}
@@ -523,6 +540,40 @@ public class CtiLbStrategy {
 		TpTrailingState tpTrailingStateForLog = decisionTpTrailingState;
 		final boolean trendAlignedWithPositionFinal = trendAlignedWithPosition;
 		final boolean exitBlockedByTrendAlignedActionFinal = exitBlockedByTrendAlignedAction;
+		if (actionForLog != SignalAction.HOLD) {
+			if (currentForLog == PositionState.NONE) {
+				EntryState entrySnapshot = new EntryState(
+						targetForLog == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
+						BigDecimal.valueOf(close),
+						closeTime,
+						resolvedQtyForLog);
+				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
+						targetForLog, targetForLog, entrySnapshot, decisionActionReasonForLog, decisionBlock,
+						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
+			} else if (targetForLog != currentForLog) {
+				recordSignalSnapshot(symbol, "EXIT", actionForLog, signal, closeTime, close, closeQty, currentForLog,
+						targetForLog, entryState, decisionActionReasonForLog, decisionBlock, recommendationUsedForLog,
+						recommendationRawForLog, confirmedRecForLog);
+				EntryState entrySnapshot = new EntryState(
+						targetForLog == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
+						BigDecimal.valueOf(close),
+						closeTime,
+						resolvedQtyForLog);
+				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
+						targetForLog, targetForLog, entrySnapshot, decisionActionReasonForLog, decisionBlock,
+						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
+			}
+			if (!effectiveEnableOrders()) {
+				logDecision(symbol, signal, close, actionForLog, confirmedRecForLog,
+						recommendationUsedForLog, recommendationRawForLog, resolvedQtyForLog, entryState,
+						estimatedPnlPct, decisionActionReasonForLog, decisionBlock, trailStateForLog,
+						continuationStateForLog, flipGateReasonForLog, qualityScoreForLogFinal,
+						qualityConfirmReasonForLog, trendHoldActiveForLog,
+						trendHoldReasonForLog, flipQualityScoreForLog,
+						tpTrailingStateForLog, trendAlignedWithPositionFinal, exitBlockedByTrendAlignedActionFinal);
+				return;
+			}
+		}
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					hedgeModeBySymbol.put(symbol, hedgeMode);
@@ -1889,6 +1940,66 @@ public class CtiLbStrategy {
 				correlationId == null || correlationId.isBlank() ? "NA" : correlationId,
 				status == null ? "NA" : status,
 				errorValue);
+	}
+
+	private void recordSignalSnapshot(String symbol, String signalType, SignalAction action, ScoreSignal signal,
+			long closeTime, double closePrice, BigDecimal quantity, PositionState side, PositionState target,
+			EntryState entryState, String decisionActionReason, String decisionBlockReason,
+			CtiDirection recommendationUsed, CtiDirection recommendationRaw, CtiDirection confirmedRec) {
+		try {
+			Files.createDirectories(SIGNAL_OUTPUT_DIR);
+			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + ".json");
+			Object lock = signalFileLocks.computeIfAbsent(symbol, ignored -> new Object());
+			synchronized (lock) {
+				ArrayNode arrayNode = objectMapper.createArrayNode();
+				if (Files.exists(outputFile) && Files.size(outputFile) > 0) {
+					JsonNode existing = objectMapper.readTree(outputFile.toFile());
+					if (existing != null) {
+						if (existing.isArray()) {
+							arrayNode = (ArrayNode) existing;
+						} else {
+							arrayNode.add(existing);
+						}
+					}
+				}
+				ObjectNode payload = objectMapper.createObjectNode();
+				payload.put("symbol", symbol);
+				payload.put("signalType", signalType);
+				payload.put("action", action == null ? "NA" : action.name());
+				payload.put("timestamp", closeTime);
+				payload.put("price", closePrice);
+				if (quantity != null) {
+					payload.put("quantity", quantity.stripTrailingZeros().toPlainString());
+				}
+				if (side != null) {
+					payload.put("side", side.name());
+				}
+				if (target != null) {
+					payload.put("targetSide", target.name());
+				}
+				if (entryState != null) {
+					payload.put("entrySide", entryState.side() == null ? "NA" : entryState.side().name());
+					if (entryState.entryPrice() != null) {
+						payload.put("entryPrice", entryState.entryPrice().stripTrailingZeros().toPlainString());
+					}
+					payload.put("entryTimeMs", entryState.entryTimeMs());
+					if (entryState.quantity() != null) {
+						payload.put("entryQuantity", entryState.quantity().stripTrailingZeros().toPlainString());
+					}
+				}
+				payload.put("decisionActionReason", decisionActionReason == null ? "NA" : decisionActionReason);
+				payload.put("decisionBlockReason", decisionBlockReason == null ? "NA" : decisionBlockReason);
+				payload.put("recommendationUsed", recommendationUsed == null ? "NA" : recommendationUsed.name());
+				payload.put("recommendationRaw", recommendationRaw == null ? "NA" : recommendationRaw.name());
+				payload.put("confirmedRecommendation", confirmedRec == null ? "NA" : confirmedRec.name());
+				payload.set("signal", objectMapper.valueToTree(signal));
+				arrayNode.add(payload);
+				objectMapper.writerWithDefaultPrettyPrinter().writeValue(outputFile.toFile(), arrayNode);
+			}
+		} catch (IOException error) {
+			LOGGER.warn("EVENT=SIGNAL_SNAPSHOT_FAILED symbol={} type={} error={}", symbol, signalType,
+					error.getMessage());
+		}
 	}
 
 	private void logConfigSnapshot() {
