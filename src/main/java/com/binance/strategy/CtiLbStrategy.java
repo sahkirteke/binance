@@ -1992,22 +1992,33 @@ public class CtiLbStrategy {
 			Object lock = signalFileLocks.computeIfAbsent(symbol, ignored -> new Object());
 			synchronized (lock) {
 				ArrayNode arrayNode = objectMapper.createArrayNode();
+				String lastAction = null;
 				if (Files.exists(outputFile) && Files.size(outputFile) > 0) {
 					JsonNode existing = objectMapper.readTree(outputFile.toFile());
 					if (existing != null) {
 						if (existing.isArray()) {
 							arrayNode = (ArrayNode) existing;
+							if (!arrayNode.isEmpty()) {
+								JsonNode lastNode = arrayNode.get(arrayNode.size() - 1);
+								if (lastNode != null) {
+									lastAction = lastNode.path("action").asText(null);
+								}
+							}
 						} else {
 							arrayNode.add(existing);
 						}
 					}
 				}
+				String actionValue = action == null ? "NA" : action.name();
+				if (lastAction != null && lastAction.equals(actionValue)) {
+					return;
+				}
 				ObjectNode payload = objectMapper.createObjectNode();
 				payload.put("symbol", symbol);
 				payload.put("signalType", signalType);
 				payload.put("positionType", signalType);
-				payload.put("action", action == null ? "NA" : action.name());
-				payload.put("timestamp", closeTime);
+				payload.put("action", actionValue);
+				payload.put("timestamp", formatTimestamp(closeTime));
 				payload.put("price", closePrice);
 				if (quantity != null) {
 					payload.put("quantity", quantity.stripTrailingZeros().toPlainString());
@@ -2061,6 +2072,12 @@ public class CtiLbStrategy {
 			priceDiff = entryState.entryPrice().subtract(close);
 		}
 		return priceDiff.multiply(quantity);
+	}
+
+	private String formatTimestamp(long timestampMs) {
+		return java.time.Instant.ofEpochMilli(timestampMs)
+				.atZone(java.time.ZoneId.systemDefault())
+				.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
 	}
 
 	private void logConfigSnapshot() {
