@@ -483,6 +483,30 @@ public class CtiLbStrategy {
 			}
 		}
 		if (action == SignalAction.HOLD || !"OK_EXECUTED".equals(decisionBlockReason)) {
+			if (action != SignalAction.HOLD && "ORDERS_DISABLED".equals(decisionBlockReason)) {
+				if (current == PositionState.NONE) {
+					EntryState entrySnapshot = new EntryState(
+							target == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
+							BigDecimal.valueOf(close),
+							closeTime,
+							resolvedQty);
+					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
+							target, target, entrySnapshot, decisionActionReason, decisionBlockReason,
+							recommendationUsed, recommendationRaw, confirmedRec);
+				} else if (target != current) {
+					recordSignalSnapshot(symbol, "EXIT", action, signal, closeTime, close, closeQty,
+							current, target, entryState, decisionActionReason, decisionBlockReason,
+							recommendationUsed, recommendationRaw, confirmedRec);
+					EntryState entrySnapshot = new EntryState(
+							target == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
+							BigDecimal.valueOf(close),
+							closeTime,
+							resolvedQty);
+					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
+							target, target, entrySnapshot, decisionActionReason, decisionBlockReason,
+							recommendationUsed, recommendationRaw, confirmedRec);
+				}
+			}
 			action = SignalAction.HOLD;
 			logDecision(symbol, signal, close, action, confirmedRec, recommendationUsed,
 					recommendationRaw, resolvedQty, entryState, estimatedPnlPct, decisionActionReason,
