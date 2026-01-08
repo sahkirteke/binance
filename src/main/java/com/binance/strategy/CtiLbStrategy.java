@@ -188,6 +188,9 @@ public class CtiLbStrategy {
 		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
 			confirmedRec = entryDecision.confirmedRec();
 		}
+		if (signal.recReason() == CtiScoreCalculator.RecReason.TIE_HOLD) {
+			confirmedRec = CtiDirection.NEUTRAL;
+		}
 
 		boolean trendAlignedWithPosition = resolveTrendAlignedWithPosition(
 				current,
@@ -402,6 +405,11 @@ public class CtiLbStrategy {
 				? resolveHoldReason(signal, hasSignal, confirmationMet)
 				: current == PositionState.NONE ? "OK" : resolveFlipReason(current, target);
 		String decisionBlockReason = resolveDecisionBlockReason(signal, action, confirmedRec, current);
+		if (current == PositionState.NONE && signal.finalScore() == 0 && action != SignalAction.HOLD) {
+			action = SignalAction.HOLD;
+			decisionActionReason = "ZERO_SCORE_GATE";
+			decisionBlockReason = "ZERO_SCORE_GATE";
+		}
 		if (current == PositionState.NONE && entryDecision.blockReason() != null) {
 			action = SignalAction.HOLD;
 			decisionActionReason = entryDecision.blockReason();
