@@ -2382,7 +2382,7 @@ public class CtiLbStrategy {
 				position.positionAmt(),
 				formatPositionSide(local),
 				desync);
-		LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
+		//LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
 	}
 
 	private String resolveExchangePositionSide(BinanceFuturesOrderClient.ExchangePosition position) {

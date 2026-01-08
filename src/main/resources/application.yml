@@ -32,6 +32,26 @@ strategy:
     - XLMUSDT
     - CHZUSDT
     - RVNUSDT
+    - HOTUSDT
+    - XRPUSDT
+    - ETHUSDT
+    - ONTUSDT
+    - DOGEUSDT
+    - LTCUSDT
+    - SOLUSDT
+    - ADAUSDT
+    - AVAXUSDT
+    - DOTUSDT
+    - ARBUSDT
+    - POLUSDT
+    - CELRUSDT
+    - DENTUSDT
+    - SLPUSDT
+    - BANDUSDT
+    - BATUSDT
+    - VETUSDT
+    - ALGOUSDT
+    - CHRUSDT
 
   depth-limit: 50
   market-quantity: 0.01
