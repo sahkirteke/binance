@@ -278,7 +278,7 @@ public class CtiLbStrategy {
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
 			if (exitQty != null && exitQty.signum() > 0) {
 				recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, signal, closeTime, close, exitQty,
-						PositionState.NONE, null, entryState, exitDecision.reason(),
+						PositionState.NONE, null, entryState, entryFilterState, exitDecision.reason(),
 						CtiLbDecisionEngine.resolveExitDecisionBlockReason(), recommendationUsed,
 						recommendationRaw, confirmedRec);
 				positionStates.put(symbol, PositionState.NONE);
@@ -353,7 +353,7 @@ public class CtiLbStrategy {
 					exitBlockedByTrendAligned);
 			if (!continuationHold && !holdExit && exitQty != null && exitQty.signum() > 0) {
 				recordSignalSnapshot(symbol, "EXIT", exitAction, signal, closeTime, close, exitQty,
-						current, null, entryState, decisionActionReason, decisionBlockReason, recommendationUsed,
+						current, null, entryState, entryFilterState, decisionActionReason, decisionBlockReason, recommendationUsed,
 						recommendationRaw, confirmedRec);
 			}
 			if (continuationHold || holdExit || !effectiveEnableOrders()) {
@@ -516,13 +516,13 @@ public class CtiLbStrategy {
 							closeTime,
 							resolvedQty);
 					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
-							target, target, entrySnapshot, decisionActionReason, decisionBlockReason,
+							target, target, entrySnapshot, entryFilterState, decisionActionReason, decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
 					entryStates.put(symbol, entrySnapshot);
 				} else if (target != current) {
 					recordSignalSnapshot(symbol, "EXIT", action, signal, closeTime, close, closeQty,
-							current, target, entryState, decisionActionReason, decisionBlockReason,
+							current, target, entryState, entryFilterState, decisionActionReason, decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					EntryState entrySnapshot = new EntryState(
 							target == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
@@ -530,7 +530,7 @@ public class CtiLbStrategy {
 							closeTime,
 							resolvedQty);
 					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
-							target, target, entrySnapshot, decisionActionReason, decisionBlockReason,
+							target, target, entrySnapshot, entryFilterState, decisionActionReason, decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
 					entryStates.put(symbol, entrySnapshot);
@@ -601,7 +601,7 @@ public class CtiLbStrategy {
 						closeTime,
 						resolvedQtyForLog);
 				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
-						targetForLog, targetForLog, entrySnapshot, decisionActionReasonForLog, decisionBlock,
+						targetForLog, targetForLog, entrySnapshot, entryFilterState, decisionActionReasonForLog, decisionBlock,
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
@@ -609,7 +609,7 @@ public class CtiLbStrategy {
 				}
 			} else if (targetForLog != currentForLog) {
 				recordSignalSnapshot(symbol, "EXIT", actionForLog, signal, closeTime, close, closeQty, currentForLog,
-						targetForLog, entryState, decisionActionReasonForLog, decisionBlock, recommendationUsedForLog,
+						targetForLog, entryState, entryFilterState, decisionActionReasonForLog, decisionBlock, recommendationUsedForLog,
 						recommendationRawForLog, confirmedRecForLog);
 				EntryState entrySnapshot = new EntryState(
 						targetForLog == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
@@ -617,7 +617,7 @@ public class CtiLbStrategy {
 						closeTime,
 						resolvedQtyForLog);
 				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
-						targetForLog, targetForLog, entrySnapshot, decisionActionReasonForLog, decisionBlock,
+						targetForLog, targetForLog, entrySnapshot, entryFilterState, decisionActionReasonForLog, decisionBlock,
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
@@ -2005,7 +2005,8 @@ public class CtiLbStrategy {
 
 	private void recordSignalSnapshot(String symbol, String signalType, SignalAction action, ScoreSignal signal,
 			long closeTime, double closePrice, BigDecimal quantity, PositionState side, PositionState target,
-			EntryState entryState, String decisionActionReason, String decisionBlockReason,
+			EntryState entryState, EntryFilterState entryFilterState, String decisionActionReason,
+			String decisionBlockReason,
 			CtiDirection recommendationUsed, CtiDirection recommendationRaw, CtiDirection confirmedRec) {
 		try {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
@@ -2060,6 +2061,26 @@ public class CtiLbStrategy {
 						payload.put("entryQuantity", entryState.quantity().stripTrailingZeros().toPlainString());
 					}
 				}
+				ObjectNode indicatorsNode = objectMapper.createObjectNode();
+				if (entryFilterState != null) {
+					indicatorsNode.put("rsi9", entryFilterState.rsi9());
+					indicatorsNode.put("volume", entryFilterState.volume());
+					indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
+					indicatorsNode.put("atr14", entryFilterState.atr14());
+					indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
+					indicatorsNode.put("ema20_1m", entryFilterState.ema20_1m());
+					indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
+					indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
+					indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
+					indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
+					indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
+					indicatorsNode.put("volOk", entryFilterState.volOk());
+					indicatorsNode.put("atrOk", entryFilterState.atrOk());
+					if (entryFilterState.qualityBlockReason() != null) {
+						indicatorsNode.put("qualityBlockReason", entryFilterState.qualityBlockReason());
+					}
+				}
+				payload.set("indicators", indicatorsNode);
 				if ("EXIT".equals(signalType)) {
 					BigDecimal realizedPnl = calculateRealizedPnl(entryState, quantity, closePrice);
 					if (realizedPnl != null) {
