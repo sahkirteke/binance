@@ -15,9 +15,9 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
 
 binance:
-  base-url: https://api.binance.com
+  base-url: https://fapi.binance.com
   testnet-base-url: https://testnet.binancefuture.com
-  use-testnet: true
+  use-testnet: false
   api-key: ${BINANCE_API_KEY:}
   secret-key: ${BINANCE_SECRET_KEY:}
   recv-window-millis: 5000
@@ -32,13 +32,33 @@ strategy:
     - XLMUSDT
     - CHZUSDT
     - RVNUSDT
+    - HOTUSDT
+    - XRPUSDT
+    - ETHUSDT
+    - ONTUSDT
+    - DOGEUSDT
+    - LTCUSDT
+    - SOLUSDT
+    - ADAUSDT
+    - AVAXUSDT
+    - DOTUSDT
+    - ARBUSDT
+    - POLUSDT
+    - CELRUSDT
+    - DENTUSDT
+    - SLPUSDT
+    - BANDUSDT
+    - BATUSDT
+    - VETUSDT
+    - ALGOUSDT
+    - CHRUSDT
 
   depth-limit: 50
   market-quantity: 0.01
   leverage: 2
   position-side: LONG
-  enable-orders: true
-  startup-test-order-enabled: true
+  enable-orders: false
+  startup-test-order-enabled: false
   poll-interval-ms: 500
   tick-interval-ms: 100
   rolling-window-ms: 800

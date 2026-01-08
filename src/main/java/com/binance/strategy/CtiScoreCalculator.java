@@ -5,7 +5,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class CtiScoreCalculator {
 
-	private static final double ADX_THRESHOLD = 20.0;
+	private static final double ADX_THRESHOLD = 25.0;
 
 	private final Map<String, CtiLbTrendIndicator> indicators = new ConcurrentHashMap<>();
 
@@ -59,9 +59,9 @@ public class CtiScoreCalculator {
 			return "ADX5M_NOT_READY";
 		}
 		if (adxValue != null && adxValue > ADX_THRESHOLD) {
-			return "ADX5M>20";
+			return "ADX5M>25";
 		}
-		return "ADX5M<=20";
+		return "ADX5M<=25";
 	}
 
 	private record Recommendation(CtiDirection direction, RecReason reason) {

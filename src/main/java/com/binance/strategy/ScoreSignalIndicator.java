@@ -69,7 +69,8 @@ public class ScoreSignalIndicator {
 
 		int score5m = lastCti5mDir == CtiDirection.LONG ? 1 : lastCti5mDir == CtiDirection.SHORT ? -1 : 0;
 		int score1m = cti1mDir == CtiDirection.LONG ? 1 : cti1mDir == CtiDirection.SHORT ? -1 : 0;
-		int hamCtiScore = score5m + score1m;
+		double weightedCtiScore = (score1m * 0.5) + (score5m * 0.5);
+		int hamCtiScore = weightedCtiScore > 0.5 ? 1 : weightedCtiScore < -0.5 ? -1 : 0;
 		CtiDirection bias = resolveBias(cti1mDir, lastCti5mDir);
 		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
 		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD;
