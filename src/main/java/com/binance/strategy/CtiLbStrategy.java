@@ -2220,6 +2220,19 @@ public class CtiLbStrategy {
 		if (signal.insufficientData()) {
 			return "INSUFFICIENT_DATA";
 		}
+		if (action != SignalAction.HOLD && current == PositionState.NONE) {
+			if (signal.cti1mDir() == null || signal.cti5mDir() == null
+					|| signal.cti1mDir() == CtiDirection.NEUTRAL
+					|| signal.cti5mDir() == CtiDirection.NEUTRAL
+					|| signal.cti1mDir() != signal.cti5mDir()) {
+				return "CTI_DIR_MISMATCH";
+			}
+		}
+		if (action != SignalAction.HOLD) {
+			if (!signal.adxReady() || signal.adx5m() == null || signal.adx5m() <= 25.0) {
+				return "ADX5M<=25";
+			}
+		}
 		if (action != SignalAction.HOLD && !symbolFilterService.filtersReady()) {
 			triggerFilterRefresh();
 			return "WAIT_FILTERS";
