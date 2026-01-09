@@ -145,6 +145,14 @@ public class CtiLbStrategy {
 				&& Boolean.TRUE.equals(trailingArmedBySymbol.get(symbol));
 	}
 
+	private double resolvePnlTrailProfitArm() {
+		return strategyProperties.pnlTrailProfitArm() > 0 ? strategyProperties.pnlTrailProfitArm() : 20.0;
+	}
+
+	private int resolveLeverageForTrail() {
+		return strategyProperties.leverage() > 0 ? strategyProperties.leverage() : 50;
+	}
+
 	public void requestTrailingExit(TrailingExitRequest request) {
 		if (request == null || request.symbol() == null) {
 			return;
@@ -447,6 +455,14 @@ public class CtiLbStrategy {
 				entryState == null ? null : entryState.entryTimeMs(),
 				resolveMinHoldMs(),
 				scoreExitConfirmed);
+		if (strategyProperties.pnlTrailEnabled()
+				&& current != PositionState.NONE
+				&& entryState != null) {
+			double leveragedPnlPct = (exitDecision.pnlBps() / 100.0) * resolveLeverageForTrail();
+			if (leveragedPnlPct >= resolvePnlTrailProfitArm()) {
+				setTrailingArmed(symbol, true);
+			}
+		}
 		boolean trailingExitOnly = isTrailingExitOnly(symbol, current);
 		if (trailingExitOnly) {
 			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "TRAILING_EXIT_ONLY", exitDecision.pnlBps());
