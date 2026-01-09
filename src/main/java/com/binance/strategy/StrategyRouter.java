@@ -45,15 +45,14 @@ public class StrategyRouter {
 				&& indicator.isDuplicate1mClose(candle.closeTime())) {
 			return;
 		}
+		indicator.onClosedOneMinuteCandle(candle);
+		ctiLbStrategy.onClosedOneMinuteCandle(symbol, candle);
 		if (shouldSyncLive(symbol)) {
 			timeSyncService.recordClosedOneMinute(symbol, candle)
 					.ifPresent(closed5m -> {
-						indicator.onClosedFiveMinuteCandle(closed5m);
-						ctiLbStrategy.onClosedFiveMinuteCandle(symbol, closed5m);
+						handleClosedFiveMinute(symbol, closed5m);
 					});
 		}
-		ScoreSignal signal = indicator.onClosedOneMinuteCandle(candle);
-		ctiLbStrategy.onScoreSignal(symbol, signal, candle);
 	}
 
 	public void onClosedFiveMinuteCandle(String symbol, Candle candle) {
@@ -63,6 +62,7 @@ public class StrategyRouter {
 		if (shouldSyncLive(symbol)) {
 			timeSyncService.recordClosedFiveMinute(symbol, candle);
 		}
+		handleClosedFiveMinute(symbol, candle);
 	}
 
 	public void warmupOneMinuteCandle(String symbol, Candle candle) {
@@ -104,5 +104,12 @@ public class StrategyRouter {
 	private ScoreSignalIndicator resolveIndicator(String symbol) {
 		return indicators.computeIfAbsent(symbol,
 				ignored -> new ScoreSignalIndicator(symbol, scoreCalculator, strategyProperties.enableTieBreakBias()));
+	}
+
+	private void handleClosedFiveMinute(String symbol, Candle candle) {
+		ScoreSignalIndicator indicator = resolveIndicator(symbol);
+		ScoreSignal signal = indicator.onClosedFiveMinuteCandle(candle);
+		ctiLbStrategy.onClosedFiveMinuteCandle(symbol, candle);
+		ctiLbStrategy.onScoreSignal(symbol, signal, candle);
 	}
 }

@@ -52,13 +52,11 @@ public class ScoreSignalIndicator {
 		this.enableTieBreakBias = enableTieBreakBias;
 	}
 
-	public ScoreSignal onClosedOneMinuteCandle(Candle candle) {
+	public void onClosedOneMinuteCandle(Candle candle) {
 		if (candle.closeTime() <= last1mCloseTime) {
-			return null;
+			return;
 		}
 		last1mCloseTime = candle.closeTime();
-		MacdHistColor histColor = resolveMacdHistColor(lastMacdHist, lastMacdHistPrev);
-		double macdScore = resolveMacdScore(histColor);
 		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
 		double cti1mValue = cti1mSignal.bfr();
 		double cti1mPrev = cti1mSignal.bfrPrev();
@@ -66,76 +64,6 @@ public class ScoreSignalIndicator {
 		lastCti1mValue = cti1mValue;
 		lastCti1mPrev = cti1mPrev;
 		lastCti1mDir = cti1mDir;
-
-		int score5m = lastCti5mDir == CtiDirection.LONG ? 1 : lastCti5mDir == CtiDirection.SHORT ? -1 : 0;
-		int score1m = cti1mDir == CtiDirection.LONG ? 1 : cti1mDir == CtiDirection.SHORT ? -1 : 0;
-		double weightedCtiScore = (score1m * 0.5) + (score5m * 0.5);
-		int hamCtiScore = weightedCtiScore > 0.5 ? 1 : weightedCtiScore < -0.5 ? -1 : 0;
-		double ctiScore = resolveCtiScore(cti1mDir, lastCti5mDir);
-		CtiDirection bias = resolveBias(cti1mDir, lastCti5mDir);
-		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
-		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD;
-		boolean has5mTrend = cti5mReady && lastCti5mDir != CtiDirection.NEUTRAL;
-		CtiScoreCalculator.ScoreResult scoreResult = scoreCalculator.calculate(
-				ctiScore,
-				macdScore,
-				adx5mReady ? lastAdx5m : null,
-				adx5mReady,
-				cti5mReady,
-				has5mTrend,
-				enableTieBreakBias,
-				bias);
-
-		Double bfr5mValue = cti5mReady ? lastCti5mValue : null;
-		Double bfr5mPrev = cti5mReady ? lastCti5mPrev : null;
-		Double adx5mValue = adx5mReady ? lastAdx5m : null;
-		Double adxSma10Value = adx5mReady ? lastAdxSma10 : null;
-		Boolean drop3 = adx5mReady ? lastDrop3 : null;
-		Boolean crossDown = adx5mReady ? lastCrossDown : null;
-		Boolean belowSma = adx5mReady ? lastBelowSma : null;
-		Boolean deadZone = adx5mReady ? lastDeadZone : null;
-		Double adxExitPressure = adx5mReady ? lastAdxExitPressure : null;
-
-		return new ScoreSignal(
-				cti1mDir,
-				lastCti5mDir,
-				hamCtiScore,
-				scoreResult.ctiDirScore(),
-				ctiScore,
-				scoreResult.macdScore(),
-				lastMacdHist,
-				lastMacdHistPrev,
-				scoreResult.finalScore(),
-				score1m,
-				score5m,
-				cti1mValue,
-				cti1mPrev,
-				bfr5mValue,
-				bfr5mPrev,
-				adx5mValue,
-				adxSma10Value,
-				drop3,
-				crossDown,
-				belowSma,
-				deadZone,
-				adxExitPressure,
-				histColor,
-				scoreResult.trendWeight(),
-				scoreResult.finalScore(),
-				scoreResult.recommendation(),
-				bias,
-				scoreResult.recReason(),
-				scoreResult.adxGate(),
-				adx5mReady,
-				scoreResult.adxGateReason(),
-				cti5mReady,
-				cti5mBarsSeen,
-				cti5mPeriod,
-				adx5mBarsSeen,
-				ADX_PERIOD,
-				last5mCloseTime,
-				candle.closeTime(),
-				!cti5mReady);
 	}
 
 	public void warmupOneMinuteCandle(Candle candle) {
@@ -156,11 +84,12 @@ public class ScoreSignalIndicator {
 		updateFiveMinute(candle);
 	}
 
-	public void onClosedFiveMinuteCandle(Candle candle) {
+	public ScoreSignal onClosedFiveMinuteCandle(Candle candle) {
 		if (candle.closeTime() <= last5mCloseTime) {
-			return;
+			return null;
 		}
 		updateFiveMinute(candle);
+		return buildScoreSignal(candle.closeTime());
 	}
 
 	public boolean isWarmupReady() {
@@ -218,6 +147,81 @@ public class ScoreSignalIndicator {
 		}
 		updateAdxExitPressure();
 		updateMacdHistogram();
+	}
+
+	private ScoreSignal buildScoreSignal(long closeTime) {
+		MacdHistColor histColor = resolveMacdHistColor(lastMacdHist, lastMacdHistPrev);
+		double macdScore = resolveMacdScore(histColor);
+
+		int score5m = lastCti5mDir == CtiDirection.LONG ? 1 : lastCti5mDir == CtiDirection.SHORT ? -1 : 0;
+		int score1m = lastCti1mDir == CtiDirection.LONG ? 1 : lastCti1mDir == CtiDirection.SHORT ? -1 : 0;
+		double weightedCtiScore = (score1m * 0.5) + (score5m * 0.5);
+		int hamCtiScore = weightedCtiScore > 0.5 ? 1 : weightedCtiScore < -0.5 ? -1 : 0;
+		double ctiScore = resolveCtiScore(lastCti1mDir, lastCti5mDir);
+		CtiDirection bias = resolveBias(lastCti1mDir, lastCti5mDir);
+		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
+		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD;
+		boolean has5mTrend = cti5mReady && lastCti5mDir != CtiDirection.NEUTRAL;
+		CtiScoreCalculator.ScoreResult scoreResult = scoreCalculator.calculate(
+				ctiScore,
+				macdScore,
+				adx5mReady ? lastAdx5m : null,
+				adx5mReady,
+				cti5mReady,
+				has5mTrend,
+				enableTieBreakBias,
+				bias);
+
+		Double bfr5mValue = cti5mReady ? lastCti5mValue : null;
+		Double bfr5mPrev = cti5mReady ? lastCti5mPrev : null;
+		Double adx5mValue = adx5mReady ? lastAdx5m : null;
+		Double adxSma10Value = adx5mReady ? lastAdxSma10 : null;
+		Boolean drop3 = adx5mReady ? lastDrop3 : null;
+		Boolean crossDown = adx5mReady ? lastCrossDown : null;
+		Boolean belowSma = adx5mReady ? lastBelowSma : null;
+		Boolean deadZone = adx5mReady ? lastDeadZone : null;
+		Double adxExitPressure = adx5mReady ? lastAdxExitPressure : null;
+
+		return new ScoreSignal(
+				lastCti1mDir,
+				lastCti5mDir,
+				hamCtiScore,
+				scoreResult.ctiDirScore(),
+				ctiScore,
+				macdScore,
+				lastMacdHist,
+				lastMacdHistPrev,
+				scoreResult.finalScore(),
+				score1m,
+				score5m,
+				lastCti1mValue,
+				lastCti1mPrev,
+				bfr5mValue,
+				bfr5mPrev,
+				adx5mValue,
+				adxSma10Value,
+				drop3,
+				crossDown,
+				belowSma,
+				deadZone,
+				adxExitPressure,
+				histColor,
+				scoreResult.trendWeight(),
+				scoreResult.finalScore(),
+				scoreResult.recommendation(),
+				bias,
+				scoreResult.recReason(),
+				scoreResult.adxGate(),
+				adx5mReady,
+				scoreResult.adxGateReason(),
+				cti5mReady,
+				cti5mBarsSeen,
+				cti5mPeriod,
+				adx5mBarsSeen,
+				ADX_PERIOD,
+				last5mCloseTime,
+				closeTime,
+				!cti5mReady);
 	}
 
 	private void updateMacdHistogram() {
@@ -314,13 +318,13 @@ public class ScoreSignalIndicator {
 			return 2.0;
 		}
 		if (histColor == MacdHistColor.BLUE) {
-			return -1.5;
+			return 1.0;
 		}
 		if (histColor == MacdHistColor.RED) {
 			return -2.0;
 		}
 		if (histColor == MacdHistColor.MAROON) {
-			return 1.5;
+			return -1.0;
 		}
 		return 0.0;
 	}

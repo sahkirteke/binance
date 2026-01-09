@@ -26,4 +26,8 @@ public final class ScoreMath {
 	public static double max(double first, double second) {
 		return Math.max(first, second);
 	}
+
+	public static double clamp(double value, double min, double max) {
+		return Math.max(min, Math.min(max, value));
+	}
 }

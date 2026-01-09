@@ -159,7 +159,6 @@ public class CtiLbStrategy {
 		double close = candle.close();
 		double prevClose = symbolState.prevClose1m;
 		int fiveMinDir = symbolState.lastFiveMinDir;
-		symbolState.updateOneMinuteIndicators(candle);
 		if (signal.cti5mReady()) {
 			int newDir = resolveFiveMinDir(signal.score5m());
 			if (newDir != 0 && newDir != symbolState.lastFiveMinDir) {
@@ -170,7 +169,6 @@ public class CtiLbStrategy {
 			symbolState.lastFiveMinDir = newDir;
 			fiveMinDir = newDir;
 		}
-		symbolState.prevClose1m = close;
 		EntryFilterState entryFilterState = resolveEntryFilterState(
 				fiveMinDir,
 				signal.score1m(),
@@ -197,8 +195,13 @@ public class CtiLbStrategy {
 				fiveMinDir,
 				signal.cti1mValue(),
 				signal.cti1mPrev());
-		double coreScore = signal.finalScore();
-		double rsiVolScore = resolveRsiVolScore(coreScore, entryFilterState.rsiOk(), entryFilterState.volOk());
+		double coreScore = signal.macdScore() + signal.ctiScore();
+		int dirSign = ScoreMath.sign(coreScore);
+		double rsi9_5m = symbolState.rsi9_5mValue;
+		double volume5m = candle.volume();
+		double volumeSma10_5m = symbolState.volumeSma10_5mValue;
+		VolRsiConfidence confidence = resolveVolRsiConfidence(dirSign, rsi9_5m, volume5m, volumeSma10_5m);
+		double rsiVolScore = resolveRsiVolScore(dirSign, confidence.conf());
 		double scoreAfterSafety = coreScore + rsiVolScore;
 		double adxScore = resolveAdxScore(scoreAfterSafety, signal.adx5m());
 		double totalScore = scoreAfterSafety + adxScore;
@@ -208,10 +211,11 @@ public class CtiLbStrategy {
 		boolean emergencyExitTriggered = isEmergencyExit(current, signal.macdHistColor());
 		String emergencyExitReason = emergencyExitTriggered ? resolveEmergencyExitReason(current) : null;
 		double adxExitPressure = signal.adxExitPressure() == null ? 0.0 : signal.adxExitPressure();
+		double rsiVolExitPressure = resolveRsiVolExitPressure(confidence.conf());
 		int posSign = current == PositionState.LONG ? 1 : current == PositionState.SHORT ? -1 : 0;
 		double totalScoreForExit = current == PositionState.NONE
 				? totalScore
-				: totalScore - (posSign * adxExitPressure);
+				: totalScore - (posSign * (adxExitPressure + rsiVolExitPressure));
 		boolean normalExitConfirmed = false;
 		if (current == PositionState.LONG) {
 			normalExitConfirmed = totalScoreForExit <= 1.0;
@@ -227,9 +231,11 @@ public class CtiLbStrategy {
 		recordDecisionSnapshot(
 				symbol,
 				signal,
-				entryFilterState,
+				candle,
 				coreScore,
+				confidence,
 				rsiVolScore,
+				rsiVolExitPressure,
 				adxScore,
 				scoreAfterSafety,
 				totalScore,
@@ -762,6 +768,12 @@ public class CtiLbStrategy {
 				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
+	}
+
+	public void onClosedOneMinuteCandle(String symbol, Candle candle) {
+		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
+		symbolState.updateOneMinuteIndicators(candle);
+		symbolState.prevClose1m = candle.close();
 	}
 
 	public void onWarmupFiveMinuteCandle(String symbol, Candle candle) {
@@ -1532,16 +1544,21 @@ public class CtiLbStrategy {
 		private final EMAIndicator ema20_1m = new EMAIndicator(closePrice1m, EMA_20_PERIOD);
 		private final EMAIndicator ema200_5m = new EMAIndicator(closePrice5m, EMA_200_PERIOD);
 		private final RSIIndicator rsi9_1m = new RSIIndicator(closePrice1m, RSI_9_PERIOD);
+		private final RSIIndicator rsi9_5m = new RSIIndicator(closePrice5m, RSI_9_PERIOD);
 		private final ATRIndicator atr14_1m = new ATRIndicator(series1m, ATR_14_PERIOD);
 		private final SMAIndicator atrSma20_1m = new SMAIndicator(atr14_1m, ATR_SMA_20_PERIOD);
 		private final VolumeIndicator volume1m = new VolumeIndicator(series1m);
 		private final SMAIndicator volumeSma10_1m = new SMAIndicator(volume1m, VOLUME_SMA_10_PERIOD);
+		private final VolumeIndicator volume5m = new VolumeIndicator(series5m);
+		private final SMAIndicator volumeSma10_5m = new SMAIndicator(volume5m, VOLUME_SMA_10_PERIOD);
 		private double ema20_1mValue = Double.NaN;
 		private double ema200_5mValue = Double.NaN;
 		private double rsi9Value = Double.NaN;
+		private double rsi9_5mValue = Double.NaN;
 		private double atr14Value = Double.NaN;
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
+		private double volumeSma10_5mValue = Double.NaN;
 
 		private void updateOneMinuteIndicators(Candle candle) {
 			if (candle.closeTime() <= last1mCloseTime) {
@@ -1577,6 +1594,8 @@ public class CtiLbStrategy {
 					BigDecimal.valueOf(candle.volume())));
 			int index = series5m.getEndIndex();
 			ema200_5mValue = ema200_5m.getValue(index).doubleValue();
+			rsi9_5mValue = rsi9_5m.getValue(index).doubleValue();
+			volumeSma10_5mValue = volumeSma10_5m.getValue(index).doubleValue();
 		}
 
 		private boolean isTrendEmaReady() {
@@ -2149,13 +2168,16 @@ public class CtiLbStrategy {
 		}
 	}
 
-	private void recordDecisionSnapshot(String symbol, ScoreSignal signal, EntryFilterState entryFilterState,
-			double coreScore, double rsiVolScore, double adxScore, double scoreAfterSafety, double totalScore,
-			double totalScoreForExit, PositionState positionBefore, String decisionValue) {
+	private void recordDecisionSnapshot(String symbol, ScoreSignal signal, Candle candle, double coreScore,
+			VolRsiConfidence confidence, double rsiVolScore, double rsiVolExitPressure, double adxScore,
+			double scoreAfterSafety, double totalScore, double totalScoreForExit, PositionState positionBefore,
+			String decisionValue) {
 		try {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
 			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-decision.json");
 			ObjectNode payload = objectMapper.createObjectNode();
+			payload.put("t5mCloseUsed", signal.t5mCloseUsed());
+			payload.put("close5m", candle.close());
 			payload.put("outHist", signal.outHist());
 			payload.put("outHistPrev", signal.outHistPrev());
 			payload.put("histColor", signal.macdHistColor() == null ? "NA" : signal.macdHistColor().name());
@@ -2163,9 +2185,15 @@ public class CtiLbStrategy {
 			payload.put("cti1mDir", signal.cti1mDir() == null ? "NA" : signal.cti1mDir().name());
 			payload.put("cti5mDir", signal.cti5mDir() == null ? "NA" : signal.cti5mDir().name());
 			payload.put("ctiScore", signal.ctiScore());
-			payload.put("rsiOk", entryFilterState != null && entryFilterState.rsiOk());
-			payload.put("volOk", entryFilterState != null && entryFilterState.volOk());
+			payload.put("rsi9_5m", confidence.rsi9());
+			payload.put("volume5m", candle.volume());
+			payload.put("volumeSma10_5m", confidence.volumeSma10());
+			payload.put("volRatio", confidence.volRatio());
+			payload.put("volConf", confidence.volConf());
+			payload.put("rsiConf", confidence.rsiConf());
+			payload.put("conf", confidence.conf());
 			payload.put("rsiVolScore", rsiVolScore);
+			payload.put("rsiVolExitPressure", rsiVolExitPressure);
 			payload.put("adx", signal.adx5m());
 			payload.put("sma10", signal.adxSma10());
 			payload.put("adxScore", adxScore);
@@ -2531,12 +2559,27 @@ public class CtiLbStrategy {
 		return shortScore;
 	}
 
-	private double resolveRsiVolScore(double coreScore, boolean rsiOk, boolean volOk) {
-		int coreSign = ScoreMath.sign(coreScore);
-		if (rsiOk && volOk) {
-			return coreSign * 1.0;
+	private VolRsiConfidence resolveVolRsiConfidence(int dirSign, double rsi9_5m, double volume5m,
+			double volumeSma10_5m) {
+		if (dirSign == 0 || Double.isNaN(rsi9_5m) || Double.isNaN(volume5m) || Double.isNaN(volumeSma10_5m)
+				|| volumeSma10_5m <= 0) {
+			return new VolRsiConfidence(Double.NaN, 0.0, 0.0, 0.0, rsi9_5m, volumeSma10_5m);
 		}
-		return -coreSign * ScoreMath.min(1.0, ScoreMath.abs(coreScore));
+		double volRatio = volume5m / volumeSma10_5m;
+		double volConf = ScoreMath.clamp((volRatio - 0.8) / 0.6, 0.0, 1.0);
+		double rsiConfLong = ScoreMath.clamp((rsi9_5m - 50.0) / 10.0, 0.0, 1.0);
+		double rsiConfShort = ScoreMath.clamp((50.0 - rsi9_5m) / 10.0, 0.0, 1.0);
+		double rsiConf = dirSign > 0 ? rsiConfLong : dirSign < 0 ? rsiConfShort : 0.0;
+		double conf = volConf * rsiConf;
+		return new VolRsiConfidence(volRatio, volConf, rsiConf, conf, rsi9_5m, volumeSma10_5m);
+	}
+
+	private double resolveRsiVolScore(int dirSign, double conf) {
+		return dirSign * conf;
+	}
+
+	private double resolveRsiVolExitPressure(double conf) {
+		return (1.0 - conf);
 	}
 
 	private double resolveAdxScore(double scoreAfterSafety, Double adxValue) {
@@ -2581,6 +2624,15 @@ public class CtiLbStrategy {
 			return "CLOSE_SHORT_EMERGENCY";
 		}
 		return "CLOSE_EMERGENCY";
+	}
+
+	private record VolRsiConfidence(
+			double volRatio,
+			double volConf,
+			double rsiConf,
+			double conf,
+			double rsi9,
+			double volumeSma10) {
 	}
 
 	private String resolveDecisionValue(PositionState current, double totalScore, boolean emergencyExit,
