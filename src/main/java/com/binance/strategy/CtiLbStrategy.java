@@ -1394,11 +1394,11 @@ public class CtiLbStrategy {
 			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_HIST_EPS");
 		}
 		MacdHistColor histColor = signal.macdHistColor();
-		if (confirmedRec == CtiDirection.LONG && histColor != MacdHistColor.AQUA) {
-			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR");
+		if (confirmedRec == CtiDirection.LONG && histColor == MacdHistColor.BLUE) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR_BLUE");
 		}
-		if (confirmedRec == CtiDirection.SHORT && histColor != MacdHistColor.RED) {
-			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR");
+		if (confirmedRec == CtiDirection.SHORT && histColor == MacdHistColor.MAROON) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR_MAROON");
 		}
 		return entryDecision;
 	}
