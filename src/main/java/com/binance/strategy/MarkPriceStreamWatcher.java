@@ -58,10 +58,6 @@ public class MarkPriceStreamWatcher {
 			LOGGER.info("Mark price stream not started (pnl trailing disabled).");
 			return;
 		}
-		if (warmupProperties.enabled()) {
-			LOGGER.info("Mark price stream delayed until warmup completes.");
-			return;
-		}
 		markWarmupComplete();
 		startStreams();
 	}
@@ -71,10 +67,6 @@ public class MarkPriceStreamWatcher {
 			return;
 		}
 		if (!strategyProperties.pnlTrailEnabled()) {
-			return;
-		}
-		if (!warmupComplete.get()) {
-			LOGGER.info("Mark price stream start skipped (warmup not complete).");
 			return;
 		}
 		if (!streamsStarted.compareAndSet(false, true)) {
