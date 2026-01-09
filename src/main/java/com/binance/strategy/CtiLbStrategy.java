@@ -359,21 +359,6 @@ public class CtiLbStrategy {
 		boolean scoreExitConfirmed = current != PositionState.NONE && (emergencyExitTriggered || normalExitConfirmed);
 		String decisionValue = resolveDecisionValue(current, totalScore, emergencyExitTriggered,
 				normalExitConfirmed, entryDecision);
-		recordDecisionSnapshot(
-				symbol,
-				signal,
-				candle,
-				coreScore,
-				confidence,
-				rsiVolScore,
-				rsiVolExitPressure,
-				adxScore,
-				scoreAfterSafety,
-				totalScore,
-				totalScoreForExit,
-				current,
-				decisionValue);
-
 		if (!warmupMode) {
 			LOGGER.info(
 					"EVENT=POST_WARMUP_CALC symbol={} t5mCloseUsed={} close5m={} outHist={} outHistPrev={} histColor={}"
@@ -465,6 +450,29 @@ public class CtiLbStrategy {
 				barsInPosition,
 				strategyProperties);
 		String trendHoldReason = null;
+		recordDecisionSnapshot(
+				symbol,
+				signal,
+				candle,
+				coreScore,
+				confidence,
+				rsiVolScore,
+				rsiVolExitPressure,
+				adxScore,
+				scoreAfterSafety,
+				totalScore,
+				totalScoreForExit,
+				current,
+				decisionValue,
+				entryDecision,
+				entryFilterState,
+				fiveMinDir,
+				confirmedRec,
+				recommendationUsed,
+				trendHoldActive,
+				scoreExitConfirmed,
+				emergencyExitTriggered,
+				normalExitConfirmed);
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
 				entryState == null ? null : entryState.entryPrice(),
@@ -2677,48 +2685,84 @@ public class CtiLbStrategy {
 	private void recordDecisionSnapshot(String symbol, ScoreSignal signal, Candle candle, double coreScore,
 			VolRsiConfidence confidence, double rsiVolScore, double rsiVolExitPressure, double adxScore,
 			double scoreAfterSafety, double totalScore, double totalScoreForExit, PositionState positionBefore,
-			String decisionValue) {
+			String decisionValue, EntryDecision entryDecision, EntryFilterState entryFilterState, int fiveMinDir,
+			CtiDirection confirmedRec, CtiDirection recommendationUsed, boolean trendHoldActive,
+			boolean scoreExitConfirmed, boolean emergencyExitTriggered, boolean normalExitConfirmed) {
 		try {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
 			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-decision.json");
 			ObjectNode payload = objectMapper.createObjectNode();
 			payload.put("decisionTime", formatTimestamp(signal.closeTime()));
 			payload.put("t5mCloseUsed", signal.t5mCloseUsed());
-			payload.put("close5m", candle.close());
-			payload.put("outHist", signal.outHist());
-			payload.put("outHistPrev", signal.outHistPrev());
+			putFinite(payload, "close5m", candle.close());
+			putFinite(payload, "outHist", signal.outHist());
+			putFinite(payload, "outHistPrev", signal.outHistPrev());
 			payload.put("histColor", signal.macdHistColor() == null ? "NA" : signal.macdHistColor().name());
-			payload.put("macdScore", signal.macdScore());
+			putFinite(payload, "macdScore", signal.macdScore());
 			payload.put("cti1mDir", signal.cti1mDir() == null ? "NA" : signal.cti1mDir().name());
 			payload.put("cti5mDir", signal.cti5mDir() == null ? "NA" : signal.cti5mDir().name());
-			payload.put("ctiScore", signal.ctiScore());
-			payload.put("rsi9_5m", confidence.rsi9());
-			payload.put("volume5m", candle.volume());
-			payload.put("volumeSma10_5m", confidence.volumeSma10());
-			payload.put("volRatio", confidence.volRatio());
-			payload.put("volConf", confidence.volConf());
-			payload.put("rsiConf", confidence.rsiConf());
-			payload.put("conf", confidence.conf());
-			payload.put("rsiVolScore", rsiVolScore);
-			payload.put("rsiVolExitPressure", rsiVolExitPressure);
-			payload.put("adx", signal.adx5m());
-			payload.put("sma10", signal.adxSma10());
-			payload.put("adxScore", adxScore);
-			payload.put("coreScore", coreScore);
-			payload.put("scoreAfterSafety", scoreAfterSafety);
-			payload.put("totalScore", totalScore);
-			payload.put("totalScoreUsedForEntry", positionBefore == PositionState.NONE ? totalScore : Double.NaN);
+			putFinite(payload, "ctiScore", signal.ctiScore());
+			putFinite(payload, "rsi9_5m", confidence.rsi9());
+			putFinite(payload, "volume5m", candle.volume());
+			putFinite(payload, "volumeSma10_5m", confidence.volumeSma10());
+			putFinite(payload, "volRatio", confidence.volRatio());
+			putFinite(payload, "volConf", confidence.volConf());
+			putFinite(payload, "rsiConf", confidence.rsiConf());
+			putFinite(payload, "conf", confidence.conf());
+			putFinite(payload, "rsiVolScore", rsiVolScore);
+			putFinite(payload, "rsiVolExitPressure", rsiVolExitPressure);
+			putFinite(payload, "adx", signal.adx5m());
+			putFinite(payload, "sma10", signal.adxSma10());
+			putFinite(payload, "adxScore", adxScore);
+			putFinite(payload, "coreScore", coreScore);
+			putFinite(payload, "scoreAfterSafety", scoreAfterSafety);
+			putFinite(payload, "totalScore", totalScore);
+			if (positionBefore == PositionState.NONE) {
+				putFinite(payload, "totalScoreUsedForEntry", totalScore);
+			} else {
+				payload.putNull("totalScoreUsedForEntry");
+			}
 			payload.put("drop3", signal.drop3());
 			payload.put("crossDown", signal.crossDown());
 			payload.put("belowSma", signal.belowSma());
 			payload.put("deadZone", signal.deadZone());
-			payload.put("adxExitPressure", signal.adxExitPressure());
-			payload.put("totalScoreForExit", totalScoreForExit);
+			putFinite(payload, "adxExitPressure", signal.adxExitPressure());
+			putFinite(payload, "totalScoreForExit", totalScoreForExit);
 			payload.put("positionBefore", positionBefore == null ? "NA" : positionBefore.name());
 			payload.put("decision", decisionValue);
+			payload.put("entryBlockReason", entryDecision == null || entryDecision.blockReason() == null
+					? "NA"
+					: entryDecision.blockReason());
+			payload.put("entryActionReason", entryDecision == null || entryDecision.decisionActionReason() == null
+					? "NA"
+					: entryDecision.decisionActionReason());
+			payload.put("entryConfirmedRec", entryDecision == null || entryDecision.confirmedRec() == null
+					? "NA"
+					: entryDecision.confirmedRec().name());
+			payload.put("entryQualityScore", entryFilterState == null ? 0 : entryFilterState.qualityScore());
+			payload.put("fiveMinDir", fiveMinDir);
+			payload.put("confirmedRecUsed", confirmedRec == null ? "NA" : confirmedRec.name());
+			payload.put("recommendationUsed", recommendationUsed == null ? "NA" : recommendationUsed.name());
+			payload.put("trendHoldActive", trendHoldActive);
+			payload.put("scoreExitConfirmed", scoreExitConfirmed);
+			payload.put("emergencyExitTriggered", emergencyExitTriggered);
+			payload.put("normalExitConfirmed", normalExitConfirmed);
 			objectMapper.writerWithDefaultPrettyPrinter().writeValue(outputFile.toFile(), payload);
 		} catch (IOException error) {
 			LOGGER.warn("EVENT=DECISION_SNAPSHOT_FAILED symbol={} error={}", symbol, error.getMessage());
+		}
+	}
+
+	private static Double finiteOrNull(double value) {
+		return Double.isFinite(value) ? value : null;
+	}
+
+	private static void putFinite(ObjectNode payload, String field, double value) {
+		Double finite = finiteOrNull(value);
+		if (finite == null) {
+			payload.putNull(field);
+		} else {
+			payload.put(field, finite);
 		}
 	}
 
@@ -3060,11 +3104,16 @@ public class CtiLbStrategy {
 
 	private VolRsiConfidence resolveVolRsiConfidence(int dirSign, double rsi9_5m, double volume5m,
 			double volumeSma10_5m) {
-		if (dirSign == 0 || Double.isNaN(rsi9_5m) || Double.isNaN(volume5m) || Double.isNaN(volumeSma10_5m)
-				|| volumeSma10_5m <= 0) {
-			return new VolRsiConfidence(Double.NaN, 0.0, 0.0, 0.0, rsi9_5m, volumeSma10_5m);
+		double volRatio = 1.0;
+		if (!Double.isNaN(volumeSma10_5m) && volumeSma10_5m > 0.0 && Double.isFinite(volume5m)) {
+			volRatio = volume5m / volumeSma10_5m;
 		}
-		double volRatio = volume5m / volumeSma10_5m;
+		if (!Double.isFinite(volRatio)) {
+			volRatio = 1.0;
+		}
+		if (dirSign == 0 || Double.isNaN(rsi9_5m)) {
+			return new VolRsiConfidence(volRatio, 0.0, 0.0, 0.0, rsi9_5m, volumeSma10_5m);
+		}
 		double volConf = ScoreMath.clamp((volRatio - 0.8) / 0.6, 0.0, 1.0);
 		double rsiConfLong = ScoreMath.clamp((rsi9_5m - 50.0) / 10.0, 0.0, 1.0);
 		double rsiConfShort = ScoreMath.clamp((50.0 - rsi9_5m) / 10.0, 0.0, 1.0);
