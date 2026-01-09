@@ -197,10 +197,45 @@ public class CtiLbStrategy {
 				fiveMinDir,
 				signal.cti1mValue(),
 				signal.cti1mPrev());
-		int finalScore = signal.finalScore();
-		boolean finalScoreOpposite = (current == PositionState.LONG && finalScore <= -1)
-				|| (current == PositionState.SHORT && finalScore >= 1);
-		boolean scoreExitConfirmed = current != PositionState.NONE && finalScoreOpposite;
+		double coreScore = signal.finalScore();
+		double rsiVolScore = resolveRsiVolScore(coreScore, entryFilterState.rsiOk(), entryFilterState.volOk());
+		double scoreAfterSafety = coreScore + rsiVolScore;
+		double adxScore = resolveAdxScore(scoreAfterSafety, signal.adx5m());
+		double totalScore = scoreAfterSafety + adxScore;
+		if (current == PositionState.NONE) {
+			confirmedRec = resolveEntryDirection(totalScore);
+		}
+		boolean emergencyExitTriggered = isEmergencyExit(current, signal.macdHistColor());
+		String emergencyExitReason = emergencyExitTriggered ? resolveEmergencyExitReason(current) : null;
+		double adxExitPressure = signal.adxExitPressure() == null ? 0.0 : signal.adxExitPressure();
+		int posSign = current == PositionState.LONG ? 1 : current == PositionState.SHORT ? -1 : 0;
+		double totalScoreForExit = current == PositionState.NONE
+				? totalScore
+				: totalScore - (posSign * adxExitPressure);
+		boolean normalExitConfirmed = false;
+		if (current == PositionState.LONG) {
+			normalExitConfirmed = totalScoreForExit <= 1.0;
+		} else if (current == PositionState.SHORT) {
+			normalExitConfirmed = totalScoreForExit >= -1.0;
+		}
+		if (emergencyExitTriggered) {
+			normalExitConfirmed = false;
+		}
+		boolean scoreExitConfirmed = current != PositionState.NONE && (emergencyExitTriggered || normalExitConfirmed);
+		String decisionValue = resolveDecisionValue(current, totalScore, emergencyExitTriggered,
+				normalExitConfirmed);
+		recordDecisionSnapshot(
+				symbol,
+				signal,
+				entryFilterState,
+				coreScore,
+				rsiVolScore,
+				adxScore,
+				scoreAfterSafety,
+				totalScore,
+				totalScoreForExit,
+				current,
+				decisionValue);
 
 		int qualityScoreForLog = entryFilterState.qualityScore();
 		String qualityConfirmReason = null;
@@ -292,58 +327,70 @@ public class CtiLbStrategy {
 			String decisionActionReason = exitDecision.reason();
 			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
+			boolean skipHoldChecks = scoreExitConfirmed;
 			boolean stopLossExit = isStopLossExit(decisionActionReason);
 			boolean exitBlockedByTrendAligned = false;
-			if (trendHoldActive && !stopLossExit && isTakeProfitExit(decisionActionReason)
-					&& strategyProperties.tpTrailingEnabled()) {
-				if (!decisionTpTrailingState.allowExit()) {
-					decisionActionReason = "TREND_HOLD_ACTIVE";
-					decisionBlockReason = "TREND_HOLD_ACTIVE";
-					trendHoldReason = "TREND_HOLD_ACTIVE";
+			boolean continuationHold = false;
+			boolean holdExit = false;
+			if (skipHoldChecks) {
+				if (emergencyExitTriggered) {
+					decisionActionReason = emergencyExitReason;
+				} else if (normalExitConfirmed) {
+					decisionActionReason = current == PositionState.LONG ? "CLOSE_LONG" : "CLOSE_SHORT";
+				}
+			}
+			if (!skipHoldChecks) {
+				if (trendHoldActive && !stopLossExit && isTakeProfitExit(decisionActionReason)
+						&& strategyProperties.tpTrailingEnabled()) {
+					if (!decisionTpTrailingState.allowExit()) {
+						decisionActionReason = "TREND_HOLD_ACTIVE";
+						decisionBlockReason = "TREND_HOLD_ACTIVE";
+						trendHoldReason = "TREND_HOLD_ACTIVE";
+						logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
+								recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
+								decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
+								qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+								trendHoldReason, flipQualityScore, decisionTpTrailingState,
+							trendAlignedWithPosition, false);
+						return;
+					}
+				}
+				ExitHoldDecision exitHoldDecision = evaluateExitHoldDecision(stopLossExit, scoreExitConfirmed,
+						trendAlignedWithPosition);
+				if (exitHoldDecision.hold()) {
+					decisionActionReason = exitHoldDecision.reason();
+					decisionBlockReason = exitHoldDecision.reason();
+					exitBlockedByTrendAligned = exitHoldDecision.exitBlockedByTrendAligned();
 					logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
 							recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
 							decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
 							qualityScoreForLog, qualityConfirmReason, trendHoldActive,
 							trendHoldReason, flipQualityScore, decisionTpTrailingState,
-						trendAlignedWithPosition, false);
+						trendAlignedWithPosition, exitBlockedByTrendAligned);
 					return;
 				}
-			}
-			ExitHoldDecision exitHoldDecision = evaluateExitHoldDecision(stopLossExit, scoreExitConfirmed,
-					trendAlignedWithPosition);
-			if (exitHoldDecision.hold()) {
-				decisionActionReason = exitHoldDecision.reason();
-				decisionBlockReason = exitHoldDecision.reason();
-				exitBlockedByTrendAligned = exitHoldDecision.exitBlockedByTrendAligned();
-				logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
-						recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
-						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-						qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-						trendHoldReason, flipQualityScore, decisionTpTrailingState,
-					trendAlignedWithPosition, exitBlockedByTrendAligned);
-				return;
-			}
-			boolean continuationHold = decisionContinuationState.holdApplied() && !stopLossExit;
-			boolean holdExit = shouldHoldTrendStrong(
-					entryState == null ? null : entryState.side(),
-					entryState == null ? null : entryState.entryPrice(),
-					close,
-					fiveMinDir,
-					symbolState.ema20_1mValue,
-					symbolState.ema200_5mValue,
-					symbolState.isTrendEmaReady(),
-					trailState.trailStopHit(),
-					stopLossExit,
-					confirmedRec,
-					strategyProperties.trendHoldMinProfitPct());
-			if (continuationHold) {
-				decisionActionReason = "EXIT_HOLD_CONTINUATION";
-				decisionBlockReason = "EXIT_HOLD_CONTINUATION";
-				decisionContinuationState = decisionContinuationState.withHoldApplied(true);
-			} else if (holdExit) {
-				decisionActionReason = "EXIT_HOLD_TREND_STRONG";
-				decisionBlockReason = "EXIT_HOLD_TREND_STRONG";
-				decisionTrailState = decisionTrailState.withExitHoldApplied(true);
+				continuationHold = decisionContinuationState.holdApplied() && !stopLossExit;
+				holdExit = shouldHoldTrendStrong(
+						entryState == null ? null : entryState.side(),
+						entryState == null ? null : entryState.entryPrice(),
+						close,
+						fiveMinDir,
+						symbolState.ema20_1mValue,
+						symbolState.ema200_5mValue,
+						symbolState.isTrendEmaReady(),
+						trailState.trailStopHit(),
+						stopLossExit,
+						confirmedRec,
+						strategyProperties.trendHoldMinProfitPct());
+				if (continuationHold) {
+					decisionActionReason = "EXIT_HOLD_CONTINUATION";
+					decisionBlockReason = "EXIT_HOLD_CONTINUATION";
+					decisionContinuationState = decisionContinuationState.withHoldApplied(true);
+				} else if (holdExit) {
+					decisionActionReason = "EXIT_HOLD_TREND_STRONG";
+					decisionBlockReason = "EXIT_HOLD_TREND_STRONG";
+					decisionTrailState = decisionTrailState.withExitHoldApplied(true);
+				}
 			}
 			logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
 					recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason, decisionBlockReason,
@@ -405,7 +452,7 @@ public class CtiLbStrategy {
 				? resolveHoldReason(signal, hasSignal, confirmationMet)
 				: current == PositionState.NONE ? "OK" : resolveFlipReason(current, target);
 		String decisionBlockReason = resolveDecisionBlockReason(signal, action, confirmedRec, current);
-		if (current == PositionState.NONE && signal.finalScore() == 0 && action != SignalAction.HOLD) {
+		if (current == PositionState.NONE && totalScore == 0.0 && action != SignalAction.HOLD) {
 			action = SignalAction.HOLD;
 			decisionActionReason = "ZERO_SCORE_GATE";
 			decisionBlockReason = "ZERO_SCORE_GATE";
@@ -2102,6 +2149,43 @@ public class CtiLbStrategy {
 		}
 	}
 
+	private void recordDecisionSnapshot(String symbol, ScoreSignal signal, EntryFilterState entryFilterState,
+			double coreScore, double rsiVolScore, double adxScore, double scoreAfterSafety, double totalScore,
+			double totalScoreForExit, PositionState positionBefore, String decisionValue) {
+		try {
+			Files.createDirectories(SIGNAL_OUTPUT_DIR);
+			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-decision.json");
+			ObjectNode payload = objectMapper.createObjectNode();
+			payload.put("outHist", signal.outHist());
+			payload.put("outHistPrev", signal.outHistPrev());
+			payload.put("histColor", signal.macdHistColor() == null ? "NA" : signal.macdHistColor().name());
+			payload.put("macdScore", signal.macdScore());
+			payload.put("cti1mDir", signal.cti1mDir() == null ? "NA" : signal.cti1mDir().name());
+			payload.put("cti5mDir", signal.cti5mDir() == null ? "NA" : signal.cti5mDir().name());
+			payload.put("ctiScore", signal.ctiScore());
+			payload.put("rsiOk", entryFilterState != null && entryFilterState.rsiOk());
+			payload.put("volOk", entryFilterState != null && entryFilterState.volOk());
+			payload.put("rsiVolScore", rsiVolScore);
+			payload.put("adx", signal.adx5m());
+			payload.put("sma10", signal.adxSma10());
+			payload.put("adxScore", adxScore);
+			payload.put("coreScore", coreScore);
+			payload.put("scoreAfterSafety", scoreAfterSafety);
+			payload.put("totalScore", totalScore);
+			payload.put("drop3", signal.drop3());
+			payload.put("crossDown", signal.crossDown());
+			payload.put("belowSma", signal.belowSma());
+			payload.put("deadZone", signal.deadZone());
+			payload.put("adxExitPressure", signal.adxExitPressure());
+			payload.put("totalScoreForExit", totalScoreForExit);
+			payload.put("positionBefore", positionBefore == null ? "NA" : positionBefore.name());
+			payload.put("decision", decisionValue);
+			objectMapper.writerWithDefaultPrettyPrinter().writeValue(outputFile.toFile(), payload);
+		} catch (IOException error) {
+			LOGGER.warn("EVENT=DECISION_SNAPSHOT_FAILED symbol={} error={}", symbol, error.getMessage());
+		}
+	}
+
 	private BigDecimal calculateRealizedPnl(EntryState entryState, BigDecimal quantity, double closePrice) {
 		if (entryState == null || entryState.side() == null || entryState.entryPrice() == null
 				|| entryState.entryPrice().signum() <= 0 || quantity == null || quantity.signum() <= 0
@@ -2431,7 +2515,7 @@ public class CtiLbStrategy {
 		return counter.longValue() % every == 0;
 	}
 
-	private int scoreLong(int score1m, int score5m, int macdScore) {
+	private int scoreLong(int score1m, int score5m, double macdScore) {
 		int longScore = (score1m > 0 ? 1 : 0) + (score5m > 0 ? 1 : 0);
 		if (macdScore > 0) {
 			longScore += 1;
@@ -2439,12 +2523,84 @@ public class CtiLbStrategy {
 		return longScore;
 	}
 
-	private int scoreShort(int score1m, int score5m, int macdScore) {
+	private int scoreShort(int score1m, int score5m, double macdScore) {
 		int shortScore = (score1m < 0 ? 1 : 0) + (score5m < 0 ? 1 : 0);
 		if (macdScore < 0) {
 			shortScore += 1;
 		}
 		return shortScore;
+	}
+
+	private double resolveRsiVolScore(double coreScore, boolean rsiOk, boolean volOk) {
+		int coreSign = ScoreMath.sign(coreScore);
+		if (rsiOk && volOk) {
+			return coreSign * 1.0;
+		}
+		return -coreSign * ScoreMath.min(1.0, ScoreMath.abs(coreScore));
+	}
+
+	private double resolveAdxScore(double scoreAfterSafety, Double adxValue) {
+		if (adxValue == null || adxValue.isNaN()) {
+			return 0.0;
+		}
+		int scoreSign = ScoreMath.sign(scoreAfterSafety);
+		if (adxValue > 25.0) {
+			return scoreSign * 1.5;
+		}
+		if (adxValue < 20.0) {
+			return -scoreSign * ScoreMath.min(1.5, ScoreMath.abs(scoreAfterSafety));
+		}
+		return 0.0;
+	}
+
+	private CtiDirection resolveEntryDirection(double totalScore) {
+		if (totalScore >= 3.0) {
+			return CtiDirection.LONG;
+		}
+		if (totalScore <= -3.0) {
+			return CtiDirection.SHORT;
+		}
+		return CtiDirection.NEUTRAL;
+	}
+
+	private boolean isEmergencyExit(PositionState current, MacdHistColor histColor) {
+		if (current == PositionState.LONG) {
+			return histColor == MacdHistColor.RED;
+		}
+		if (current == PositionState.SHORT) {
+			return histColor == MacdHistColor.AQUA;
+		}
+		return false;
+	}
+
+	private String resolveEmergencyExitReason(PositionState current) {
+		if (current == PositionState.LONG) {
+			return "CLOSE_LONG_EMERGENCY";
+		}
+		if (current == PositionState.SHORT) {
+			return "CLOSE_SHORT_EMERGENCY";
+		}
+		return "CLOSE_EMERGENCY";
+	}
+
+	private String resolveDecisionValue(PositionState current, double totalScore, boolean emergencyExit,
+			boolean normalExit) {
+		if (current == PositionState.NONE) {
+			if (totalScore >= 3.0) {
+				return "ENTER_LONG";
+			}
+			if (totalScore <= -3.0) {
+				return "ENTER_SHORT";
+			}
+			return "NO_ENTRY";
+		}
+		if (emergencyExit) {
+			return current == PositionState.LONG ? "CLOSE_LONG_EMERGENCY" : "CLOSE_SHORT_EMERGENCY";
+		}
+		if (normalExit) {
+			return current == PositionState.LONG ? "CLOSE_LONG" : "CLOSE_SHORT";
+		}
+		return "HOLD";
 	}
 
 	private String resolveFlipAction(PositionState target) {
