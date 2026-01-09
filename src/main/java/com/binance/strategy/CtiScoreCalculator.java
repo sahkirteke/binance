@@ -26,14 +26,14 @@ public class CtiScoreCalculator {
 		}
 		boolean adxGate = adxReady && adxValue != null && adxValue > ADX_THRESHOLD;
 		int ctiDirScore = ScoreMath.sign(ctiScore);
-		double finalScore = ctiScore + macdScore;
+		double coreScore = ctiScore + macdScore;
 		double trendWeight = adxGate ? 1.0 : 0.0;
-		boolean allowTieBreak = enableTieBreakBias && adxGate && has5mTrend && finalScore == 0;
-		Recommendation recommendation = resolveRecommendation(finalScore, bias, allowTieBreak);
+		boolean allowTieBreak = enableTieBreakBias && adxGate && has5mTrend && coreScore == 0;
+		Recommendation recommendation = resolveRecommendation(coreScore, bias, allowTieBreak);
 		return new ScoreResult(
 				ctiDirScore,
 				macdScore,
-				finalScore,
+				coreScore,
 				trendWeight,
 				recommendation.direction(),
 				recommendation.reason(),
@@ -42,11 +42,11 @@ public class CtiScoreCalculator {
 				adxGateReason(adxReady, adxValue));
 	}
 
-	private Recommendation resolveRecommendation(double finalScore, CtiDirection bias, boolean allowTieBreak) {
-		if (finalScore >= 1) {
+	private Recommendation resolveRecommendation(double coreScore, CtiDirection bias, boolean allowTieBreak) {
+		if (coreScore >= 1) {
 			return new Recommendation(CtiDirection.LONG, RecReason.SCORE_RULES);
 		}
-		if (finalScore <= -1) {
+		if (coreScore <= -1) {
 			return new Recommendation(CtiDirection.SHORT, RecReason.SCORE_RULES);
 		}
 		if (allowTieBreak && (bias == CtiDirection.LONG || bias == CtiDirection.SHORT)) {
@@ -78,7 +78,7 @@ public class CtiScoreCalculator {
 	public record ScoreResult(
 			int ctiDirScore,
 			double macdScore,
-			double finalScore,
+			double coreScore,
 			double trendWeight,
 			CtiDirection recommendation,
 			RecReason recReason,

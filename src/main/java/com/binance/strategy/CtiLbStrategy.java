@@ -2200,6 +2200,7 @@ public class CtiLbStrategy {
 			payload.put("coreScore", coreScore);
 			payload.put("scoreAfterSafety", scoreAfterSafety);
 			payload.put("totalScore", totalScore);
+			payload.put("totalScoreUsedForEntry", positionBefore == PositionState.NONE ? totalScore : Double.NaN);
 			payload.put("drop3", signal.drop3());
 			payload.put("crossDown", signal.crossDown());
 			payload.put("belowSma", signal.belowSma());

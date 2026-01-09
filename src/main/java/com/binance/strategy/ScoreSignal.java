@@ -11,7 +11,7 @@ import com.binance.strategy.CtiScoreCalculator.RecReason;
 			double macdScore,
 			double outHist,
 			double outHistPrev,
-			double finalScore,
+			double coreScore,
 			int score1m,
 			int score5m,
 			double cti1mValue,
