@@ -336,7 +336,9 @@ public class CtiLbStrategy {
 		}
 		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, entryFilterState, entryDecision,
 				entryGateMetrics);
-		boolean emergencyExitTriggered = isEmergencyExit(current, signal.macdHistColor());
+		updateMacdStreak(symbolState, signal);
+		EmergencyExitEvaluation emergencyEval = evaluateEmergencyExit(current, close, signal, symbolState);
+		boolean emergencyExitTriggered = emergencyEval.emergencyConfirmed();
 		String emergencyExitReason = emergencyExitTriggered ? resolveEmergencyExitReason(current) : null;
 		double adxExitPressure = signal.adxExitPressure() == null ? 0.0 : signal.adxExitPressure();
 		double rsiVolExitPressure = resolveRsiVolExitPressure(confidence.conf());
@@ -513,11 +515,57 @@ public class CtiLbStrategy {
 			String decisionActionReason = exitDecision.reason();
 			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
-			boolean skipHoldChecks = scoreExitConfirmed;
 			boolean stopLossExit = isStopLossExit(decisionActionReason);
+			boolean hardExitReason = isHardExitReason(decisionActionReason);
+			boolean skipHoldChecks = emergencyExitTriggered || stopLossExit || hardExitReason;
 			boolean exitBlockedByTrendAligned = false;
 			boolean continuationHold = false;
 			boolean holdExit = false;
+			boolean topZone = isTopZone(confidence);
+			boolean bottomZone = isBottomZone(confidence);
+			boolean softExit = !stopLossExit && !hardExitReason;
+			boolean macdStreakConfirmed = resolveMacdStreakConfirmed(current, symbolState);
+			boolean exitAllowed = true;
+			String blockedReason = null;
+			if (softExit) {
+				if (current == PositionState.LONG && bottomZone) {
+					exitAllowed = false;
+					blockedReason = "BOTTOM_ZONE_SOFT_EXIT_BLOCK";
+				} else if (current == PositionState.SHORT && topZone) {
+					exitAllowed = false;
+					blockedReason = "TOP_ZONE_SOFT_EXIT_BLOCK";
+				} else if (!macdStreakConfirmed) {
+					exitAllowed = false;
+					blockedReason = "SOFT_EXIT_MACD_STREAK";
+				}
+			}
+			LOGGER.info(
+					"EVENT=EXIT_GUARD symbol={} side={} topZone={} bottomZone={} emergencyBase={} c1={} c2={} c3={} emergencyConfirmed={} normalExitConfirmed={} stopLossExit={} skipHoldChecks={} finalExitAllowed={} blockedReason={}",
+					symbol,
+					current,
+					topZone,
+					bottomZone,
+					emergencyEval.base(),
+					emergencyEval.c1(),
+					emergencyEval.c2(),
+					emergencyEval.c3(),
+					emergencyExitTriggered,
+					normalExitConfirmed,
+					stopLossExit,
+					skipHoldChecks,
+					exitAllowed,
+					blockedReason == null ? "NA" : blockedReason);
+			if (!exitAllowed) {
+				decisionActionReason = blockedReason;
+				decisionBlockReason = blockedReason;
+				logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
+						recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
+						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
+						qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+						trendHoldReason, flipQualityScore, decisionTpTrailingState,
+						trendAlignedWithPosition, exitBlockedByTrendAligned);
+				return;
+			}
 			if (skipHoldChecks) {
 				if (emergencyExitTriggered) {
 					decisionActionReason = emergencyExitReason;
@@ -1783,6 +1831,17 @@ public class CtiLbStrategy {
 	private record EntryGateEvaluation(EntryDecision entryDecision, EntryGateMetrics metrics) {
 	}
 
+	private record EmergencyExitEvaluation(
+			boolean base,
+			boolean c1,
+			boolean c2,
+			boolean c3,
+			boolean emergencyConfirmed) {
+		static EmergencyExitEvaluation empty() {
+			return new EmergencyExitEvaluation(false, false, false, false, false);
+		}
+	}
+
 	private record ExtremeGuardDecision(
 			boolean blocked,
 			String reason,
@@ -1964,6 +2023,8 @@ public class CtiLbStrategy {
 		private double rsi9Value = Double.NaN;
 		private double rsi9_5mValue = Double.NaN;
 		private double rsi9_5mPrev = Double.NaN;
+		private int macdDownStreak;
+		private int macdUpStreak;
 		private double atr14Value = Double.NaN;
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
@@ -3020,12 +3081,96 @@ public class CtiLbStrategy {
 		return CtiDirection.NEUTRAL;
 	}
 
-	private boolean isEmergencyExit(PositionState current, MacdHistColor histColor) {
+	private EmergencyExitEvaluation evaluateEmergencyExit(PositionState current, double close, ScoreSignal signal,
+			SymbolState state) {
+		if (current == null || current == PositionState.NONE || signal == null || state == null) {
+			return EmergencyExitEvaluation.empty();
+		}
+		MacdHistColor histColor = signal.macdHistColor();
+		double outHist = signal.outHist();
+		double outHistPrev = signal.outHistPrev();
+		double rsi9 = state.rsi9_5mValue;
+		double rsi9Prev = state.rsi9_5mPrev;
+		boolean base = false;
+		boolean c1 = false;
+		boolean c2 = false;
+		boolean c3 = false;
 		if (current == PositionState.LONG) {
-			return histColor == MacdHistColor.RED;
+			base = histColor == MacdHistColor.RED;
+			c1 = !Double.isNaN(outHist) && !Double.isNaN(outHistPrev) && outHist < outHistPrev;
+			c2 = !Double.isNaN(rsi9) && !Double.isNaN(rsi9Prev) && rsi9 < rsi9Prev;
+			c3 = (!Double.isNaN(state.prevClose1m) && close < state.prevClose1m)
+					|| (!Double.isNaN(state.prevLow1m) && close < state.prevLow1m);
+		} else if (current == PositionState.SHORT) {
+			base = histColor == MacdHistColor.AQUA;
+			c1 = !Double.isNaN(outHist) && !Double.isNaN(outHistPrev) && outHist > outHistPrev;
+			c2 = !Double.isNaN(rsi9) && !Double.isNaN(rsi9Prev) && rsi9 > rsi9Prev;
+			c3 = (!Double.isNaN(state.prevClose1m) && close > state.prevClose1m)
+					|| (!Double.isNaN(state.prevHigh1m) && close > state.prevHigh1m);
+		}
+		boolean confirmed = base && countTrue(c1, c2, c3) >= 2;
+		return new EmergencyExitEvaluation(base, c1, c2, c3, confirmed);
+	}
+
+	private static boolean isHardExitReason(String reason) {
+		if (reason == null) {
+			return false;
+		}
+		return reason.startsWith("EXIT_STOP_LOSS")
+				|| reason.contains("TRAIL")
+				|| reason.contains("LOSS_HARD")
+				|| reason.contains("LOSS_RECOVERY")
+				|| reason.contains("PROFIT_TRAIL")
+				|| reason.contains("LIQUID")
+				|| reason.contains("MAX_LOSS");
+	}
+
+	private static boolean isTopZone(VolRsiConfidence confidence) {
+		if (confidence == null || Double.isNaN(confidence.rsi9()) || Double.isNaN(confidence.volRatio())) {
+			return false;
+		}
+		return confidence.rsi9() > 73.0 && confidence.volRatio() < 0.8;
+	}
+
+	private static boolean isBottomZone(VolRsiConfidence confidence) {
+		if (confidence == null || Double.isNaN(confidence.rsi9()) || Double.isNaN(confidence.volRatio())) {
+			return false;
+		}
+		return confidence.rsi9() < 32.0 && confidence.volRatio() > 2.4;
+	}
+
+	private void updateMacdStreak(SymbolState state, ScoreSignal signal) {
+		if (state == null || signal == null) {
+			return;
+		}
+		double outHist = signal.outHist();
+		double outHistPrev = signal.outHistPrev();
+		if (Double.isNaN(outHist) || Double.isNaN(outHistPrev)) {
+			state.macdDownStreak = 0;
+			state.macdUpStreak = 0;
+			return;
+		}
+		if (outHist < outHistPrev) {
+			state.macdDownStreak += 1;
+			state.macdUpStreak = 0;
+		} else if (outHist > outHistPrev) {
+			state.macdUpStreak += 1;
+			state.macdDownStreak = 0;
+		} else {
+			state.macdDownStreak = 0;
+			state.macdUpStreak = 0;
+		}
+	}
+
+	private boolean resolveMacdStreakConfirmed(PositionState current, SymbolState state) {
+		if (state == null || current == null) {
+			return false;
+		}
+		if (current == PositionState.LONG) {
+			return state.macdDownStreak >= 2;
 		}
 		if (current == PositionState.SHORT) {
-			return histColor == MacdHistColor.AQUA;
+			return state.macdUpStreak >= 2;
 		}
 		return false;
 	}
