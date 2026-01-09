@@ -63,6 +63,7 @@ public class TrailingPnlService {
 				state.profitArmed = true;
 				state.peakProfitPct = pnlPct;
 				logTrailEvent("TRAIL_ARM_PROFIT", symbol, snapshot, markPrice, pnlPct, state);
+				ctiLbStrategy.setTrailingArmed(symbol, true);
 			}
 			if (!state.lossArmed && pnlPct <= lossArmThreshold()) {
 				state.lossArmed = true;
@@ -135,6 +136,7 @@ public class TrailingPnlService {
 				state.reset();
 			}
 		}
+		ctiLbStrategy.setTrailingArmed(symbol, false);
 	}
 
 	private void startPositionSync() {

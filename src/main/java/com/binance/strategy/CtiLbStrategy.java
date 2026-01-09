@@ -87,6 +87,7 @@ public class CtiLbStrategy {
 	private final Map<String, BinanceFuturesOrderClient.ExchangePosition> exchangePositions = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> stateDesyncBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
+	private final Map<String, Boolean> trailingArmedBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, LongAdder> warmupDecisionCounters = new ConcurrentHashMap<>();
 	private final Map<String, SymbolState> symbolStates = new ConcurrentHashMap<>();
 	private final Map<String, Long> lastOppositeExitAtMs = new ConcurrentHashMap<>();
@@ -121,6 +122,27 @@ public class CtiLbStrategy {
 
 	public void enableOrdersAfterWarmup() {
 		ordersEnabledOverride = true;
+	}
+
+	public void setTrailingArmed(String symbol, boolean armed) {
+		if (symbol == null) {
+			return;
+		}
+		if (armed) {
+			trailingArmedBySymbol.put(symbol, true);
+		} else {
+			trailingArmedBySymbol.remove(symbol);
+		}
+	}
+
+	private void clearTrailingArmed(String symbol) {
+		setTrailingArmed(symbol, false);
+	}
+
+	private boolean isTrailingExitOnly(String symbol, PositionState current) {
+		return current != PositionState.NONE
+				&& strategyProperties.pnlTrailEnabled()
+				&& Boolean.TRUE.equals(trailingArmedBySymbol.get(symbol));
 	}
 
 	public void requestTrailingExit(TrailingExitRequest request) {
@@ -175,6 +197,7 @@ public class CtiLbStrategy {
 				.doOnNext(response -> {
 					positionStates.put(symbol, PositionState.NONE);
 					entryStates.remove(symbol);
+					clearTrailingArmed(symbol);
 				})
 				.doOnError(error -> LOGGER.warn("EVENT=TRAIL_EXIT_FAILED symbol={} reason={}", symbol,
 						error.getMessage()))
@@ -424,6 +447,10 @@ public class CtiLbStrategy {
 				entryState == null ? null : entryState.entryTimeMs(),
 				resolveMinHoldMs(),
 				scoreExitConfirmed);
+		boolean trailingExitOnly = isTrailingExitOnly(symbol, current);
+		if (trailingExitOnly) {
+			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "TRAILING_EXIT_ONLY", exitDecision.pnlBps());
+		}
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
 
 		if (current == PositionState.NONE && !effectiveEnableOrders() && entryState != null && exitDecision.exit()) {
@@ -435,6 +462,7 @@ public class CtiLbStrategy {
 							recommendationRaw, confirmedRec);
 				positionStates.put(symbol, PositionState.NONE);
 				entryStates.remove(symbol);
+				clearTrailingArmed(symbol);
 			}
 			return;
 		}
@@ -524,6 +552,7 @@ public class CtiLbStrategy {
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, PositionState.NONE);
 					entryStates.remove(symbol);
+					clearTrailingArmed(symbol);
 				}
 				return;
 			}
@@ -550,6 +579,7 @@ public class CtiLbStrategy {
 					.doOnNext(response -> {
 						positionStates.put(symbol, PositionState.NONE);
 						entryStates.remove(symbol);
+						clearTrailingArmed(symbol);
 						recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
 					})
 					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}", decisionActionReasonFinal,
@@ -569,6 +599,11 @@ public class CtiLbStrategy {
 				? resolveHoldReason(signal, hasSignal, confirmationMet)
 				: current == PositionState.NONE ? "OK" : resolveFlipReason(current, target);
 		String decisionBlockReason = resolveDecisionBlockReason(signal, action, confirmedRec, current);
+		if (current != PositionState.NONE && action != SignalAction.HOLD && trailingExitOnly) {
+			action = SignalAction.HOLD;
+			decisionActionReason = "TRAILING_EXIT_ONLY";
+			decisionBlockReason = "TRAILING_EXIT_ONLY";
+		}
 		if (current == PositionState.NONE && totalScore == 0.0 && action != SignalAction.HOLD) {
 			action = SignalAction.HOLD;
 			decisionActionReason = "ZERO_SCORE_GATE";
@@ -684,6 +719,7 @@ public class CtiLbStrategy {
 							decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
+					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				} else if (target != current) {
 					recordSignalSnapshot(symbol, "EXIT", action, signal, closeTime, close, closeQty,
@@ -699,6 +735,7 @@ public class CtiLbStrategy {
 							decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
+					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				}
 			}
@@ -772,6 +809,7 @@ public class CtiLbStrategy {
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
+					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				}
 			} else if (targetForLog != currentForLog) {
@@ -789,6 +827,7 @@ public class CtiLbStrategy {
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
+					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				}
 			}
@@ -2485,6 +2524,7 @@ public class CtiLbStrategy {
 	private EntryState resolveEntryState(String symbol, PositionState current, double close, long closeTime) {
 		if (current == PositionState.NONE) {
 			entryStates.remove(symbol);
+			clearTrailingArmed(symbol);
 			return null;
 		}
 		EntryState existing = entryStates.get(symbol);
@@ -2524,6 +2564,7 @@ public class CtiLbStrategy {
 			qty = fallbackQty;
 		}
 		CtiDirection side = target == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT;
+		clearTrailingArmed(symbol);
 		entryStates.put(symbol, new EntryState(side, entryPrice, closeTime, qty));
 	}
 
@@ -2694,6 +2735,7 @@ public class CtiLbStrategy {
 		stateDesyncBySymbol.put(symbol, desync);
 		if (updated == PositionState.NONE) {
 			entryStates.remove(symbol);
+			clearTrailingArmed(symbol);
 		} else {
 			BigDecimal entryPrice = position.entryPrice();
 			EntryState existing = entryStates.get(symbol);
@@ -2704,6 +2746,7 @@ public class CtiLbStrategy {
 				CtiDirection side = updated == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT;
 				BigDecimal qty = position.positionAmt() == null ? null : position.positionAmt().abs();
 				if (existing == null) {
+					clearTrailingArmed(symbol);
 					entryStates.put(symbol, new EntryState(side, entryPrice, closeTime, qty));
 				}
 			}
