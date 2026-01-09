@@ -34,6 +34,7 @@ public class OrderStreamService {
 	private final ObjectMapper objectMapper;
 	private final OrderTracker orderTracker;
 	private final CtiLbStrategy ctiLbStrategy;
+	private final TrailingPnlService trailingPnlService;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> socketSubscription = new AtomicReference<>();
 	private final AtomicReference<String> listenKeyRef = new AtomicReference<>();
@@ -43,13 +44,15 @@ public class OrderStreamService {
 			StrategyProperties strategyProperties,
 			ObjectMapper objectMapper,
 			OrderTracker orderTracker,
-			CtiLbStrategy ctiLbStrategy) {
+			CtiLbStrategy ctiLbStrategy,
+			TrailingPnlService trailingPnlService) {
 		this.orderClient = orderClient;
 		this.properties = properties;
 		this.strategyProperties = strategyProperties;
 		this.objectMapper = objectMapper;
 		this.orderTracker = orderTracker;
 		this.ctiLbStrategy = ctiLbStrategy;
+		this.trailingPnlService = trailingPnlService;
 	}
 
 	@PostConstruct
@@ -100,6 +103,10 @@ public class OrderStreamService {
 		try {
 			JsonNode node = objectMapper.readTree(payload);
 			String eventType = node.path("e").asText();
+			if ("ACCOUNT_UPDATE".equals(eventType)) {
+				handleAccountUpdate(node);
+				return;
+			}
 			if (!"ORDER_TRADE_UPDATE".equals(eventType)) {
 				return;
 			}
@@ -124,6 +131,25 @@ public class OrderStreamService {
 			}
 		} catch (Exception ex) {
 			LOGGER.warn("EVENT=ORDER_STREAM_PARSE_FAIL error={}", ex.getMessage());
+		}
+	}
+
+	private void handleAccountUpdate(JsonNode node) {
+		JsonNode accountNode = node.path("a");
+		JsonNode positionsNode = accountNode.path("P");
+		if (!positionsNode.isArray()) {
+			return;
+		}
+		for (JsonNode positionNode : positionsNode) {
+			String symbol = positionNode.path("s").asText();
+			double entryPrice = positionNode.path("ep").asDouble(0.0);
+			double positionAmt = positionNode.path("pa").asDouble(0.0);
+			String positionSide = positionNode.path("ps").asText();
+			Integer leverage = null;
+			if (positionNode.hasNonNull("l")) {
+				leverage = positionNode.path("l").asInt();
+			}
+			trailingPnlService.onPositionUpdate(symbol, entryPrice, positionAmt, positionSide, leverage);
 		}
 	}
 

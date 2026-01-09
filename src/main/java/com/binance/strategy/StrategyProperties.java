@@ -95,7 +95,15 @@ public record StrategyProperties(
 		int trendHoldMaxBars,
 		boolean tpTrailingEnabled,
 		double tpStartPct,
-		double tpTrailPct) {
+		double tpTrailPct,
+		boolean pnlTrailEnabled,
+		int pnlTrailDebounceTicks,
+		long pnlTrailDebounceMs,
+		long pnlTrailPositionSyncMs,
+		double pnlTrailProfitArm,
+		double pnlTrailLossArm,
+		double pnlTrailProfitGap,
+		double pnlTrailLossGap) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

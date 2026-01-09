@@ -123,6 +123,62 @@ public class CtiLbStrategy {
 		ordersEnabledOverride = true;
 	}
 
+	public void requestTrailingExit(TrailingExitRequest request) {
+		if (request == null || request.symbol() == null) {
+			return;
+		}
+		String symbol = request.symbol();
+		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
+		if (current == PositionState.NONE) {
+			LOGGER.info("EVENT=TRAIL_EXIT_SKIP symbol={} reason=NO_POSITION", symbol);
+			return;
+		}
+		EntryState entryState = entryStates.get(symbol);
+		if (entryState == null || entryState.entryPrice() == null || entryState.entryPrice().signum() <= 0) {
+			LOGGER.info("EVENT=TRAIL_EXIT_SKIP symbol={} reason=NO_ENTRY_STATE", symbol);
+			return;
+		}
+		BigDecimal exitQty = resolveExitQuantity(symbol, entryState, request.markPrice());
+		if (exitQty == null || exitQty.signum() <= 0) {
+			LOGGER.info("EVENT=TRAIL_EXIT_SKIP symbol={} reason=QTY_ZERO", symbol);
+			return;
+		}
+		if (!effectiveEnableOrders()) {
+			LOGGER.info(
+					"EVENT=TRAIL_EXIT_SIGNAL symbol={} reason={} side={} entryPrice={} markPrice={} leverageUsed={} pnlPct={}",
+					symbol,
+					request.reason(),
+					current,
+					request.entryPrice(),
+					request.markPrice(),
+					request.leverageUsed(),
+					String.format("%.4f", request.pnlPct()));
+			return;
+		}
+		orderClient.fetchHedgeModeEnabled()
+				.flatMap(hedgeMode -> {
+					String correlationId = orderTracker.nextCorrelationId(symbol, "TRAIL_EXIT");
+					return closePosition(symbol, current, exitQty, hedgeMode, correlationId)
+							.doOnNext(response -> {
+								orderTracker.registerSubmitted(symbol, correlationId, response, true);
+								logOrderEvent("TRAIL_EXIT_EXECUTED", symbol, request.reason(),
+										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
+										hedgeMode ? current.name() : "", correlationId, response, null);
+							})
+							.doOnError(error -> logOrderEvent("TRAIL_EXIT_FAILED", symbol, request.reason(),
+									current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
+									hedgeMode ? current.name() : "", correlationId, null, error.getMessage()));
+				})
+				.doOnNext(response -> {
+					positionStates.put(symbol, PositionState.NONE);
+					entryStates.remove(symbol);
+				})
+				.doOnError(error -> LOGGER.warn("EVENT=TRAIL_EXIT_FAILED symbol={} reason={}", symbol,
+						error.getMessage()))
+				.onErrorResume(error -> Mono.empty())
+				.subscribe();
+	}
+
 	public void syncPositionNow(String symbol, long eventTime) {
 		orderClient.fetchPosition(symbol)
 				.doOnNext(position -> applyExchangePosition(symbol, position, eventTime))
@@ -2290,19 +2346,19 @@ public class CtiLbStrategy {
 				}
 					ObjectNode indicatorsNode = objectMapper.createObjectNode();
 					if (entryFilterState != null) {
-					indicatorsNode.put("rsi9", entryFilterState.rsi9());
-					indicatorsNode.put("volume", entryFilterState.volume());
-					indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
-					indicatorsNode.put("atr14", entryFilterState.atr14());
-					indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
-					indicatorsNode.put("ema20_1m", entryFilterState.ema20_1m());
-					indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
-					indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
-					indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
-					indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
-					indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
-					indicatorsNode.put("volOk", entryFilterState.volOk());
-					indicatorsNode.put("atrOk", entryFilterState.atrOk());
+						indicatorsNode.put("rsi9", entryFilterState.rsi9());
+						indicatorsNode.put("volume", entryFilterState.volume());
+						indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
+						indicatorsNode.put("atr14", entryFilterState.atr14());
+						indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
+						indicatorsNode.put("ema20_1m", entryFilterState.ema20_1m());
+						indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
+						indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
+						indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
+						indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
+						indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
+						indicatorsNode.put("volOk", entryFilterState.volOk());
+						indicatorsNode.put("atrOk", entryFilterState.atrOk());
 						if (entryFilterState.qualityBlockReason() != null) {
 							indicatorsNode.put("qualityBlockReason", entryFilterState.qualityBlockReason());
 						}
