@@ -57,13 +57,9 @@ public class ScoreSignalIndicator {
 			return;
 		}
 		last1mCloseTime = candle.closeTime();
-		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
-		double cti1mValue = cti1mSignal.bfr();
-		double cti1mPrev = cti1mSignal.bfrPrev();
-		CtiDirection cti1mDir = resolveRawDirection(cti1mValue, cti1mPrev);
-		lastCti1mValue = cti1mValue;
-		lastCti1mPrev = cti1mPrev;
-		lastCti1mDir = cti1mDir;
+		lastCti1mValue = Double.NaN;
+		lastCti1mPrev = Double.NaN;
+		lastCti1mDir = CtiDirection.NEUTRAL;
 	}
 
 	public void warmupOneMinuteCandle(Candle candle) {
@@ -71,10 +67,9 @@ public class ScoreSignalIndicator {
 			return;
 		}
 		last1mCloseTime = candle.closeTime();
-		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
-		lastCti1mValue = cti1mSignal.bfr();
-		lastCti1mPrev = cti1mSignal.bfrPrev();
-		lastCti1mDir = resolveRawDirection(lastCti1mValue, lastCti1mPrev);
+		lastCti1mValue = Double.NaN;
+		lastCti1mPrev = Double.NaN;
+		lastCti1mDir = CtiDirection.NEUTRAL;
 	}
 
 	public void warmupFiveMinuteCandle(Candle candle) {
@@ -154,8 +149,8 @@ public class ScoreSignalIndicator {
 		double macdScore = resolveMacdScore(histColor);
 
 		int score5m = lastCti5mDir == CtiDirection.LONG ? 1 : lastCti5mDir == CtiDirection.SHORT ? -1 : 0;
-		int score1m = lastCti1mDir == CtiDirection.LONG ? 1 : lastCti1mDir == CtiDirection.SHORT ? -1 : 0;
-		double weightedCtiScore = (score1m * 0.5) + (score5m * 0.5);
+		int score1m = 0;
+		double weightedCtiScore = score5m;
 		int hamCtiScore = weightedCtiScore > 0.5 ? 1 : weightedCtiScore < -0.5 ? -1 : 0;
 		double ctiScore = resolveCtiScore(lastCti5mDir);
 		CtiDirection bias = resolveBias(lastCti5mDir);
