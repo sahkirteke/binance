@@ -149,8 +149,25 @@ public class CtiLbStrategy {
 		return strategyProperties.pnlTrailProfitArm() > 0 ? strategyProperties.pnlTrailProfitArm() : 20.0;
 	}
 
+	private double resolvePnlTrailLossArm() {
+		return strategyProperties.pnlTrailLossArm() < 0 ? strategyProperties.pnlTrailLossArm() : -20.0;
+	}
+
 	private int resolveLeverageForTrail() {
 		return strategyProperties.leverage() > 0 ? strategyProperties.leverage() : 50;
+	}
+
+	private double calculateLeveragedPnlPct(EntryState entryState, double close) {
+		if (entryState == null || entryState.entryPrice() == null || entryState.entryPrice().signum() <= 0
+				|| close <= 0) {
+			return Double.NaN;
+		}
+		double entryPrice = entryState.entryPrice().doubleValue();
+		double delta = (close - entryPrice) / entryPrice;
+		if (entryState.side() == CtiDirection.SHORT) {
+			delta = -delta;
+		}
+		return delta * 100.0 * resolveLeverageForTrail();
 	}
 
 	public void requestTrailingExit(TrailingExitRequest request) {
@@ -279,6 +296,11 @@ public class CtiLbStrategy {
 		}
 		if (signal.recReason() == CtiScoreCalculator.RecReason.TIE_HOLD) {
 			confirmedRec = CtiDirection.NEUTRAL;
+		}
+		if (strategyProperties.pnlTrailEnabled()
+				&& current != PositionState.NONE
+				&& Boolean.TRUE.equals(trailingArmedBySymbol.get(symbol))) {
+			return;
 		}
 
 		boolean trendAlignedWithPosition = resolveTrendAlignedWithPosition(
@@ -455,15 +477,20 @@ public class CtiLbStrategy {
 				entryState == null ? null : entryState.entryTimeMs(),
 				resolveMinHoldMs(),
 				scoreExitConfirmed);
+		double leveragedPnlPct = Double.NaN;
 		if (strategyProperties.pnlTrailEnabled()
 				&& current != PositionState.NONE
 				&& entryState != null) {
-			double leveragedPnlPct = (exitDecision.pnlBps() / 100.0) * resolveLeverageForTrail();
-			if (leveragedPnlPct >= resolvePnlTrailProfitArm()) {
+			leveragedPnlPct = calculateLeveragedPnlPct(entryState, close);
+			if (!Double.isNaN(leveragedPnlPct) && leveragedPnlPct >= resolvePnlTrailProfitArm()) {
 				setTrailingArmed(symbol, true);
 			}
 		}
 		boolean trailingExitOnly = isTrailingExitOnly(symbol, current);
+		boolean trailingLossOnly = !Double.isNaN(leveragedPnlPct) && leveragedPnlPct <= resolvePnlTrailLossArm();
+		if (trailingLossOnly) {
+			trailingExitOnly = true;
+		}
 		if (trailingExitOnly) {
 			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "TRAILING_EXIT_ONLY", exitDecision.pnlBps());
 		}
