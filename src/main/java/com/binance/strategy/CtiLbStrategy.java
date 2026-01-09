@@ -245,6 +245,40 @@ public class CtiLbStrategy {
 				current,
 				decisionValue);
 
+		if (!warmupMode) {
+			LOGGER.info(
+					"EVENT=POST_WARMUP_CALC symbol={} t5mCloseUsed={} close5m={} outHist={} outHistPrev={} histColor={}"
+							+ " macdScore={} cti1mDir={} cti5mDir={} ctiScore={} rsi9_5m={} volume5m={} volumeSma10_5m={}"
+							+ " volRatio={} volConf={} rsiConf={} conf={} rsiVolScore={} rsiVolExitPressure={} adx5m={}"
+							+ " adxSma10={} adxScore={} coreScore={} scoreAfterSafety={} totalScore={} totalScoreForExit={}",
+					symbol,
+					signal.t5mCloseUsed(),
+					close,
+					signal.outHist(),
+					signal.outHistPrev(),
+					signal.macdHistColor(),
+					signal.macdScore(),
+					signal.cti1mDir(),
+					signal.cti5mDir(),
+					signal.ctiScore(),
+					confidence.rsi9(),
+					volume5m,
+					confidence.volumeSma10(),
+					confidence.volRatio(),
+					confidence.volConf(),
+					confidence.rsiConf(),
+					confidence.conf(),
+					rsiVolScore,
+					rsiVolExitPressure,
+					signal.adx5m(),
+					signal.adxSma10(),
+					adxScore,
+					coreScore,
+					scoreAfterSafety,
+					totalScore,
+					totalScoreForExit);
+		}
+
 		int qualityScoreForLog = entryFilterState.qualityScore();
 		String qualityConfirmReason = null;
 		if (warmupMode) {
