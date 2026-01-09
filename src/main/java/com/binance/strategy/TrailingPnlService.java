@@ -63,6 +63,8 @@ public class TrailingPnlService {
 				state.profitArmed = true;
 				state.peakProfitPct = pnlPct;
 				logTrailEvent("TRAIL_ARM_PROFIT", symbol, snapshot, markPrice, pnlPct, state);
+			}
+			if (state.profitArmed) {
 				ctiLbStrategy.setTrailingArmed(symbol, true);
 			}
 			if (!state.lossArmed && pnlPct <= lossArmThreshold()) {
