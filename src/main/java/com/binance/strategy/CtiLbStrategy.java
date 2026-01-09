@@ -57,6 +57,7 @@ public class CtiLbStrategy {
 	private static final int VOLUME_SMA_10_PERIOD = 10;
 	private static final double MACD_HIST_EPS = 1e-6;
 	private static final double EMA20_MAX_DIST_PCT = 0.008;
+	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
 	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
@@ -495,6 +496,16 @@ public class CtiLbStrategy {
 			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "TRAILING_EXIT_ONLY", exitDecision.pnlBps());
 		}
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
+		double pnlBps = exitDecision.pnlBps();
+		updateMaxPnlState(symbolState, entryState, pnlBps);
+		double maxPnlBps = symbolState.maxPnlBpsSinceEntry;
+		double givebackBps = Double.isNaN(maxPnlBps) ? Double.NaN : maxPnlBps - pnlBps;
+		boolean givebackExit = !Double.isNaN(givebackBps)
+				&& maxPnlBps > 0.0
+				&& givebackBps >= GIVEBACK_THRESHOLD_BPS;
+		if (givebackExit && !exitDecision.exit()) {
+			exitDecision = new CtiLbDecisionEngine.ExitDecision(true, "EXIT_GIVEBACK", pnlBps);
+		}
 
 		if (current == PositionState.NONE && !effectiveEnableOrders() && entryState != null && exitDecision.exit()) {
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
@@ -517,17 +528,19 @@ public class CtiLbStrategy {
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
 			boolean stopLossExit = isStopLossExit(decisionActionReason);
 			boolean hardExitReason = isHardExitReason(decisionActionReason);
-			boolean skipHoldChecks = emergencyExitTriggered || stopLossExit || hardExitReason;
+			boolean trailStopHit = trailState.trailStopHit();
+			boolean reversalConfirm = evaluateReversalConfirm(current, close, signal, symbolState);
+			boolean skipHoldChecks = emergencyExitTriggered || stopLossExit || trailStopHit || givebackExit || hardExitReason;
 			boolean exitBlockedByTrendAligned = false;
 			boolean continuationHold = false;
 			boolean holdExit = false;
 			boolean topZone = isTopZone(confidence);
 			boolean bottomZone = isBottomZone(confidence);
-			boolean softExit = !stopLossExit && !hardExitReason;
+			boolean softExit = !stopLossExit && !hardExitReason && !givebackExit && !trailStopHit;
 			boolean macdStreakConfirmed = resolveMacdStreakConfirmed(current, symbolState);
 			boolean exitAllowed = true;
 			String blockedReason = null;
-			if (softExit) {
+			if (softExit && !reversalConfirm) {
 				if (current == PositionState.LONG && bottomZone) {
 					exitAllowed = false;
 					blockedReason = "BOTTOM_ZONE_SOFT_EXIT_BLOCK";
@@ -555,6 +568,15 @@ public class CtiLbStrategy {
 					skipHoldChecks,
 					exitAllowed,
 					blockedReason == null ? "NA" : blockedReason);
+			LOGGER.info(
+					"EVENT=EXIT_ACCEL symbol={} side={} reversalConfirm={} givebackBps={} maxPnlBps={} skipHoldChecks={} finalExitAllowed={}",
+					symbol,
+					current,
+					reversalConfirm,
+					Double.isNaN(givebackBps) ? "NA" : String.format("%.2f", givebackBps),
+					Double.isNaN(maxPnlBps) ? "NA" : String.format("%.2f", maxPnlBps),
+					skipHoldChecks,
+					exitAllowed);
 			if (!exitAllowed) {
 				decisionActionReason = blockedReason;
 				decisionBlockReason = blockedReason;
@@ -569,11 +591,11 @@ public class CtiLbStrategy {
 			if (skipHoldChecks) {
 				if (emergencyExitTriggered) {
 					decisionActionReason = emergencyExitReason;
-				} else if (normalExitConfirmed) {
+				} else if (normalExitConfirmed && !givebackExit) {
 					decisionActionReason = current == PositionState.LONG ? "CLOSE_LONG" : "CLOSE_SHORT";
 				}
 			}
-			if (!skipHoldChecks) {
+			if (!skipHoldChecks && !reversalConfirm) {
 				if (trendHoldActive && !stopLossExit && isTakeProfitExit(decisionActionReason)
 						&& strategyProperties.tpTrailingEnabled()) {
 					if (!decisionTpTrailingState.allowExit()) {
@@ -2025,6 +2047,8 @@ public class CtiLbStrategy {
 		private double rsi9_5mPrev = Double.NaN;
 		private int macdDownStreak;
 		private int macdUpStreak;
+		private long maxPnlEntryTimeMs;
+		private double maxPnlBpsSinceEntry = Double.NaN;
 		private double atr14Value = Double.NaN;
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
@@ -3112,11 +3136,41 @@ public class CtiLbStrategy {
 		return new EmergencyExitEvaluation(base, c1, c2, c3, confirmed);
 	}
 
+	private boolean evaluateReversalConfirm(PositionState current, double close, ScoreSignal signal,
+			SymbolState state) {
+		if (current == null || current == PositionState.NONE || signal == null || state == null) {
+			return false;
+		}
+		MacdHistColor histColor = signal.macdHistColor();
+		double outHist = signal.outHist();
+		double outHistPrev = signal.outHistPrev();
+		double rsi9 = state.rsi9_5mValue;
+		double rsi9Prev = state.rsi9_5mPrev;
+		if (current == PositionState.LONG) {
+			boolean c1 = !Double.isNaN(outHist) && !Double.isNaN(outHistPrev) && outHist < outHistPrev;
+			boolean c2 = !Double.isNaN(rsi9) && !Double.isNaN(rsi9Prev) && rsi9 < rsi9Prev;
+			boolean c3 = (!Double.isNaN(state.prevClose1m) && close < state.prevClose1m)
+					|| histColor == MacdHistColor.BLUE
+					|| histColor == MacdHistColor.RED;
+			return countTrue(c1, c2, c3) >= 2;
+		}
+		if (current == PositionState.SHORT) {
+			boolean c1 = !Double.isNaN(outHist) && !Double.isNaN(outHistPrev) && outHist > outHistPrev;
+			boolean c2 = !Double.isNaN(rsi9) && !Double.isNaN(rsi9Prev) && rsi9 > rsi9Prev;
+			boolean c3 = (!Double.isNaN(state.prevClose1m) && close > state.prevClose1m)
+					|| histColor == MacdHistColor.AQUA
+					|| histColor == MacdHistColor.MAROON;
+			return countTrue(c1, c2, c3) >= 2;
+		}
+		return false;
+	}
+
 	private static boolean isHardExitReason(String reason) {
 		if (reason == null) {
 			return false;
 		}
 		return reason.startsWith("EXIT_STOP_LOSS")
+				|| reason.startsWith("EXIT_GIVEBACK")
 				|| reason.contains("TRAIL")
 				|| reason.contains("LOSS_HARD")
 				|| reason.contains("LOSS_RECOVERY")
@@ -3137,6 +3191,27 @@ public class CtiLbStrategy {
 			return false;
 		}
 		return confidence.rsi9() < 32.0 && confidence.volRatio() > 2.4;
+	}
+
+	private void updateMaxPnlState(SymbolState state, EntryState entryState, double pnlBps) {
+		if (state == null) {
+			return;
+		}
+		if (entryState == null || entryState.entryTimeMs() <= 0 || Double.isNaN(pnlBps)) {
+			state.maxPnlEntryTimeMs = 0L;
+			state.maxPnlBpsSinceEntry = Double.NaN;
+			return;
+		}
+		if (state.maxPnlEntryTimeMs != entryState.entryTimeMs()) {
+			state.maxPnlEntryTimeMs = entryState.entryTimeMs();
+			state.maxPnlBpsSinceEntry = pnlBps;
+			return;
+		}
+		if (Double.isNaN(state.maxPnlBpsSinceEntry)) {
+			state.maxPnlBpsSinceEntry = pnlBps;
+			return;
+		}
+		state.maxPnlBpsSinceEntry = Math.max(state.maxPnlBpsSinceEntry, pnlBps);
 	}
 
 	private void updateMacdStreak(SymbolState state, ScoreSignal signal) {
