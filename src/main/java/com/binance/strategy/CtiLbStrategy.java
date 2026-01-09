@@ -55,6 +55,7 @@ public class CtiLbStrategy {
 	private static final int ATR_14_PERIOD = 14;
 	private static final int ATR_SMA_20_PERIOD = 20;
 	private static final int VOLUME_SMA_10_PERIOD = 10;
+	private static final double MACD_HIST_EPS = 1e-6;
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
 	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
@@ -207,6 +208,7 @@ public class CtiLbStrategy {
 		double totalScore = scoreAfterSafety + adxScore;
 		if (current == PositionState.NONE) {
 			confirmedRec = resolveEntryDirection(totalScore);
+			entryDecision = applyMacdEntryGates(entryDecision, confirmedRec, signal);
 		}
 		boolean emergencyExitTriggered = isEmergencyExit(current, signal.macdHistColor());
 		String emergencyExitReason = emergencyExitTriggered ? resolveEmergencyExitReason(current) : null;
@@ -1333,12 +1335,38 @@ public class CtiLbStrategy {
 			return new EntryDecision(null, entryFilterState.qualityBlockReason(),
 					entryFilterState.qualityBlockReason());
 		}
+		if (entryFilterState.entryTrigger() && !entryFilterState.ema200Ok()) {
+			return new EntryDecision(null, "ENTRY_BLOCK_EMA200", "ENTRY_BLOCK_EMA200");
+		}
+		if (entryFilterState.entryTrigger() && !entryFilterState.ema20Ok()) {
+			return new EntryDecision(null, "ENTRY_BLOCK_EMA20", "ENTRY_BLOCK_EMA20");
+		}
 		if (entryFilterState.entryTrigger()) {
 			CtiDirection confirmed = entryFilterState.fiveMinDir() == 1 ? CtiDirection.LONG : CtiDirection.SHORT;
 			String reason = "ENTRY_NORMAL_SCORE_CONFIRMED";
 			return new EntryDecision(confirmed, null, reason);
 		}
 		return new EntryDecision(null, null, null);
+	}
+
+	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection confirmedRec, ScoreSignal signal) {
+		if (confirmedRec == null || confirmedRec == CtiDirection.NEUTRAL) {
+			return entryDecision;
+		}
+		if (entryDecision.blockReason() != null) {
+			return entryDecision;
+		}
+		if (signal == null || Double.isNaN(signal.outHist()) || Math.abs(signal.outHist()) <= MACD_HIST_EPS) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_HIST_EPS");
+		}
+		MacdHistColor histColor = signal.macdHistColor();
+		if (confirmedRec == CtiDirection.LONG && histColor != MacdHistColor.AQUA) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR");
+		}
+		if (confirmedRec == CtiDirection.SHORT && histColor != MacdHistColor.RED) {
+			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR");
+		}
+		return entryDecision;
 	}
 
 	private EntryDecision applyPendingFlipGate(String symbol, PositionState current, EntryDecision entryDecision,
