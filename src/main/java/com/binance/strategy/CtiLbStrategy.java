@@ -305,9 +305,7 @@ public class CtiLbStrategy {
 
 		boolean trendAlignedWithPosition = resolveTrendAlignedWithPosition(
 				current,
-				fiveMinDir,
-				signal.cti1mValue(),
-				signal.cti1mPrev());
+				fiveMinDir);
 		double coreScore = signal.macdScore() + signal.ctiScore();
 		int dirSign = ScoreMath.sign(coreScore);
 		double rsi9_5m = symbolState.rsi9_5mValue;
@@ -739,14 +737,47 @@ public class CtiLbStrategy {
 							strategyProperties.flipCooldownMs(),
 							strategyProperties.maxFlipsPer5Min(),
 							close,
-							signal.cti1mValue(),
-							signal.cti1mPrev(),
+							signal.cti5mValue() == null ? Double.NaN : signal.cti5mValue(),
+							signal.cti5mPrev() == null ? Double.NaN : signal.cti5mPrev(),
 							strategyProperties.minBfrDelta(),
 							strategyProperties.minPriceMoveBps(),
 							lastFlipPrices.get(symbol)));
 			if (blockDecision.blocked()) {
 				decisionActionReason = blockDecision.reason();
 				action = SignalAction.HOLD;
+			}
+		}
+		if (action != SignalAction.HOLD) {
+			Double adx5m = signal.adx5m();
+			if (adx5m != null && adx5m < 15.0) {
+				action = SignalAction.HOLD;
+				decisionActionReason = "NO_ENTRY_ADX_BELOW_15";
+				decisionBlockReason = "NO_ENTRY_ADX_BELOW_15";
+			}
+		}
+		if (action != SignalAction.HOLD) {
+			CtiDirection targetDir = target == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT;
+			ExtremeGuardDecision extremeGuardDecision = evaluateExtremeGuardrail(
+					targetDir,
+					close,
+					signal,
+					confidence,
+					symbolState);
+			if (extremeGuardDecision != null) {
+				LOGGER.info(
+						"EVENT=EXTREME_GUARD symbol={} zone={} vetoDir={} c1={} c2={} c3={} final={}",
+						symbol,
+						extremeGuardDecision.zone(),
+						extremeGuardDecision.vetoDir(),
+						extremeGuardDecision.c1(),
+						extremeGuardDecision.c2(),
+						extremeGuardDecision.c3(),
+						extremeGuardDecision.finalDecision());
+				if (extremeGuardDecision.blocked()) {
+					action = SignalAction.HOLD;
+					decisionActionReason = extremeGuardDecision.reason();
+					decisionBlockReason = extremeGuardDecision.reason();
+				}
 			}
 		}
 		if (action == SignalAction.HOLD || !"OK_EXECUTED".equals(decisionBlockReason)) {
@@ -971,6 +1002,8 @@ public class CtiLbStrategy {
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
 		symbolState.updateOneMinuteIndicators(candle);
 		symbolState.prevClose1m = candle.close();
+		symbolState.prevHigh1m = candle.high();
+		symbolState.prevLow1m = candle.low();
 	}
 
 	public void onWarmupFiveMinuteCandle(String symbol, Candle candle) {
@@ -1150,15 +1183,75 @@ public class CtiLbStrategy {
 		return false;
 	}
 
-	private boolean resolveTrendAlignedWithPosition(PositionState current, int fiveMinDir, double bfr1m,
-			double bfrPrev) {
+	private boolean resolveTrendAlignedWithPosition(PositionState current, int fiveMinDir) {
 		if (current == PositionState.LONG) {
-			return fiveMinDir == 1 && (!Double.isNaN(bfr1m) && !Double.isNaN(bfrPrev) && bfr1m >= bfrPrev);
+			return fiveMinDir == 1;
 		}
 		if (current == PositionState.SHORT) {
-			return fiveMinDir == -1 && (!Double.isNaN(bfr1m) && !Double.isNaN(bfrPrev) && bfr1m <= bfrPrev);
+			return fiveMinDir == -1;
 		}
 		return false;
+	}
+
+	private ExtremeGuardDecision evaluateExtremeGuardrail(CtiDirection targetDir, double close, ScoreSignal signal,
+			VolRsiConfidence confidence, SymbolState state) {
+		if (targetDir == null || targetDir == CtiDirection.NEUTRAL || signal == null || confidence == null
+				|| state == null) {
+			return null;
+		}
+		double rsi9 = confidence.rsi9();
+		double volRatio = confidence.volRatio();
+		if (Double.isNaN(rsi9) || Double.isNaN(volRatio)) {
+			return null;
+		}
+		boolean topZone = rsi9 > 73.0 && volRatio < 0.8;
+		boolean bottomZone = rsi9 < 32.0 && volRatio > 2.4;
+		if (!topZone && !bottomZone) {
+			return null;
+		}
+		double macdHist = signal.outHist();
+		double macdHistPrev = signal.outHistPrev();
+		MacdHistColor histColor = signal.macdHistColor();
+		boolean prevCloseLower = !Double.isNaN(state.prevClose1m) && close < state.prevClose1m;
+		boolean prevCloseHigher = !Double.isNaN(state.prevClose1m) && close > state.prevClose1m;
+		boolean prevLowLower = !Double.isNaN(state.prevLow1m) && close < state.prevLow1m;
+		boolean prevHighHigher = !Double.isNaN(state.prevHigh1m) && close > state.prevHigh1m;
+		boolean rsiPrevReady = !Double.isNaN(state.rsi9_5mPrev);
+		if (topZone) {
+			boolean c1 = !Double.isNaN(macdHist) && !Double.isNaN(macdHistPrev) && macdHist < macdHistPrev;
+			boolean c2 = rsiPrevReady && rsi9 < state.rsi9_5mPrev;
+			boolean c3 = prevCloseLower || prevLowLower || histColor == MacdHistColor.BLUE;
+			if (targetDir == CtiDirection.LONG) {
+				return new ExtremeGuardDecision(true, "EXTREME_GUARD_TOP_LONG_VETO", "TOP", "LONG", c1, c2, c3,
+						"NO_ENTRY");
+			}
+			boolean allow = countTrue(c1, c2, c3) >= 2;
+			return new ExtremeGuardDecision(!allow, "EXTREME_GUARD_TOP_SHORT_CONFIRM", "TOP", "SHORT", c1, c2, c3,
+					allow ? "ALLOW_SHORT" : "NO_ENTRY");
+		}
+		boolean c1 = !Double.isNaN(macdHist) && !Double.isNaN(macdHistPrev) && macdHist > macdHistPrev;
+		boolean c2 = rsiPrevReady && rsi9 > state.rsi9_5mPrev;
+		boolean c3 = prevCloseHigher || prevHighHigher || histColor == MacdHistColor.MAROON;
+		if (targetDir == CtiDirection.SHORT) {
+			return new ExtremeGuardDecision(true, "EXTREME_GUARD_BOTTOM_SHORT_VETO", "BOTTOM", "SHORT", c1, c2, c3,
+					"NO_ENTRY");
+		}
+		boolean allow = countTrue(c1, c2, c3) >= 2;
+		return new ExtremeGuardDecision(!allow, "EXTREME_GUARD_BOTTOM_LONG_CONFIRM", "BOTTOM", "LONG", c1, c2, c3,
+				allow ? "ALLOW_LONG" : "NO_ENTRY");
+	}
+
+	private static int countTrue(boolean... checks) {
+		int count = 0;
+		if (checks == null) {
+			return 0;
+		}
+		for (boolean check : checks) {
+			if (check) {
+				count++;
+			}
+		}
+		return count;
 	}
 
 	private static double resolveProfitPct(CtiDirection side, BigDecimal entryPrice, double close) {
@@ -1690,6 +1783,17 @@ public class CtiLbStrategy {
 	private record EntryGateEvaluation(EntryDecision entryDecision, EntryGateMetrics metrics) {
 	}
 
+	private record ExtremeGuardDecision(
+			boolean blocked,
+			String reason,
+			String zone,
+			String vetoDir,
+			boolean c1,
+			boolean c2,
+			boolean c3,
+			String finalDecision) {
+	}
+
 	private record EntryGateMetrics(
 			double rsi9Used,
 			double outHist,
@@ -1826,6 +1930,8 @@ public class CtiLbStrategy {
 		private long fiveMinFlipTimeMs;
 		private double fiveMinFlipPrice;
 		private double prevClose1m = Double.NaN;
+		private double prevHigh1m = Double.NaN;
+		private double prevLow1m = Double.NaN;
 		private long last1mCloseTime;
 		private long last5mCloseTime;
 		private double peakPriceSinceEntry = Double.NaN;
@@ -1857,6 +1963,7 @@ public class CtiLbStrategy {
 		private double ema200_5mValue = Double.NaN;
 		private double rsi9Value = Double.NaN;
 		private double rsi9_5mValue = Double.NaN;
+		private double rsi9_5mPrev = Double.NaN;
 		private double atr14Value = Double.NaN;
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
@@ -1896,6 +2003,7 @@ public class CtiLbStrategy {
 					BigDecimal.valueOf(candle.volume())));
 			int index = series5m.getEndIndex();
 			ema200_5mValue = ema200_5m.getValue(index).doubleValue();
+			rsi9_5mPrev = rsi9_5mValue;
 			rsi9_5mValue = rsi9_5m.getValue(index).doubleValue();
 			volumeSma10_5mValue = volumeSma10_5m.getValue(index).doubleValue();
 		}

@@ -157,8 +157,8 @@ public class ScoreSignalIndicator {
 		int score1m = lastCti1mDir == CtiDirection.LONG ? 1 : lastCti1mDir == CtiDirection.SHORT ? -1 : 0;
 		double weightedCtiScore = (score1m * 0.5) + (score5m * 0.5);
 		int hamCtiScore = weightedCtiScore > 0.5 ? 1 : weightedCtiScore < -0.5 ? -1 : 0;
-		double ctiScore = resolveCtiScore(lastCti1mDir, lastCti5mDir);
-		CtiDirection bias = resolveBias(lastCti1mDir, lastCti5mDir);
+		double ctiScore = resolveCtiScore(lastCti5mDir);
+		CtiDirection bias = resolveBias(lastCti5mDir);
 		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
 		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD;
 		boolean has5mTrend = cti5mReady && lastCti5mDir != CtiDirection.NEUTRAL;
@@ -340,18 +340,18 @@ public class ScoreSignalIndicator {
 		return CtiDirection.NEUTRAL;
 	}
 
-	private CtiDirection resolveBias(CtiDirection cti1mDir, CtiDirection cti5mDir) {
-		if (cti5mDir != CtiDirection.NEUTRAL) {
-			return cti5mDir;
+	private CtiDirection resolveBias(CtiDirection cti5mDir) {
+		if (cti5mDir == null) {
+			return CtiDirection.NEUTRAL;
 		}
-		return cti1mDir == null ? CtiDirection.NEUTRAL : cti1mDir;
+		return cti5mDir;
 	}
 
-	private double resolveCtiScore(CtiDirection cti1mDir, CtiDirection cti5mDir) {
-		if (cti1mDir == CtiDirection.LONG && cti5mDir == CtiDirection.LONG) {
+	private double resolveCtiScore(CtiDirection cti5mDir) {
+		if (cti5mDir == CtiDirection.LONG) {
 			return 1.0;
 		}
-		if (cti1mDir == CtiDirection.SHORT && cti5mDir == CtiDirection.SHORT) {
+		if (cti5mDir == CtiDirection.SHORT) {
 			return -1.0;
 		}
 		return 0.0;
