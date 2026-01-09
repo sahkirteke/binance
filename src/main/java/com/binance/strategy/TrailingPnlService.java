@@ -33,8 +33,7 @@ public class TrailingPnlService {
 	private final Map<String, PositionSnapshot> positionMap = new ConcurrentHashMap<>();
 	private final Map<String, TrailingState> trailingMap = new ConcurrentHashMap<>();
 	private final Map<String, Object> fileLocks = new ConcurrentHashMap<>();
-	private final long debounceMsDefault = 300L;
-	private final int debounceTicksDefault = 2;
+	private final int exitConfirmTicksDefault = 2;
 
 	public TrailingPnlService(StrategyProperties strategyProperties,
 			BinanceFuturesOrderClient orderClient,
@@ -58,7 +57,6 @@ public class TrailingPnlService {
 		}
 		double pnlPct = calculatePnlPct(snapshot, markPrice);
 		TrailingState state = trailingMap.computeIfAbsent(symbol, ignored -> new TrailingState());
-		long now = System.currentTimeMillis();
 		synchronized (state) {
 			state.lastPnlPct = pnlPct;
 			if (!state.profitArmed && pnlPct >= profitArmThreshold()) {
@@ -69,6 +67,7 @@ public class TrailingPnlService {
 			if (!state.lossArmed && pnlPct <= lossArmThreshold()) {
 				state.lossArmed = true;
 				state.troughLossPct = pnlPct;
+				state.bestRecoveryPct = pnlPct;
 				logTrailEvent("TRAIL_ARM_LOSS", symbol, snapshot, markPrice, pnlPct, state);
 			}
 			if (state.profitArmed && pnlPct > state.peakProfitPct) {
@@ -79,23 +78,41 @@ public class TrailingPnlService {
 				state.troughLossPct = pnlPct;
 				logTrailEvent("TRAIL_NEW_TROUGH", symbol, snapshot, markPrice, pnlPct, state);
 			}
+			if (state.lossArmed && pnlPct > state.bestRecoveryPct) {
+				state.bestRecoveryPct = pnlPct;
+				if (state.bestRecoveryPct - state.lastLoggedRecoveryPct >= 1.0) {
+					state.lastLoggedRecoveryPct = state.bestRecoveryPct;
+					logTrailEvent("TRAIL_NEW_RECOVERY", symbol, snapshot, markPrice, pnlPct, state);
+				}
+			}
 
-			boolean profitExit = state.profitArmed
-					&& pnlPct < (state.peakProfitPct - profitGap());
-			boolean lossExit = state.lossArmed
-					&& pnlPct <= (state.troughLossPct - lossGap());
+			double trailWidth = profitTrailWidth(state.peakProfitPct);
+			double profitStop = state.peakProfitPct - trailWidth;
+			boolean profitExit = state.profitArmed && pnlPct < profitStop;
+			double hardStop = state.troughLossPct - lossHardExtra();
+			boolean lossHardExit = state.lossArmed && pnlPct <= hardStop;
+			double recoveryStop = Double.NaN;
+			boolean lossRecoveryExit = false;
+			if (state.lossArmed) {
+				double recoveryGain = state.bestRecoveryPct - state.troughLossPct;
+				if (recoveryGain >= bonusDelta()) {
+					recoveryStop = state.bestRecoveryPct - lossRecoveryTrail();
+					lossRecoveryExit = pnlPct <= recoveryStop;
+				}
+			}
 
-			updateDebounce(state, now, profitExit, lossExit);
+			updateDebounce(state, profitExit, lossHardExit, lossRecoveryExit);
 
-			if (!state.closingFlag.get()
-					&& shouldExit(state)) {
-				String reason = state.profitExitReady ? "PROFIT_TRAIL" : "LOSS_TRAIL";
+			if (!state.closingFlag.get() && shouldExit(state)) {
+				String reason = resolveExitReason(state);
 				state.closingFlag.set(true);
 				logTrailEvent("TRAIL_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
-				writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state);
+				writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, trailWidth, profitStop,
+						hardStop, recoveryStop);
 				ctiLbStrategy.requestTrailingExit(
 						new TrailingExitRequest(symbol, snapshot.side(), snapshot.entryPrice(), markPrice,
-								snapshot.leverage(), pnlPct, reason, state.profitExitCount, state.lossExitCount));
+								snapshot.leverage(), pnlPct, reason, state.profitExitCount, state.lossHardExitCount,
+								state.lossRecoveryExitCount));
 			}
 		}
 	}
@@ -140,39 +157,50 @@ public class TrailingPnlService {
 				.subscribe();
 	}
 
-	private void updateDebounce(TrailingState state, long now, boolean profitExit, boolean lossExit) {
-		int debounceTicks = debounceTicks();
-		long debounceMs = debounceMs();
+	private void updateDebounce(TrailingState state, boolean profitExit, boolean lossHardExit,
+			boolean lossRecoveryExit) {
+		int confirmTicks = exitConfirmTicks();
 		state.profitExitReady = false;
-		state.lossExitReady = false;
+		state.lossHardExitReady = false;
+		state.lossRecoveryExitReady = false;
 		if (profitExit) {
-			if (state.profitExitCount == 0) {
-				state.profitExitStartMs = now;
-			}
 			state.profitExitCount += 1;
-			if (state.profitExitCount >= debounceTicks || (now - state.profitExitStartMs) >= debounceMs) {
+			if (state.profitExitCount >= confirmTicks) {
 				state.profitExitReady = true;
 			}
 		} else {
 			state.profitExitCount = 0;
-			state.profitExitStartMs = 0L;
 		}
-		if (lossExit) {
-			if (state.lossExitCount == 0) {
-				state.lossExitStartMs = now;
-			}
-			state.lossExitCount += 1;
-			if (state.lossExitCount >= debounceTicks || (now - state.lossExitStartMs) >= debounceMs) {
-				state.lossExitReady = true;
+		if (lossHardExit) {
+			state.lossHardExitCount += 1;
+			if (state.lossHardExitCount >= confirmTicks) {
+				state.lossHardExitReady = true;
 			}
 		} else {
-			state.lossExitCount = 0;
-			state.lossExitStartMs = 0L;
+			state.lossHardExitCount = 0;
+		}
+		if (lossRecoveryExit) {
+			state.lossRecoveryExitCount += 1;
+			if (state.lossRecoveryExitCount >= confirmTicks) {
+				state.lossRecoveryExitReady = true;
+			}
+		} else {
+			state.lossRecoveryExitCount = 0;
 		}
 	}
 
 	private boolean shouldExit(TrailingState state) {
-		return state.profitExitReady || state.lossExitReady;
+		return state.lossHardExitReady || state.lossRecoveryExitReady || state.profitExitReady;
+	}
+
+	private String resolveExitReason(TrailingState state) {
+		if (state.lossHardExitReady) {
+			return "LOSS_HARD";
+		}
+		if (state.lossRecoveryExitReady) {
+			return "LOSS_RECOVERY";
+		}
+		return "PROFIT_TRAIL";
 	}
 
 	private double calculatePnlPct(PositionSnapshot snapshot, double markPrice) {
@@ -187,8 +215,23 @@ public class TrailingPnlService {
 
 	private void logTrailEvent(String event, String symbol, PositionSnapshot snapshot, double markPrice,
 			double pnlPct, TrailingState state) {
+		double trailWidth = Double.NaN;
+		double profitStop = Double.NaN;
+		if (state.profitArmed) {
+			trailWidth = profitTrailWidth(state.peakProfitPct);
+			profitStop = state.peakProfitPct - trailWidth;
+		}
+		double hardStop = Double.NaN;
+		double recoveryStop = Double.NaN;
+		if (state.lossArmed) {
+			hardStop = state.troughLossPct - lossHardExtra();
+			double recoveryGain = state.bestRecoveryPct - state.troughLossPct;
+			if (recoveryGain >= bonusDelta()) {
+				recoveryStop = state.bestRecoveryPct - lossRecoveryTrail();
+			}
+		}
 		LOGGER.info(
-				"EVENT={} symbol={} side={} entryPrice={} markPrice={} leverageUsed={} pnlPct={} peakProfitPct={} troughLossPct={} profitStop={} lossStop={} profitCount={} lossCount={}",
+				"EVENT={} symbol={} side={} entryPrice={} markPrice={} leverageUsed={} pnlPct={} profitArmed={} peakProfitPct={} trailWidth={} profitStop={} lossArmed={} troughLossPct={} bestRecoveryPct={} hardStop={} recoveryStop={} profitCount={} lossHardCount={} lossRecoveryCount={}",
 				event,
 				symbol,
 				snapshot.side(),
@@ -196,16 +239,23 @@ public class TrailingPnlService {
 				markPrice,
 				snapshot.leverage(),
 				String.format("%.4f", pnlPct),
+				state.profitArmed,
 				String.format("%.4f", state.peakProfitPct),
+				Double.isNaN(trailWidth) ? "NA" : String.format("%.4f", trailWidth),
+				Double.isNaN(profitStop) ? "NA" : String.format("%.4f", profitStop),
+				state.lossArmed,
 				String.format("%.4f", state.troughLossPct),
-				String.format("%.4f", state.peakProfitPct - profitGap()),
-				String.format("%.4f", state.troughLossPct - lossGap()),
+				String.format("%.4f", state.bestRecoveryPct),
+				Double.isNaN(hardStop) ? "NA" : String.format("%.4f", hardStop),
+				Double.isNaN(recoveryStop) ? "NA" : String.format("%.4f", recoveryStop),
 				state.profitExitCount,
-				state.lossExitCount);
+				state.lossHardExitCount,
+				state.lossRecoveryExitCount);
 	}
 
 	private void writeTrailSnapshot(String symbol, PositionSnapshot snapshot, double markPrice,
-			double pnlPct, String reason, TrailingState state) {
+			double pnlPct, String reason, TrailingState state, double trailWidth, double profitStop,
+			double hardStop, double recoveryStop) {
 		try {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
 			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-trailing.json");
@@ -219,12 +269,18 @@ public class TrailingPnlService {
 				payload.put("markPrice", markPrice);
 				payload.put("leverageUsed", snapshot.leverage());
 				payload.put("pnlPct", pnlPct);
+				payload.put("profitArmed", state.profitArmed);
 				payload.put("peakProfitPct", state.peakProfitPct);
+				payload.put("trailWidth", trailWidth);
+				payload.put("profitStop", profitStop);
+				payload.put("lossArmed", state.lossArmed);
 				payload.put("troughLossPct", state.troughLossPct);
-				payload.put("profitStop", state.peakProfitPct - profitGap());
-				payload.put("lossStop", state.troughLossPct - lossGap());
-				payload.put("profitCount", state.profitExitCount);
-				payload.put("lossCount", state.lossExitCount);
+				payload.put("bestRecoveryPct", state.bestRecoveryPct);
+				payload.put("hardStop", hardStop);
+				payload.put("recoveryStop", recoveryStop);
+				payload.put("profitExitHits", state.profitExitCount);
+				payload.put("lossHardExitHits", state.lossHardExitCount);
+				payload.put("lossRecoveryExitHits", state.lossRecoveryExitCount);
 				objectMapper.writerWithDefaultPrettyPrinter().writeValue(outputFile.toFile(), payload);
 			}
 		} catch (IOException error) {
@@ -260,21 +316,30 @@ public class TrailingPnlService {
 		return strategyProperties.pnlTrailLossArm() < 0 ? strategyProperties.pnlTrailLossArm() : -20.0;
 	}
 
-	private double profitGap() {
-		return strategyProperties.pnlTrailProfitGap() > 0 ? strategyProperties.pnlTrailProfitGap() : 2.0;
+	private double bonusDelta() {
+		return strategyProperties.pnlTrailBonusDelta() > 0 ? strategyProperties.pnlTrailBonusDelta() : 7.0;
 	}
 
-	private double lossGap() {
-		return strategyProperties.pnlTrailLossGap() > 0 ? strategyProperties.pnlTrailLossGap() : 2.0;
+	private double profitTrailWidth(double peakProfitPct) {
+		double bonusThreshold = profitArmThreshold() + bonusDelta();
+		if (peakProfitPct >= bonusThreshold) {
+			return strategyProperties.pnlTrailProfitTrailBonus() > 0 ? strategyProperties.pnlTrailProfitTrailBonus()
+					: 4.0;
+		}
+		return strategyProperties.pnlTrailProfitTrailBase() > 0 ? strategyProperties.pnlTrailProfitTrailBase() : 2.0;
 	}
 
-	private int debounceTicks() {
-		return strategyProperties.pnlTrailDebounceTicks() > 0 ? strategyProperties.pnlTrailDebounceTicks()
-				: debounceTicksDefault;
+	private double lossHardExtra() {
+		return strategyProperties.pnlTrailLossHardExtra() > 0 ? strategyProperties.pnlTrailLossHardExtra() : 2.0;
 	}
 
-	private long debounceMs() {
-		return strategyProperties.pnlTrailDebounceMs() > 0 ? strategyProperties.pnlTrailDebounceMs() : debounceMsDefault;
+	private double lossRecoveryTrail() {
+		return strategyProperties.pnlTrailLossRecoveryTrail() > 0 ? strategyProperties.pnlTrailLossRecoveryTrail() : 4.0;
+	}
+
+	private int exitConfirmTicks() {
+		return strategyProperties.pnlTrailExitConfirmTicks() > 0 ? strategyProperties.pnlTrailExitConfirmTicks()
+				: exitConfirmTicksDefault;
 	}
 
 	private record PositionSnapshot(
@@ -290,13 +355,15 @@ public class TrailingPnlService {
 		private boolean lossArmed;
 		private double peakProfitPct;
 		private double troughLossPct;
+		private double bestRecoveryPct;
+		private double lastLoggedRecoveryPct;
 		private double lastPnlPct;
 		private int profitExitCount;
-		private int lossExitCount;
-		private long profitExitStartMs;
-		private long lossExitStartMs;
+		private int lossHardExitCount;
+		private int lossRecoveryExitCount;
 		private boolean profitExitReady;
-		private boolean lossExitReady;
+		private boolean lossHardExitReady;
+		private boolean lossRecoveryExitReady;
 		private final AtomicBoolean closingFlag = new AtomicBoolean(false);
 
 		private TrailingState() {
@@ -308,13 +375,15 @@ public class TrailingPnlService {
 			lossArmed = false;
 			peakProfitPct = Double.NEGATIVE_INFINITY;
 			troughLossPct = Double.POSITIVE_INFINITY;
+			bestRecoveryPct = Double.NEGATIVE_INFINITY;
+			lastLoggedRecoveryPct = Double.NEGATIVE_INFINITY;
 			lastPnlPct = Double.NaN;
 			profitExitCount = 0;
-			lossExitCount = 0;
-			profitExitStartMs = 0L;
-			lossExitStartMs = 0L;
+			lossHardExitCount = 0;
+			lossRecoveryExitCount = 0;
 			profitExitReady = false;
-			lossExitReady = false;
+			lossHardExitReady = false;
+			lossRecoveryExitReady = false;
 			closingFlag.set(false);
 		}
 	}

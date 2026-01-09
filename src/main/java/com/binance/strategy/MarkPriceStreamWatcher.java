@@ -54,6 +54,10 @@ public class MarkPriceStreamWatcher {
 			LOGGER.info("Mark price stream not started (active={})", strategyProperties.active());
 			return;
 		}
+		if (!strategyProperties.pnlTrailEnabled()) {
+			LOGGER.info("Mark price stream not started (pnl trailing disabled).");
+			return;
+		}
 		if (warmupProperties.enabled()) {
 			LOGGER.info("Mark price stream delayed until warmup completes.");
 			return;
@@ -64,6 +68,9 @@ public class MarkPriceStreamWatcher {
 
 	public void startStreams() {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
+			return;
+		}
+		if (!strategyProperties.pnlTrailEnabled()) {
 			return;
 		}
 		if (!warmupComplete.get()) {

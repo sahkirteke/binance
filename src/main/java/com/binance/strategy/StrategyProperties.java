@@ -97,13 +97,15 @@ public record StrategyProperties(
 		double tpStartPct,
 		double tpTrailPct,
 		boolean pnlTrailEnabled,
-		int pnlTrailDebounceTicks,
-		long pnlTrailDebounceMs,
 		long pnlTrailPositionSyncMs,
 		double pnlTrailProfitArm,
 		double pnlTrailLossArm,
-		double pnlTrailProfitGap,
-		double pnlTrailLossGap) {
+		double pnlTrailBonusDelta,
+		double pnlTrailProfitTrailBase,
+		double pnlTrailProfitTrailBonus,
+		double pnlTrailLossHardExtra,
+		double pnlTrailLossRecoveryTrail,
+		int pnlTrailExitConfirmTicks) {
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

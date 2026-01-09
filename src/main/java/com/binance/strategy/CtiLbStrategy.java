@@ -145,14 +145,17 @@ public class CtiLbStrategy {
 		}
 		if (!effectiveEnableOrders()) {
 			LOGGER.info(
-					"EVENT=TRAIL_EXIT_SIGNAL symbol={} reason={} side={} entryPrice={} markPrice={} leverageUsed={} pnlPct={}",
+					"EVENT=TRAIL_EXIT_SIGNAL symbol={} reason={} side={} entryPrice={} markPrice={} leverageUsed={} pnlPct={} profitHits={} lossHardHits={} lossRecoveryHits={}",
 					symbol,
 					request.reason(),
 					current,
 					request.entryPrice(),
 					request.markPrice(),
 					request.leverageUsed(),
-					String.format("%.4f", request.pnlPct()));
+					String.format("%.4f", request.pnlPct()),
+					request.profitExitCount(),
+					request.lossHardExitCount(),
+					request.lossRecoveryExitCount());
 			return;
 		}
 		orderClient.fetchHedgeModeEnabled()

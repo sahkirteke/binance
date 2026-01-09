@@ -9,5 +9,6 @@ public record TrailingExitRequest(
 		double pnlPct,
 		String reason,
 		int profitExitCount,
-		int lossExitCount) {
+		int lossHardExitCount,
+		int lossRecoveryExitCount) {
 }
