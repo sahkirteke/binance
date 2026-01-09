@@ -56,6 +56,7 @@ public class CtiLbStrategy {
 	private static final int ATR_SMA_20_PERIOD = 20;
 	private static final int VOLUME_SMA_10_PERIOD = 10;
 	private static final double MACD_HIST_EPS = 1e-6;
+	private static final double EMA20_MAX_DIST_PCT = 0.008;
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
 	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
@@ -179,7 +180,6 @@ public class CtiLbStrategy {
 				symbolState);
 		EntryDecision entryDecision = resolveEntryDecision(current, symbolState, entryFilterState);
 		entryDecision = applyPendingFlipGate(symbol, current, entryDecision, entryFilterState, closeTime);
-		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, entryFilterState, entryDecision);
 
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
@@ -206,10 +206,26 @@ public class CtiLbStrategy {
 		double scoreAfterSafety = coreScore + rsiVolScore;
 		double adxScore = resolveAdxScore(scoreAfterSafety, signal.adx5m());
 		double totalScore = scoreAfterSafety + adxScore;
+		EntryGateMetrics entryGateMetrics = EntryGateMetrics.empty();
 		if (current == PositionState.NONE) {
 			confirmedRec = resolveEntryDirection(totalScore);
-			entryDecision = applyMacdEntryGates(entryDecision, confirmedRec, signal);
+			CtiDirection candidateSide = entryDecision.confirmedRec() != null ? entryDecision.confirmedRec() : confirmedRec;
+			double rsi9Used = !Double.isNaN(symbolState.rsi9_5mValue)
+					? symbolState.rsi9_5mValue
+					: entryFilterState.rsi9();
+			entryDecision = applyMacdEntryGates(entryDecision, candidateSide, signal);
+			EntryGateEvaluation gateEvaluation = applyEntrySafetyGates(
+					entryDecision,
+					candidateSide,
+					signal,
+					entryFilterState,
+					rsi9Used,
+					close);
+			entryDecision = gateEvaluation.entryDecision();
+			entryGateMetrics = gateEvaluation.metrics();
 		}
+		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, entryFilterState, entryDecision,
+				entryGateMetrics);
 		boolean emergencyExitTriggered = isEmergencyExit(current, signal.macdHistColor());
 		String emergencyExitReason = emergencyExitTriggered ? resolveEmergencyExitReason(current) : null;
 		double adxExitPressure = signal.adxExitPressure() == null ? 0.0 : signal.adxExitPressure();
@@ -354,10 +370,10 @@ public class CtiLbStrategy {
 		if (current == PositionState.NONE && !effectiveEnableOrders() && entryState != null && exitDecision.exit()) {
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
 			if (exitQty != null && exitQty.signum() > 0) {
-				recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, signal, closeTime, close, exitQty,
-						PositionState.NONE, null, entryState, entryFilterState, exitDecision.reason(),
-						CtiLbDecisionEngine.resolveExitDecisionBlockReason(), recommendationUsed,
-						recommendationRaw, confirmedRec);
+					recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, signal, closeTime, close, exitQty,
+							PositionState.NONE, null, entryState, entryFilterState, null, exitDecision.reason(),
+							CtiLbDecisionEngine.resolveExitDecisionBlockReason(), recommendationUsed,
+							recommendationRaw, confirmedRec);
 				positionStates.put(symbol, PositionState.NONE);
 				entryStates.remove(symbol);
 			}
@@ -442,7 +458,7 @@ public class CtiLbStrategy {
 					exitBlockedByTrendAligned);
 			if (!continuationHold && !holdExit && exitQty != null && exitQty.signum() > 0) {
 				recordSignalSnapshot(symbol, "EXIT", exitAction, signal, closeTime, close, exitQty,
-						current, null, entryState, entryFilterState, decisionActionReason, decisionBlockReason, recommendationUsed,
+						current, null, entryState, entryFilterState, null, decisionActionReason, decisionBlockReason, recommendationUsed,
 						recommendationRaw, confirmedRec);
 			}
 			if (continuationHold || holdExit || !effectiveEnableOrders()) {
@@ -605,13 +621,14 @@ public class CtiLbStrategy {
 							closeTime,
 							resolvedQty);
 					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
-							target, target, entrySnapshot, entryFilterState, decisionActionReason, decisionBlockReason,
+							target, target, entrySnapshot, entryFilterState, entryGateMetrics, decisionActionReason,
+							decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
 					entryStates.put(symbol, entrySnapshot);
 				} else if (target != current) {
 					recordSignalSnapshot(symbol, "EXIT", action, signal, closeTime, close, closeQty,
-							current, target, entryState, entryFilterState, decisionActionReason, decisionBlockReason,
+							current, target, entryState, entryFilterState, null, decisionActionReason, decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					EntryState entrySnapshot = new EntryState(
 							target == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
@@ -619,7 +636,8 @@ public class CtiLbStrategy {
 							closeTime,
 							resolvedQty);
 					recordSignalSnapshot(symbol, "ENTRY", action, signal, closeTime, close, resolvedQty,
-							target, target, entrySnapshot, entryFilterState, decisionActionReason, decisionBlockReason,
+							target, target, entrySnapshot, entryFilterState, entryGateMetrics, decisionActionReason,
+							decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
 					entryStates.put(symbol, entrySnapshot);
@@ -690,7 +708,8 @@ public class CtiLbStrategy {
 						closeTime,
 						resolvedQtyForLog);
 				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
-						targetForLog, targetForLog, entrySnapshot, entryFilterState, decisionActionReasonForLog, decisionBlock,
+						targetForLog, targetForLog, entrySnapshot, entryFilterState, entryGateMetrics,
+						decisionActionReasonForLog, decisionBlock,
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
@@ -698,7 +717,7 @@ public class CtiLbStrategy {
 				}
 			} else if (targetForLog != currentForLog) {
 				recordSignalSnapshot(symbol, "EXIT", actionForLog, signal, closeTime, close, closeQty, currentForLog,
-						targetForLog, entryState, entryFilterState, decisionActionReasonForLog, decisionBlock, recommendationUsedForLog,
+						targetForLog, entryState, entryFilterState, null, decisionActionReasonForLog, decisionBlock, recommendationUsedForLog,
 						recommendationRawForLog, confirmedRecForLog);
 				EntryState entrySnapshot = new EntryState(
 						targetForLog == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
@@ -706,7 +725,8 @@ public class CtiLbStrategy {
 						closeTime,
 						resolvedQtyForLog);
 				recordSignalSnapshot(symbol, "ENTRY", actionForLog, signal, closeTime, close, resolvedQtyForLog,
-						targetForLog, targetForLog, entrySnapshot, entryFilterState, decisionActionReasonForLog, decisionBlock,
+						targetForLog, targetForLog, entrySnapshot, entryFilterState, entryGateMetrics,
+						decisionActionReasonForLog, decisionBlock,
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
@@ -1133,11 +1153,11 @@ public class CtiLbStrategy {
 	}
 
 	private void logEntryFilterState(String symbol, SymbolState state, long nowMs, double close, double prevClose,
-			EntryFilterState entryFilterState, EntryDecision entryDecision) {
+			EntryFilterState entryFilterState, EntryDecision entryDecision, EntryGateMetrics entryGateMetrics) {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} rsi9Used={} outHist={} outHistPrev={} macdDelta={} ema20={} ema20DistPct={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -1147,6 +1167,12 @@ public class CtiLbStrategy {
 				entryFilterState.entryTrigger(),
 				entryFilterState.triggerReason(),
 				entryDecision.blockReason(),
+				entryGateMetrics.rsi9UsedLabel(),
+				entryGateMetrics.outHistLabel(),
+				entryGateMetrics.outHistPrevLabel(),
+				entryGateMetrics.macdDeltaLabel(),
+				entryGateMetrics.ema20Label(),
+				entryGateMetrics.ema20DistPctLabel(),
 				Double.isNaN(entryFilterState.ema20_1m()) ? "NA" : String.format("%.8f", entryFilterState.ema20_1m()),
 				Double.isNaN(entryFilterState.ema200_5m()) ? "NA" : String.format("%.8f",
 						entryFilterState.ema200_5m()),
@@ -1383,8 +1409,8 @@ public class CtiLbStrategy {
 		return new EntryDecision(null, null, null);
 	}
 
-	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection confirmedRec, ScoreSignal signal) {
-		if (confirmedRec == null || confirmedRec == CtiDirection.NEUTRAL) {
+	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection candidateSide, ScoreSignal signal) {
+		if (candidateSide == null || candidateSide == CtiDirection.NEUTRAL) {
 			return entryDecision;
 		}
 		if (entryDecision.blockReason() != null) {
@@ -1394,13 +1420,46 @@ public class CtiLbStrategy {
 			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_HIST_EPS");
 		}
 		MacdHistColor histColor = signal.macdHistColor();
-		if (confirmedRec == CtiDirection.LONG && histColor == MacdHistColor.BLUE) {
+		if (candidateSide == CtiDirection.LONG && histColor == MacdHistColor.BLUE) {
 			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR_BLUE");
 		}
-		if (confirmedRec == CtiDirection.SHORT && histColor == MacdHistColor.MAROON) {
+		if (candidateSide == CtiDirection.SHORT && histColor == MacdHistColor.MAROON) {
 			return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_COLOR_MAROON");
 		}
 		return entryDecision;
+	}
+
+	private EntryGateEvaluation applyEntrySafetyGates(EntryDecision entryDecision, CtiDirection candidateSide,
+			ScoreSignal signal, EntryFilterState entryFilterState, double rsi9Used, double close) {
+		double outHist = signal == null ? Double.NaN : signal.outHist();
+		double outHistPrev = signal == null ? Double.NaN : signal.outHistPrev();
+		double macdDelta = Double.isNaN(outHist) || Double.isNaN(outHistPrev) ? Double.NaN : outHist - outHistPrev;
+		double ema20 = entryFilterState == null ? Double.NaN : entryFilterState.ema20_1m();
+		double ema20DistPct = Double.NaN;
+		if (candidateSide != null && !Double.isNaN(ema20) && ema20 > 0) {
+			if (candidateSide == CtiDirection.LONG) {
+				ema20DistPct = (close - ema20) / ema20;
+			} else if (candidateSide == CtiDirection.SHORT) {
+				ema20DistPct = (ema20 - close) / ema20;
+			}
+		}
+		EntryDecision updatedDecision = entryDecision;
+		if (candidateSide != null && candidateSide != CtiDirection.NEUTRAL && entryDecision.blockReason() == null) {
+			if (candidateSide == CtiDirection.SHORT && !Double.isNaN(rsi9Used) && rsi9Used < 40.0) {
+				updatedDecision = entryDecision.withBlockReason("ENTRY_BLOCK_RSI_TOO_LOW_FOR_SHORT");
+			} else if (candidateSide == CtiDirection.LONG && !Double.isNaN(rsi9Used) && rsi9Used > 65.0) {
+				updatedDecision = entryDecision.withBlockReason("ENTRY_BLOCK_RSI_TOO_HIGH_FOR_LONG");
+			} else if (candidateSide == CtiDirection.LONG && !Double.isNaN(macdDelta) && macdDelta <= 0.0) {
+				updatedDecision = entryDecision.withBlockReason("ENTRY_BLOCK_MACD_SLOPE_DOWN");
+			} else if (candidateSide == CtiDirection.SHORT && !Double.isNaN(macdDelta) && macdDelta >= 0.0) {
+				updatedDecision = entryDecision.withBlockReason("ENTRY_BLOCK_MACD_SLOPE_UP");
+			} else if (!Double.isNaN(ema20DistPct) && ema20DistPct > EMA20_MAX_DIST_PCT) {
+				updatedDecision = entryDecision.withBlockReason("ENTRY_BLOCK_EMA20_TOO_FAR");
+			}
+		}
+		EntryGateMetrics metrics = new EntryGateMetrics(rsi9Used, outHist, outHistPrev, macdDelta, ema20, ema20DistPct,
+				updatedDecision.blockReason());
+		return new EntryGateEvaluation(updatedDecision, metrics);
 	}
 
 	private EntryDecision applyPendingFlipGate(String symbol, PositionState current, EntryDecision entryDecision,
@@ -1484,6 +1543,46 @@ public class CtiLbStrategy {
 
 		EntryDecision withBlockReason(String reason) {
 			return new EntryDecision(confirmedRec, reason, decisionActionReason);
+		}
+	}
+
+	private record EntryGateEvaluation(EntryDecision entryDecision, EntryGateMetrics metrics) {
+	}
+
+	private record EntryGateMetrics(
+			double rsi9Used,
+			double outHist,
+			double outHistPrev,
+			double macdDelta,
+			double ema20,
+			double ema20DistPct,
+			String blockReason) {
+		static EntryGateMetrics empty() {
+			return new EntryGateMetrics(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, null);
+		}
+
+		private String rsi9UsedLabel() {
+			return Double.isNaN(rsi9Used) ? "NA" : String.format("%.2f", rsi9Used);
+		}
+
+		private String outHistLabel() {
+			return Double.isNaN(outHist) ? "NA" : String.format("%.8f", outHist);
+		}
+
+		private String outHistPrevLabel() {
+			return Double.isNaN(outHistPrev) ? "NA" : String.format("%.8f", outHistPrev);
+		}
+
+		private String macdDeltaLabel() {
+			return Double.isNaN(macdDelta) ? "NA" : String.format("%.8f", macdDelta);
+		}
+
+		private String ema20Label() {
+			return Double.isNaN(ema20) ? "NA" : String.format("%.8f", ema20);
+		}
+
+		private String ema20DistPctLabel() {
+			return Double.isNaN(ema20DistPct) ? "NA" : String.format("%.4f", ema20DistPct);
 		}
 	}
 
@@ -2133,8 +2232,8 @@ public class CtiLbStrategy {
 
 	private void recordSignalSnapshot(String symbol, String signalType, SignalAction action, ScoreSignal signal,
 			long closeTime, double closePrice, BigDecimal quantity, PositionState side, PositionState target,
-			EntryState entryState, EntryFilterState entryFilterState, String decisionActionReason,
-			String decisionBlockReason,
+			EntryState entryState, EntryFilterState entryFilterState, EntryGateMetrics entryGateMetrics,
+			String decisionActionReason, String decisionBlockReason,
 			CtiDirection recommendationUsed, CtiDirection recommendationRaw, CtiDirection confirmedRec) {
 		try {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
@@ -2189,8 +2288,8 @@ public class CtiLbStrategy {
 						payload.put("entryQuantity", entryState.quantity().stripTrailingZeros().toPlainString());
 					}
 				}
-				ObjectNode indicatorsNode = objectMapper.createObjectNode();
-				if (entryFilterState != null) {
+					ObjectNode indicatorsNode = objectMapper.createObjectNode();
+					if (entryFilterState != null) {
 					indicatorsNode.put("rsi9", entryFilterState.rsi9());
 					indicatorsNode.put("volume", entryFilterState.volume());
 					indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
@@ -2204,11 +2303,22 @@ public class CtiLbStrategy {
 					indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
 					indicatorsNode.put("volOk", entryFilterState.volOk());
 					indicatorsNode.put("atrOk", entryFilterState.atrOk());
-					if (entryFilterState.qualityBlockReason() != null) {
-						indicatorsNode.put("qualityBlockReason", entryFilterState.qualityBlockReason());
+						if (entryFilterState.qualityBlockReason() != null) {
+							indicatorsNode.put("qualityBlockReason", entryFilterState.qualityBlockReason());
+						}
 					}
-				}
-				payload.set("indicators", indicatorsNode);
+					if (entryGateMetrics != null) {
+						indicatorsNode.put("rsi9Used", entryGateMetrics.rsi9Used());
+						indicatorsNode.put("outHist", entryGateMetrics.outHist());
+						indicatorsNode.put("outHistPrev", entryGateMetrics.outHistPrev());
+						indicatorsNode.put("macdDelta", entryGateMetrics.macdDelta());
+						indicatorsNode.put("ema20", entryGateMetrics.ema20());
+						indicatorsNode.put("ema20DistPct", entryGateMetrics.ema20DistPct());
+						if (entryGateMetrics.blockReason() != null) {
+							indicatorsNode.put("entryBlockReason", entryGateMetrics.blockReason());
+						}
+					}
+					payload.set("indicators", indicatorsNode);
 				if ("EXIT".equals(signalType)) {
 					BigDecimal realizedPnl = calculateRealizedPnl(entryState, quantity, closePrice);
 					if (realizedPnl != null) {
