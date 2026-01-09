@@ -229,7 +229,7 @@ public class CtiLbStrategy {
 		}
 		boolean scoreExitConfirmed = current != PositionState.NONE && (emergencyExitTriggered || normalExitConfirmed);
 		String decisionValue = resolveDecisionValue(current, totalScore, emergencyExitTriggered,
-				normalExitConfirmed);
+				normalExitConfirmed, entryDecision);
 		recordDecisionSnapshot(
 				symbol,
 				signal,
@@ -2238,6 +2238,7 @@ public class CtiLbStrategy {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
 			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-decision.json");
 			ObjectNode payload = objectMapper.createObjectNode();
+			payload.put("decisionTime", formatTimestamp(signal.closeTime()));
 			payload.put("t5mCloseUsed", signal.t5mCloseUsed());
 			payload.put("close5m", candle.close());
 			payload.put("outHist", signal.outHist());
@@ -2294,7 +2295,7 @@ public class CtiLbStrategy {
 	private String formatTimestamp(long timestampMs) {
 		return java.time.Instant.ofEpochMilli(timestampMs)
 				.atZone(java.time.ZoneId.systemDefault())
-				.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
+				.format(java.time.format.DateTimeFormatter.ofPattern("ddMMyyyy HH:mm:ss"));
 	}
 
 	private void logConfigSnapshot() {
@@ -2469,19 +2470,6 @@ public class CtiLbStrategy {
 			PositionState current) {
 		if (signal.insufficientData()) {
 			return "INSUFFICIENT_DATA";
-		}
-		if (action != SignalAction.HOLD && current == PositionState.NONE) {
-			if (signal.cti1mDir() == null || signal.cti5mDir() == null
-					|| signal.cti1mDir() == CtiDirection.NEUTRAL
-					|| signal.cti5mDir() == CtiDirection.NEUTRAL
-					|| signal.cti1mDir() != signal.cti5mDir()) {
-				return "CTI_DIR_MISMATCH";
-			}
-		}
-		if (action != SignalAction.HOLD) {
-			if (!signal.adxReady() || signal.adx5m() == null || signal.adx5m() <= 25.0) {
-				return "ADX5M<=25";
-			}
 		}
 		if (action != SignalAction.HOLD && !symbolFilterService.filtersReady()) {
 			triggerFilterRefresh();
@@ -2699,8 +2687,19 @@ public class CtiLbStrategy {
 	}
 
 	private String resolveDecisionValue(PositionState current, double totalScore, boolean emergencyExit,
-			boolean normalExit) {
+			boolean normalExit, EntryDecision entryDecision) {
 		if (current == PositionState.NONE) {
+			if (entryDecision != null) {
+				if (entryDecision.blockReason() != null) {
+					return "NO_ENTRY";
+				}
+				if (entryDecision.confirmedRec() == CtiDirection.LONG) {
+					return "ENTER_LONG";
+				}
+				if (entryDecision.confirmedRec() == CtiDirection.SHORT) {
+					return "ENTER_SHORT";
+				}
+			}
 			if (totalScore >= 3.0) {
 				return "ENTER_LONG";
 			}
