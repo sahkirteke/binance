@@ -29,7 +29,7 @@ public final class StrategyLogV1 {
 			Integer score5m,
 			Integer hamScore,
 			Integer ctiDirScore,
-			Integer macdScore,
+			Double macdScore,
 			Integer scoreLong,
 			Integer scoreShort,
 			Double adjScore,

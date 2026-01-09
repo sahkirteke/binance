@@ -17,22 +17,23 @@ public class CtiScoreCalculator {
 		}
 	}
 
-	public ScoreResult calculate(int hamScore, int macdScore, Double adxValue, boolean adxReady, boolean ctiReady,
+	public ScoreResult calculate(double ctiScore, double macdScore, Double adxValue, boolean adxReady,
+			boolean ctiReady,
 			boolean has5mTrend, boolean enableTieBreakBias, CtiDirection bias) {
 		if (!ctiReady) {
 			return new ScoreResult(0, macdScore, 0, 0.0, CtiDirection.NEUTRAL, RecReason.INSUFFICIENT_DATA,
 					false, adxReady, adxGateReason(adxReady, adxValue));
 		}
 		boolean adxGate = adxReady && adxValue != null && adxValue > ADX_THRESHOLD;
-		int ctiDirScore = Integer.compare(hamScore, 0);
-		int finalScore = ctiDirScore + macdScore;
+		int ctiDirScore = ScoreMath.sign(ctiScore);
+		double coreScore = ctiScore + macdScore;
 		double trendWeight = adxGate ? 1.0 : 0.0;
-		boolean allowTieBreak = enableTieBreakBias && adxGate && has5mTrend && finalScore == 0;
-		Recommendation recommendation = resolveRecommendation(finalScore, bias, allowTieBreak);
+		boolean allowTieBreak = enableTieBreakBias && adxGate && has5mTrend && coreScore == 0;
+		Recommendation recommendation = resolveRecommendation(coreScore, bias, allowTieBreak);
 		return new ScoreResult(
 				ctiDirScore,
 				macdScore,
-				finalScore,
+				coreScore,
 				trendWeight,
 				recommendation.direction(),
 				recommendation.reason(),
@@ -41,11 +42,11 @@ public class CtiScoreCalculator {
 				adxGateReason(adxReady, adxValue));
 	}
 
-	private Recommendation resolveRecommendation(int finalScore, CtiDirection bias, boolean allowTieBreak) {
-		if (finalScore >= 1) {
+	private Recommendation resolveRecommendation(double coreScore, CtiDirection bias, boolean allowTieBreak) {
+		if (coreScore >= 1) {
 			return new Recommendation(CtiDirection.LONG, RecReason.SCORE_RULES);
 		}
-		if (finalScore <= -1) {
+		if (coreScore <= -1) {
 			return new Recommendation(CtiDirection.SHORT, RecReason.SCORE_RULES);
 		}
 		if (allowTieBreak && (bias == CtiDirection.LONG || bias == CtiDirection.SHORT)) {
@@ -76,8 +77,8 @@ public class CtiScoreCalculator {
 
 	public record ScoreResult(
 			int ctiDirScore,
-			int macdScore,
-			int finalScore,
+			double macdScore,
+			double coreScore,
 			double trendWeight,
 			CtiDirection recommendation,
 			RecReason recReason,

@@ -32,6 +32,7 @@ public class HistoricalWarmupService {
 	private final WarmupProperties warmupProperties;
 	private final CtiLbStrategy ctiLbStrategy;
 	private final KlineStreamWatcher klineStreamWatcher;
+	private final MarkPriceStreamWatcher markPriceStreamWatcher;
 	private final ObjectMapper objectMapper;
 	private final SymbolFilterService symbolFilterService;
 
@@ -41,6 +42,7 @@ public class HistoricalWarmupService {
 			WarmupProperties warmupProperties,
 			CtiLbStrategy ctiLbStrategy,
 			KlineStreamWatcher klineStreamWatcher,
+			MarkPriceStreamWatcher markPriceStreamWatcher,
 			ObjectMapper objectMapper,
 			SymbolFilterService symbolFilterService) {
 		this.marketClient = marketClient;
@@ -49,6 +51,7 @@ public class HistoricalWarmupService {
 		this.warmupProperties = warmupProperties;
 		this.ctiLbStrategy = ctiLbStrategy;
 		this.klineStreamWatcher = klineStreamWatcher;
+		this.markPriceStreamWatcher = markPriceStreamWatcher;
 		this.objectMapper = objectMapper;
 		this.symbolFilterService = symbolFilterService;
 	}
@@ -92,6 +95,8 @@ public class HistoricalWarmupService {
 					boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
 					klineStreamWatcher.markWarmupComplete();
 					klineStreamWatcher.startStreams();
+					markPriceStreamWatcher.markWarmupComplete();
+					markPriceStreamWatcher.startStreams();
 					ctiLbStrategy.setWarmupMode(false);
 					if (filtersReady) {
 						ctiLbStrategy.enableOrdersAfterWarmup();
