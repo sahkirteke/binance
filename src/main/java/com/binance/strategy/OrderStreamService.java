@@ -149,6 +149,10 @@ public class OrderStreamService {
 			if (positionNode.hasNonNull("l")) {
 				leverage = positionNode.path("l").asInt();
 			}
+
+			LOGGER.info("EVENT=ACCOUNT_UPDATE symbol={} entryPrice={} positionAmt={} side={} leverage={}",
+					symbol, entryPrice, positionAmt, positionSide, leverage);
+
 			trailingPnlService.onPositionUpdate(symbol, entryPrice, positionAmt, positionSide, leverage);
 		}
 	}

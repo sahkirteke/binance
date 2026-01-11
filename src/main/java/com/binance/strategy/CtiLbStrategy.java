@@ -17,6 +17,8 @@ import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -101,7 +103,9 @@ public class CtiLbStrategy {
 	private final Map<String, Object> signalFileLocks = new ConcurrentHashMap<>();
 	private volatile boolean warmupMode;
 	private volatile boolean ordersEnabledOverride = true;
-
+	@Autowired
+	@Lazy
+	private TrailingPnlService trailingPnlService;
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties,
 			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService, OrderTracker orderTracker,
 			ObjectMapper objectMapper) {
@@ -177,35 +181,37 @@ public class CtiLbStrategy {
 		}
 		String symbol = request.symbol();
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
+
 		if (current == PositionState.NONE) {
 			LOGGER.info("EVENT=TRAIL_EXIT_SKIP symbol={} reason=NO_POSITION", symbol);
+			cleanupPositionState(symbol);
 			return;
 		}
+
 		EntryState entryState = entryStates.get(symbol);
 		if (entryState == null || entryState.entryPrice() == null || entryState.entryPrice().signum() <= 0) {
 			LOGGER.info("EVENT=TRAIL_EXIT_SKIP symbol={} reason=NO_ENTRY_STATE", symbol);
+			cleanupPositionState(symbol);
+			cleanupPositionState(symbol);
 			return;
 		}
+
 		BigDecimal exitQty = resolveExitQuantity(symbol, entryState, request.markPrice());
 		if (exitQty == null || exitQty.signum() <= 0) {
 			LOGGER.info("EVENT=TRAIL_EXIT_SKIP symbol={} reason=QTY_ZERO", symbol);
+			cleanupPositionState(symbol);
 			return;
 		}
+
 		if (!effectiveEnableOrders()) {
 			LOGGER.info(
 					"EVENT=TRAIL_EXIT_SIGNAL symbol={} reason={} side={} entryPrice={} markPrice={} leverageUsed={} pnlPct={} profitHits={} lossHardHits={} lossRecoveryHits={}",
-					symbol,
-					request.reason(),
-					current,
-					request.entryPrice(),
-					request.markPrice(),
-					request.leverageUsed(),
-					String.format("%.4f", request.pnlPct()),
-					request.profitExitCount(),
-					request.lossHardExitCount(),
-					request.lossRecoveryExitCount());
+					symbol, request.reason(), current, request.entryPrice(), request.markPrice(),
+					request.leverageUsed(), String.format("%.4f", request.pnlPct()),
+					request.profitExitCount(), request.lossHardExitCount(), request.lossRecoveryExitCount());
 			return;
 		}
+
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					String correlationId = orderTracker.nextCorrelationId(symbol, "TRAIL_EXIT");
@@ -216,19 +222,32 @@ public class CtiLbStrategy {
 										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
 										hedgeMode ? current.name() : "", correlationId, response, null);
 							})
-							.doOnError(error -> logOrderEvent("TRAIL_EXIT_FAILED", symbol, request.reason(),
-									current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-									hedgeMode ? current.name() : "", correlationId, null, error.getMessage()));
+							.doOnError(error -> {
+								logOrderEvent("TRAIL_EXIT_FAILED", symbol, request.reason(),
+										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
+										hedgeMode ? current.name() : "", correlationId, null, error.getMessage());
+								// ✅ CRITICAL: Reset trailing state on error to allow retry
+								trailingPnlService.resetClosingFlag(symbol);
+							});
 				})
 				.doOnNext(response -> {
 					positionStates.put(symbol, PositionState.NONE);
 					entryStates.remove(symbol);
 					clearTrailingArmed(symbol);
+					trailingPnlService.resetState(symbol);
 				})
-				.doOnError(error -> LOGGER.warn("EVENT=TRAIL_EXIT_FAILED symbol={} reason={}", symbol,
-						error.getMessage()))
+				.doOnError(error -> {
+					LOGGER.warn("EVENT=TRAIL_EXIT_FAILED symbol={} reason={}", symbol, error.getMessage());
+					trailingPnlService.resetClosingFlag(symbol);
+				})
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
+	}
+	private void cleanupPositionState(String symbol) {
+		positionStates.put(symbol, PositionState.NONE);
+		entryStates.remove(symbol);
+		clearTrailingArmed(symbol);
+		trailingPnlService.resetState(symbol);
 	}
 
 	public void syncPositionNow(String symbol, long eventTime) {
@@ -337,7 +356,7 @@ public class CtiLbStrategy {
 		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, entryFilterState, entryDecision,
 				entryGateMetrics);
 		updateMacdStreak(symbolState, signal);
-		EmergencyExitEvaluation emergencyEval = evaluateEmergencyExit(current, close, signal, symbolState);
+		EmergencyExitEvaluation emergencyEval = evaluateEmergencyExit(symbol, current, close, signal, symbolState);
 		boolean emergencyExitTriggered = emergencyEval.emergencyConfirmed();
 		String emergencyExitReason = emergencyExitTriggered ? resolveEmergencyExitReason(current) : null;
 		double adxExitPressure = signal.adxExitPressure() == null ? 0.0 : signal.adxExitPressure();
@@ -3183,6 +3202,7 @@ public class CtiLbStrategy {
 	}
 
 	private EmergencyExitEvaluation evaluateEmergencyExit(
+			String symbol,
 			PositionState current,
 			double close,
 			ScoreSignal signal,
@@ -3192,7 +3212,11 @@ public class CtiLbStrategy {
 			return EmergencyExitEvaluation.empty();
 		}
 
-		// min 1 bar hold (2. bar ve sonrası)
+		// ✅ CRITICAL: Don't trigger emergency exit if trailing is active
+		if (Boolean.TRUE.equals(trailingArmedBySymbol.get(symbol))) {
+			return EmergencyExitEvaluation.empty();
+		}
+
 		EntryState entryState = state.entryTimeMs > 0
 				? new EntryState(
 				current == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
@@ -3206,7 +3230,6 @@ public class CtiLbStrategy {
 			return EmergencyExitEvaluation.empty();
 		}
 
-		// PnL negative check
 		double pnlPct = resolveProfitPct(
 				current == PositionState.LONG ? CtiDirection.LONG : CtiDirection.SHORT,
 				BigDecimal.valueOf(state.fiveMinFlipPrice > 0 ? state.fiveMinFlipPrice : close),
@@ -3222,6 +3245,12 @@ public class CtiLbStrategy {
 		double rsi9 = state.rsi9_5mValue;
 		double rsi9Prev = state.rsi9_5mPrev;
 
+		boolean prevCloseLower = !Double.isNaN(state.prevClose1m) && close < state.prevClose1m;
+		boolean prevCloseHigher = !Double.isNaN(state.prevClose1m) && close > state.prevClose1m;
+		boolean prevLowLower = !Double.isNaN(state.prevLow1m) && close < state.prevLow1m;
+		boolean prevHighHigher = !Double.isNaN(state.prevHigh1m) && close > state.prevHigh1m;
+		boolean rsiPrevReady = !Double.isNaN(state.rsi9_5mPrev);
+
 		boolean base = false;
 		boolean c1 = false;
 		boolean c2 = false;
@@ -3230,15 +3259,13 @@ public class CtiLbStrategy {
 		if (current == PositionState.LONG) {
 			base = histColor == MacdHistColor.RED;
 			c1 = !Double.isNaN(outHist) && !Double.isNaN(outHistPrev) && outHist < outHistPrev;
-			c2 = !Double.isNaN(rsi9) && !Double.isNaN(rsi9Prev) && rsi9 < rsi9Prev;
-			c3 = (!Double.isNaN(state.prevClose1m) && close < state.prevClose1m)
-					|| (!Double.isNaN(state.prevLow1m) && close < state.prevLow1m);
+			c2 = rsiPrevReady && rsi9 < rsi9Prev;
+			c3 = prevCloseLower || prevLowLower || histColor == MacdHistColor.BLUE;
 		} else if (current == PositionState.SHORT) {
 			base = histColor == MacdHistColor.AQUA;
 			c1 = !Double.isNaN(outHist) && !Double.isNaN(outHistPrev) && outHist > outHistPrev;
-			c2 = !Double.isNaN(rsi9) && !Double.isNaN(rsi9Prev) && rsi9 > rsi9Prev;
-			c3 = (!Double.isNaN(state.prevClose1m) && close > state.prevClose1m)
-					|| (!Double.isNaN(state.prevHigh1m) && close > state.prevHigh1m);
+			c2 = rsiPrevReady && rsi9 > rsi9Prev;
+			c3 = prevCloseHigher || prevHighHigher || histColor == MacdHistColor.MAROON;
 		}
 
 		boolean confirmed = base && countTrue(c1, c2, c3) >= 2;

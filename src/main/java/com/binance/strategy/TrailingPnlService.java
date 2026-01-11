@@ -46,6 +46,8 @@ public class TrailingPnlService {
 		startPositionSync();
 	}
 
+	// TrailingPnlService.java içinde onMarkPrice metodunu güncelleyin
+
 	public void onMarkPrice(String symbol, double markPrice) {
 		boolean roiEnabled = strategyProperties.roiExitEnabled()
 				&& strategyProperties.roiTakeProfitPct() > 0
@@ -53,10 +55,9 @@ public class TrailingPnlService {
 		if (!strategyProperties.pnlTrailEnabled() && !roiEnabled) {
 			return;
 		}
+
 		PositionSnapshot snapshot = positionMap.get(symbol);
 		if (snapshot == null || snapshot.qty() == 0 || snapshot.entryPrice() <= 0) {
-			// IMPORTANT: For intrabar ROI exits we must have an entry snapshot immediately,
-			// not only after periodic REST sync. Pull it from CtiLbStrategy's in-memory entry state.
 			CtiLbStrategy.EntryState entry = ctiLbStrategy.peekEntryStateForTrailing(symbol);
 			CtiLbStrategy.PositionState posState = ctiLbStrategy.peekPositionStateForTrailing(symbol);
 			if (entry != null && posState != null && posState != CtiLbStrategy.PositionState.NONE
@@ -74,48 +75,64 @@ public class TrailingPnlService {
 				return;
 			}
 		}
+
 		double pnlPct = calculatePnlPct(snapshot, markPrice);
 		TrailingState state = trailingMap.computeIfAbsent(symbol, ignored -> new TrailingState());
+
 		synchronized (state) {
 			state.lastPnlPct = pnlPct;
-			// ROI hard exits (intrabar via mark price): close immediately at configured ROI thresholds.
-			if (roiEnabled) {
-				// If a close attempt got stuck (network/API error), allow retry after a short window.
-				if (state.closingFlag.get() && state.closingSinceMs > 0
-						&& (System.currentTimeMillis() - state.closingSinceMs) > 5000) {
-					LOGGER.warn("EVENT=ROI_EXIT_RETRY_ARMED symbol={} pnlPct={} attempts={}",
-							symbol, String.format("%.2f", pnlPct), state.closingAttempts);
+
+			// ✅ CRITICAL: Position age check (10 second grace period)
+			long positionAgeMs = System.currentTimeMillis() - snapshot.lastUpdateTs();
+			boolean isNewPosition = positionAgeMs < 10000;
+
+			// ✅ CRITICAL: Don't process if already closing
+			if (state.closingFlag.get()) {
+				// Allow retry only after 15 seconds AND if there was a network error
+				long timeSinceClosing = System.currentTimeMillis() - state.closingSinceMs;
+				if (timeSinceClosing > 15000 && state.closingAttempts < 3) {
+					LOGGER.warn("EVENT=ROI_EXIT_RETRY symbol={} pnlPct={} attempts={} timeSinceMs={}",
+							symbol, String.format("%.2f", pnlPct), state.closingAttempts, timeSinceClosing);
 					state.closingFlag.set(false);
-				}
-				if (!state.closingFlag.get()) {
-					double tp = strategyProperties.roiTakeProfitPct();
-					double sl = strategyProperties.roiStopLossPct();
-					if (pnlPct >= tp) {
-						state.closingFlag.set(true);
-						state.closingSinceMs = System.currentTimeMillis();
-						state.closingAttempts++;
-						String reason = "ROI_TAKE_PROFIT";
-						logTrailEvent("ROI_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
-						writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, Double.NaN, Double.NaN,
-								Double.NaN, Double.NaN);
-						ctiLbStrategy.requestTrailingExit(new TrailingExitRequest(symbol, snapshot.side(), snapshot.entryPrice(),
-								markPrice, snapshot.leverage(), pnlPct, reason, 0, 0, 0));
-						return;
-					}
-					if (pnlPct <= -sl) {
-						state.closingFlag.set(true);
-						state.closingSinceMs = System.currentTimeMillis();
-						state.closingAttempts++;
-						String reason = "ROI_STOP_LOSS";
-						logTrailEvent("ROI_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
-						writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, Double.NaN, Double.NaN,
-								Double.NaN, Double.NaN);
-						ctiLbStrategy.requestTrailingExit(new TrailingExitRequest(symbol, snapshot.side(), snapshot.entryPrice(),
-								markPrice, snapshot.leverage(), pnlPct, reason, 0, 0, 0));
-						return;
-					}
+				} else {
+					// Still closing, skip processing
+					return;
 				}
 			}
+
+			// ✅ ROI Hard Exits (only after grace period)
+			if (roiEnabled && !isNewPosition) {
+				double tp = strategyProperties.roiTakeProfitPct();
+				double sl = strategyProperties.roiStopLossPct();
+
+				if (pnlPct >= tp) {
+					state.closingFlag.set(true);
+					state.closingSinceMs = System.currentTimeMillis();
+					state.closingAttempts++;
+					String reason = "ROI_TAKE_PROFIT";
+					logTrailEvent("ROI_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
+					writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, Double.NaN, Double.NaN,
+							Double.NaN, Double.NaN);
+					ctiLbStrategy.requestTrailingExit(new TrailingExitRequest(symbol, snapshot.side(),
+							snapshot.entryPrice(), markPrice, snapshot.leverage(), pnlPct, reason, 0, 0, 0));
+					return;
+				}
+
+				if (pnlPct <= -sl) {
+					state.closingFlag.set(true);
+					state.closingSinceMs = System.currentTimeMillis();
+					state.closingAttempts++;
+					String reason = "ROI_STOP_LOSS";
+					logTrailEvent("ROI_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
+					writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, Double.NaN, Double.NaN,
+							Double.NaN, Double.NaN);
+					ctiLbStrategy.requestTrailingExit(new TrailingExitRequest(symbol, snapshot.side(),
+							snapshot.entryPrice(), markPrice, snapshot.leverage(), pnlPct, reason, 0, 0, 0));
+					return;
+				}
+			}
+
+			// Rest of the trailing logic...
 			if (!state.profitArmed && pnlPct >= profitArmThreshold()) {
 				state.profitArmed = true;
 				state.peakProfitPct = pnlPct;
@@ -167,6 +184,8 @@ public class TrailingPnlService {
 			if (!state.closingFlag.get() && shouldExit(state)) {
 				String reason = resolveExitReason(state);
 				state.closingFlag.set(true);
+				state.closingSinceMs = System.currentTimeMillis();
+				state.closingAttempts++;
 				logTrailEvent("TRAIL_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
 				writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, trailWidth, profitStop,
 						hardStop, recoveryStop);
@@ -177,26 +196,55 @@ public class TrailingPnlService {
 			}
 		}
 	}
-
-	public void onPositionUpdate(String symbol, double entryPrice, double qty, String side, Integer leverage) {
-		if (qty == 0 || entryPrice <= 0) {
-			resetState(symbol);
-			positionMap.remove(symbol);
-			return;
-		}
-		CtiDirection resolvedSide = resolveSide(side, qty);
-		int leverageUsed = leverage != null && leverage > 0 ? leverage : leverageDefault();
-		positionMap.put(symbol, new PositionSnapshot(entryPrice, qty, resolvedSide, leverageUsed, System.currentTimeMillis()));
-	}
-
 	public void resetState(String symbol) {
 		TrailingState state = trailingMap.remove(symbol);
 		if (state != null) {
 			synchronized (state) {
+				LOGGER.info("EVENT=TRAIL_STATE_RESET symbol={} profitArmed={} lossArmed={} closingAttempts={} lastPnl={}",
+						symbol, state.profitArmed, state.lossArmed, state.closingAttempts,
+						String.format("%.2f", state.lastPnlPct));
 				state.reset();
 			}
 		}
 		ctiLbStrategy.setTrailingArmed(symbol, false);
+	}
+	public void resetClosingFlag(String symbol) {
+		TrailingState state = trailingMap.get(symbol);
+		if (state != null) {
+			synchronized (state) {
+				LOGGER.info("EVENT=TRAIL_CLOSING_FLAG_RESET symbol={} attempts={}",
+						symbol, state.closingAttempts);
+				state.closingFlag.set(false);
+			}
+		}
+	}
+	public void onPositionUpdate(String symbol, double entryPrice, double qty, String side, Integer leverage) {
+		if (qty == 0 || entryPrice <= 0) {
+			resetState(symbol);
+			positionMap.remove(symbol);
+			ctiLbStrategy.setTrailingArmed(symbol, false);
+			return;
+		}
+
+		CtiDirection resolvedSide = resolveSide(side, qty);
+		int leverageUsed = leverage != null && leverage > 0 ? leverage : leverageDefault();
+
+		// ✅ CRITICAL: Reset state if entry price changed significantly
+		PositionSnapshot existing = positionMap.get(symbol);
+		if (existing != null) {
+			double priceDiff = Math.abs(existing.entryPrice() - entryPrice);
+			double priceChangePct = priceDiff / existing.entryPrice() * 100.0;
+
+			// If entry price changed by more than 0.1%, it's a new position
+			if (priceChangePct > 0.1) {
+				LOGGER.info("EVENT=POSITION_CHANGED symbol={} oldEntry={} newEntry={} changePct={}",
+						symbol, existing.entryPrice(), entryPrice, String.format("%.4f", priceChangePct));
+				resetState(symbol);
+			}
+		}
+
+		positionMap.put(symbol, new PositionSnapshot(entryPrice, qty, resolvedSide, leverageUsed,
+				System.currentTimeMillis()));
 	}
 
 	private void startPositionSync() {
