@@ -1735,6 +1735,10 @@ public class CtiLbStrategy {
 		if (!entryFilterState.ema20Ok()) {
 			return new EntryDecision(null, "ENTRY_BLOCK_EMA20_REQUIRED", "ENTRY_BLOCK_EMA20_REQUIRED");
 		}
+		// Mandatory: RSI must confirm direction.
+		if (!entryFilterState.rsiOk()) {
+			return new EntryDecision(null, "ENTRY_BLOCK_RSI_REQUIRED", "ENTRY_BLOCK_RSI_REQUIRED");
+		}
 
 		// 5 checks (ema200, ema20, rsi, vol, atr) -> at least 3 must be TRUE.
 		int okCount = 0;
