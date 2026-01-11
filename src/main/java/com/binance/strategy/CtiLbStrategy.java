@@ -454,7 +454,7 @@ public class CtiLbStrategy {
 		IndicatorsSnapshot indicatorsSnapshot = new IndicatorsSnapshot(
 				symbolState.ema200_5mValue,
 				symbolState.isEma200Ready(),
-				symbolState.ema20_1mValue,
+				symbolState.ema20_5mValue,
 				symbolState.isEma20Ready(),
 				symbolState.rsi9Value,
 				symbolState.isRsiReady(),
@@ -659,7 +659,7 @@ public class CtiLbStrategy {
 						entryState == null ? null : entryState.entryPrice(),
 						close,
 						fiveMinDir,
-						symbolState.ema20_1mValue,
+						symbolState.ema20_5mValue,
 						symbolState.ema200_5mValue,
 						symbolState.isTrendEmaReady(),
 						trailState.trailStopHit(),
@@ -787,7 +787,7 @@ public class CtiLbStrategy {
 					entryState == null ? null : entryState.entryPrice(),
 					close,
 					fiveMinDir,
-					symbolState.ema20_1mValue,
+					symbolState.ema20_5mValue,
 					symbolState.ema200_5mValue,
 					symbolState.isTrendEmaReady(),
 					trailState.trailStopHit(),
@@ -1260,10 +1260,10 @@ public class CtiLbStrategy {
 			return false;
 		}
 		if (side == CtiDirection.LONG) {
-			return fiveMinDir == 1 && close > state.ema20_1mValue && close > state.ema200_5mValue;
+			return fiveMinDir == 1 && close > state.ema20_5mValue && close > state.ema200_5mValue;
 		}
 		if (side == CtiDirection.SHORT) {
-			return fiveMinDir == -1 && close < state.ema20_1mValue && close < state.ema200_5mValue;
+			return fiveMinDir == -1 && close < state.ema20_5mValue && close < state.ema200_5mValue;
 		}
 		return false;
 	}
@@ -1273,10 +1273,10 @@ public class CtiLbStrategy {
 			return false;
 		}
 		if (current == PositionState.LONG) {
-			return close < state.ema20_1mValue;
+			return close < state.ema20_5mValue;
 		}
 		if (current == PositionState.SHORT) {
-			return close > state.ema20_1mValue;
+			return close > state.ema20_5mValue;
 		}
 		return false;
 	}
@@ -1466,7 +1466,7 @@ public class CtiLbStrategy {
 		EntryQualityEvaluation evaluation = evaluateEntryQuality(
 				oppositeDir,
 				close,
-				state.ema20_1mValue,
+				state.ema20_5mValue,
 				state.isEma20Ready(),
 				state.ema200_5mValue,
 				state.isEma200Ready(),
@@ -1489,7 +1489,7 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} rsi9Used={} outHist={} outHistPrev={} macdDelta={} ema20={} ema20DistPct={} ema20_1m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} rsi9Used={} outHist={} outHistPrev={} macdDelta={} ema20={} ema20DistPct={} ema20_5m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -1505,7 +1505,7 @@ public class CtiLbStrategy {
 				entryGateMetrics.macdDeltaLabel(),
 				entryGateMetrics.ema20Label(),
 				entryGateMetrics.ema20DistPctLabel(),
-				Double.isNaN(entryFilterState.ema20_1m()) ? "NA" : String.format("%.8f", entryFilterState.ema20_1m()),
+				Double.isNaN(entryFilterState.ema20_5m()) ? "NA" : String.format("%.8f", entryFilterState.ema20_5m()),
 				Double.isNaN(entryFilterState.ema200_5m()) ? "NA" : String.format("%.8f",
 						entryFilterState.ema200_5m()),
 				Double.isNaN(entryFilterState.rsi9()) ? "NA" : String.format("%.2f", entryFilterState.rsi9()),
@@ -1534,7 +1534,7 @@ public class CtiLbStrategy {
 				nowMs,
 				state.fiveMinFlipTimeMs,
 				state.fiveMinFlipPrice,
-				state.ema20_1mValue,
+				state.ema20_5mValue,
 				state.isEma20Ready(),
 				state.ema200_5mValue,
 				state.isEma200Ready(),
@@ -1570,7 +1570,7 @@ public class CtiLbStrategy {
 		EntryQualityEvaluation qualityEvaluation = evaluateEntryQuality(
 				inputs.fiveMinDir(),
 				inputs.close(),
-				inputs.ema20_1m(),
+				inputs.ema20_5m(),
 				inputs.ema20Ready(),
 				inputs.ema200_5m(),
 				inputs.ema200Ready(),
@@ -1586,7 +1586,7 @@ public class CtiLbStrategy {
 				entryTrigger,
 				properties);
 		return new EntryFilterState(inputs.fiveMinDir(), entryTrigger, scoreAligned,
-				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_1m(),
+				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_5m(),
 				inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(), inputs.atr14(),
 				inputs.atrSma20(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
 				qualityEvaluation.ema20Ok(), qualityEvaluation.rsiOk(), qualityEvaluation.volOk(),
@@ -1793,7 +1793,7 @@ public class CtiLbStrategy {
 		double outHist = signal == null ? Double.NaN : signal.outHist();
 		double outHistPrev = signal == null ? Double.NaN : signal.outHistPrev();
 		double macdDelta = Double.isNaN(outHist) || Double.isNaN(outHistPrev) ? Double.NaN : outHist - outHistPrev;
-		double ema20 = entryFilterState == null ? Double.NaN : entryFilterState.ema20_1m();
+		double ema20 = entryFilterState == null ? Double.NaN : entryFilterState.ema20_5m();
 		double ema20DistPct = Double.NaN;
 		if (candidateSide != null && !Double.isNaN(ema20) && ema20 > 0) {
 			if (candidateSide == CtiDirection.LONG) {
@@ -1854,7 +1854,7 @@ public class CtiLbStrategy {
 			String triggerReason,
 			long flipTimeMs,
 			double flipPrice,
-			double ema20_1m,
+			double ema20_5m,
 			double ema200_5m,
 			double rsi9,
 			double volume,
@@ -1878,7 +1878,7 @@ public class CtiLbStrategy {
 			long nowMs,
 			long fiveMinFlipTimeMs,
 			double fiveMinFlipPrice,
-			double ema20_1m,
+			double ema20_5m,
 			boolean ema20Ready,
 			double ema200_5m,
 			boolean ema200Ready,
@@ -2085,7 +2085,7 @@ public class CtiLbStrategy {
 		private final BarSeries series5m = new BaseBarSeriesBuilder().withName("5m").build();
 		private final ClosePriceIndicator closePrice1m = new ClosePriceIndicator(series1m);
 		private final ClosePriceIndicator closePrice5m = new ClosePriceIndicator(series5m);
-		private final EMAIndicator ema20_1m = new EMAIndicator(closePrice1m, EMA_20_PERIOD);
+		private final EMAIndicator ema20_5m = new EMAIndicator(closePrice5m, EMA_20_PERIOD);
 		private final EMAIndicator ema200_5m = new EMAIndicator(closePrice5m, EMA_200_PERIOD);
 		private final RSIIndicator rsi9_1m = new RSIIndicator(closePrice1m, RSI_9_PERIOD);
 		private final RSIIndicator rsi9_5m = new RSIIndicator(closePrice5m, RSI_9_PERIOD);
@@ -2095,7 +2095,7 @@ public class CtiLbStrategy {
 		private final SMAIndicator volumeSma10_1m = new SMAIndicator(volume1m, VOLUME_SMA_10_PERIOD);
 		private final VolumeIndicator volume5m = new VolumeIndicator(series5m);
 		private final SMAIndicator volumeSma10_5m = new SMAIndicator(volume5m, VOLUME_SMA_10_PERIOD);
-		private double ema20_1mValue = Double.NaN;
+		private double ema20_5mValue = Double.NaN;
 		private double ema200_5mValue = Double.NaN;
 		private double rsi9Value = Double.NaN;
 		private double rsi9_5mValue = Double.NaN;
@@ -2122,7 +2122,6 @@ public class CtiLbStrategy {
 					BigDecimal.valueOf(candle.close()),
 					BigDecimal.valueOf(candle.volume())));
 			int index = series1m.getEndIndex();
-			ema20_1mValue = ema20_1m.getValue(index).doubleValue();
 			rsi9Value = rsi9_1m.getValue(index).doubleValue();
 			atr14Value = atr14_1m.getValue(index).doubleValue();
 			atrSma20Value = atrSma20_1m.getValue(index).doubleValue();
@@ -2142,6 +2141,7 @@ public class CtiLbStrategy {
 					BigDecimal.valueOf(candle.close()),
 					BigDecimal.valueOf(candle.volume())));
 			int index = series5m.getEndIndex();
+			ema20_5mValue = ema20_5m.getValue(index).doubleValue();
 			ema200_5mValue = ema200_5m.getValue(index).doubleValue();
 			rsi9_5mPrev = rsi9_5mValue;
 			rsi9_5mValue = rsi9_5m.getValue(index).doubleValue();
@@ -2153,7 +2153,7 @@ public class CtiLbStrategy {
 		}
 
 		private boolean isEma20Ready() {
-			return series1m.getBarCount() >= EMA_20_PERIOD;
+			return series5m.getBarCount() >= EMA_20_PERIOD;
 		}
 
 		private boolean isEma200Ready() {
@@ -2684,7 +2684,7 @@ public class CtiLbStrategy {
 						indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
 						indicatorsNode.put("atr14", entryFilterState.atr14());
 						indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
-						indicatorsNode.put("ema20_1m", entryFilterState.ema20_1m());
+						indicatorsNode.put("ema20_5m", entryFilterState.ema20_5m());
 						indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
 						indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
 						indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
@@ -2752,6 +2752,7 @@ public class CtiLbStrategy {
 			putFinite(payload, "rsi9_5m", confidence.rsi9());
 			putFinite(payload, "volume5m", candle.volume());
 			putFinite(payload, "volumeSma10_5m", confidence.volumeSma10());
+			putFinite(payload, "ema20", entryFilterState == null ? Double.NaN : entryFilterState.ema20_5m());
 			putFinite(payload, "volRatio", confidence.volRatio());
 			putFinite(payload, "volConf", confidence.volConf());
 			putFinite(payload, "rsiConf", confidence.rsiConf());
