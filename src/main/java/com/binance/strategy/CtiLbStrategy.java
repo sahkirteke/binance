@@ -456,7 +456,7 @@ public class CtiLbStrategy {
 				symbolState.isEma200Ready(),
 				symbolState.ema20_5mValue,
 				symbolState.isEma20Ready(),
-				symbolState.rsi9Value,
+				symbolState.rsi9_5mValue,
 				symbolState.isRsiReady(),
 				signal.adx5m(),
 				signal.adxReady(),
@@ -1470,7 +1470,7 @@ public class CtiLbStrategy {
 				state.isEma20Ready(),
 				state.ema200_5mValue,
 				state.isEma200Ready(),
-				state.rsi9Value,
+				state.rsi9_5mValue,
 				state.isRsiReady(),
 				entryFilterState.volume(),
 				state.volumeSma10Value,
@@ -1538,7 +1538,7 @@ public class CtiLbStrategy {
 				state.isEma20Ready(),
 				state.ema200_5mValue,
 				state.isEma200Ready(),
-				state.rsi9Value,
+				state.rsi9_5mValue,
 				state.isRsiReady(),
 				state.volumeSma10Value,
 				state.isVolumeSmaReady(),
@@ -1614,8 +1614,8 @@ public class CtiLbStrategy {
 		boolean ema200Ok = ema200Ready && ((fiveMinDir == 1 && close > ema200) || (fiveMinDir == -1 && close < ema200));
 		boolean ema20Ok = ema20Ready && ((fiveMinDir == 1 && close > ema20) || (fiveMinDir == -1 && close < ema20));
 		boolean rsiOk = rsiReady
-				&& ((fiveMinDir == 1 && rsi9 >= 45.0 && rsi9 <= 65.0)
-						|| (fiveMinDir == -1 && rsi9 >= 35.0 && rsi9 <= 55.0));
+				&& ((fiveMinDir == 1 && rsi9 >= 45.0 && rsi9 <= 75.0)
+						|| (fiveMinDir == -1 && rsi9 >= 25.0 && rsi9 <= 55.0));
 		boolean volOk = volReady && volSma10 > 0 && volume > volSma10 * properties.volSpikeMult();
 		boolean atrOk = atrReady && atrSmaReady && atrSma20 > 0 && atr14 < atrSma20 * properties.atrCapMult();
 
@@ -2091,7 +2091,6 @@ public class CtiLbStrategy {
 		private final ClosePriceIndicator closePrice5m = new ClosePriceIndicator(series5m);
 		private final EMAIndicator ema20_5m = new EMAIndicator(closePrice5m, EMA_20_PERIOD);
 		private final EMAIndicator ema200_5m = new EMAIndicator(closePrice5m, EMA_200_PERIOD);
-		private final RSIIndicator rsi9_1m = new RSIIndicator(closePrice1m, RSI_9_PERIOD);
 		private final RSIIndicator rsi9_5m = new RSIIndicator(closePrice5m, RSI_9_PERIOD);
 		private final ATRIndicator atr14_1m = new ATRIndicator(series1m, ATR_14_PERIOD);
 		private final SMAIndicator atrSma20_1m = new SMAIndicator(atr14_1m, ATR_SMA_20_PERIOD);
@@ -2101,7 +2100,6 @@ public class CtiLbStrategy {
 		private final SMAIndicator volumeSma10_5m = new SMAIndicator(volume5m, VOLUME_SMA_10_PERIOD);
 		private double ema20_5mValue = Double.NaN;
 		private double ema200_5mValue = Double.NaN;
-		private double rsi9Value = Double.NaN;
 		private double rsi9_5mValue = Double.NaN;
 		private double rsi9_5mPrev = Double.NaN;
 		private int macdDownStreak;
@@ -2126,7 +2124,6 @@ public class CtiLbStrategy {
 					BigDecimal.valueOf(candle.close()),
 					BigDecimal.valueOf(candle.volume())));
 			int index = series1m.getEndIndex();
-			rsi9Value = rsi9_1m.getValue(index).doubleValue();
 			atr14Value = atr14_1m.getValue(index).doubleValue();
 			atrSma20Value = atrSma20_1m.getValue(index).doubleValue();
 			volumeSma10Value = volumeSma10_1m.getValue(index).doubleValue();
@@ -2165,7 +2162,7 @@ public class CtiLbStrategy {
 		}
 
 		private boolean isRsiReady() {
-			return series1m.getBarCount() >= RSI_9_PERIOD;
+			return series5m.getBarCount() >= RSI_9_PERIOD;
 		}
 
 		private boolean isVolumeSmaReady() {
