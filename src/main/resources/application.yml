@@ -27,7 +27,6 @@ strategy:
   reference-symbol: MANAUSDT
   trade-symbol: MANAUSDT
   trade-symbols:
-    - ETCUSDT
     - MANAUSDT
     - XLMUSDT
     - CHZUSDT
