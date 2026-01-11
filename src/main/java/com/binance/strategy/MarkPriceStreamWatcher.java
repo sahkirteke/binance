@@ -54,8 +54,8 @@ public class MarkPriceStreamWatcher {
 			LOGGER.info("Mark price stream not started (active={})", strategyProperties.active());
 			return;
 		}
-		if (!strategyProperties.pnlTrailEnabled()) {
-			LOGGER.info("Mark price stream not started (pnl trailing disabled).");
+		if (!strategyProperties.pnlTrailEnabled() && !strategyProperties.roiExitEnabled()) {
+			LOGGER.info("Mark price stream not started (pnl trailing disabled and roi exit disabled).");
 			return;
 		}
 		markWarmupComplete();
@@ -66,15 +66,17 @@ public class MarkPriceStreamWatcher {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
-		if (!strategyProperties.pnlTrailEnabled()) {
+		if (!strategyProperties.pnlTrailEnabled() && !strategyProperties.roiExitEnabled()) {
 			return;
 		}
 		if (!streamsStarted.compareAndSet(false, true)) {
 			return;
 		}
 		if (binanceProperties.useTestnet()) {
+			LOGGER.info("EVENT=MARK_PRICE_STREAM_START mode=testnet symbols={}", strategyProperties.resolvedTradeSymbols().size());
 			startTestnetStreams();
 		} else {
+			LOGGER.info("EVENT=MARK_PRICE_STREAM_START mode=combined symbols={}", strategyProperties.resolvedTradeSymbols().size());
 			startCombinedStream();
 		}
 	}

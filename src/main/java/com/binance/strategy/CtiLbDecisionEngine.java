@@ -8,9 +8,6 @@ import com.binance.exchange.dto.OrderResponse;
 public final class CtiLbDecisionEngine {
 
 	private static final long FLIP_WINDOW_MS = 300_000L;
-	private static final double MIN_STOP_LOSS_BPS = 60.0;
-	private static final double MIN_TAKE_PROFIT_BPS = 80.0;
-
 	private CtiLbDecisionEngine() {
 	}
 
@@ -23,43 +20,51 @@ public final class CtiLbDecisionEngine {
 		double entry = entryPrice.doubleValue();
 		double costBps = normalizeBps(feeBps) + normalizeBps(spreadBps) + normalizeBps(slippageBps);
 		double pnlBps = estimatePnlBps(side, entry, currentPrice) - costBps;
-		double stopLoss = toFraction(stopLossBps);
-		double takeProfit = toFraction(takeProfitBps);
-		double effectiveStopLossBps = Math.max(stopLoss * 10000.0, MIN_STOP_LOSS_BPS);
-		double effectiveTakeProfitBps = Math.max(takeProfit * 10000.0, MIN_TAKE_PROFIT_BPS);
+
+		// Interpret input thresholds directly as *BPS* (basis points), honoring configuration as-is.
+		double effectiveStopLossBps = normalizeBps(stopLossBps);
+		double effectiveTakeProfitBps = normalizeBps(takeProfitBps);
 		double effectiveStopLoss = effectiveStopLossBps / 10000.0;
 		double effectiveTakeProfit = effectiveTakeProfitBps / 10000.0;
 
-		if (entryTimeMs != null && minHoldMs > 0 && nowMs - entryTimeMs < minHoldMs) {
-			return new ExitDecision(false, "BLOCK_MIN_HOLD_EXIT", pnlBps);
+		// 1) STOP LOSS must NEVER be blocked by minHold.
+		if (effectiveStopLossBps > 0) {
+			if (side == CtiDirection.LONG && currentPrice <= entry * (1.0 - effectiveStopLoss)) {
+				return new ExitDecision(true,
+						formatExitReason("EXIT_STOP_LOSS", pnlBps, effectiveStopLossBps, entry, currentPrice, costBps),
+						pnlBps);
+			}
+			if (side == CtiDirection.SHORT && currentPrice >= entry * (1.0 + effectiveStopLoss)) {
+				return new ExitDecision(true,
+						formatExitReason("EXIT_STOP_LOSS", pnlBps, effectiveStopLossBps, entry, currentPrice, costBps),
+						pnlBps);
+			}
 		}
+
+		// 2) TAKE PROFIT also should not be blocked by minHold (captures fast moves).
+		if (effectiveTakeProfitBps > 0) {
+			if (side == CtiDirection.LONG && currentPrice >= entry * (1.0 + effectiveTakeProfit)) {
+				return new ExitDecision(true,
+						formatExitReason("EXIT_TAKE_PROFIT", pnlBps, effectiveTakeProfitBps, entry, currentPrice, costBps),
+						pnlBps);
+			}
+			if (side == CtiDirection.SHORT && currentPrice <= entry * (1.0 - effectiveTakeProfit)) {
+				return new ExitDecision(true,
+						formatExitReason("EXIT_TAKE_PROFIT", pnlBps, effectiveTakeProfitBps, entry, currentPrice, costBps),
+						pnlBps);
+			}
+		}
+
+		// 3) Score-based exit: allow minHold to block only this kind of exit.
 		if (scoreExitConfirmed) {
+			if (entryTimeMs != null && minHoldMs > 0 && nowMs - entryTimeMs < minHoldMs) {
+				return new ExitDecision(false, "BLOCK_MIN_HOLD_SCORE_EXIT", pnlBps);
+			}
 			return new ExitDecision(true, "SCORE_REVERSAL_CONFIRMED", pnlBps);
 		}
 
-		if (effectiveStopLossBps > 0) {
-			if (side == CtiDirection.LONG && currentPrice <= entry * (1.0 - effectiveStopLoss)) {
-				return new ExitDecision(true, formatExitReason("EXIT_STOP_LOSS", pnlBps, effectiveStopLossBps,
-						entry, currentPrice, costBps), pnlBps);
-			}
-			if (side == CtiDirection.SHORT && currentPrice >= entry * (1.0 + effectiveStopLoss)) {
-				return new ExitDecision(true, formatExitReason("EXIT_STOP_LOSS", pnlBps, effectiveStopLossBps,
-						entry, currentPrice, costBps), pnlBps);
-			}
-		}
-		if (effectiveTakeProfitBps > 0) {
-			if (side == CtiDirection.LONG && currentPrice >= entry * (1.0 + effectiveTakeProfit)) {
-				return new ExitDecision(true, formatExitReason("EXIT_TAKE_PROFIT", pnlBps, effectiveTakeProfitBps,
-						entry, currentPrice, costBps), pnlBps);
-			}
-			if (side == CtiDirection.SHORT && currentPrice <= entry * (1.0 - effectiveTakeProfit)) {
-				return new ExitDecision(true, formatExitReason("EXIT_TAKE_PROFIT", pnlBps, effectiveTakeProfitBps,
-						entry, currentPrice, costBps), pnlBps);
-			}
-		}
 		return new ExitDecision(false, null, pnlBps);
 	}
-
 	public static BigDecimal resolveTargetNotional(BigDecimal notionalUsdt, BigDecimal maxPositionUsdt,
 			BigDecimal defaultNotionalUsdt) {
 		BigDecimal effectiveNotional = (notionalUsdt == null || notionalUsdt.signum() <= 0)
