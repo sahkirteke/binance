@@ -105,7 +105,11 @@ public record StrategyProperties(
 		double pnlTrailProfitTrailBonus,
 		double pnlTrailLossHardExtra,
 		double pnlTrailLossRecoveryTrail,
-		int pnlTrailExitConfirmTicks) {
+		int pnlTrailExitConfirmTicks,
+		boolean roiExitEnabled,
+		double roiTakeProfitPct,
+		double roiStopLossPct) {
+
 
 	public List<String> resolvedTradeSymbols() {
 		if (tradeSymbols != null && !tradeSymbols.isEmpty()) {

@@ -47,18 +47,75 @@ public class TrailingPnlService {
 	}
 
 	public void onMarkPrice(String symbol, double markPrice) {
-		if (!strategyProperties.pnlTrailEnabled()) {
+		boolean roiEnabled = strategyProperties.roiExitEnabled()
+				&& strategyProperties.roiTakeProfitPct() > 0
+				&& strategyProperties.roiStopLossPct() > 0;
+		if (!strategyProperties.pnlTrailEnabled() && !roiEnabled) {
 			return;
 		}
 		PositionSnapshot snapshot = positionMap.get(symbol);
 		if (snapshot == null || snapshot.qty() == 0 || snapshot.entryPrice() <= 0) {
-			resetState(symbol);
-			return;
+			// IMPORTANT: For intrabar ROI exits we must have an entry snapshot immediately,
+			// not only after periodic REST sync. Pull it from CtiLbStrategy's in-memory entry state.
+			CtiLbStrategy.EntryState entry = ctiLbStrategy.peekEntryStateForTrailing(symbol);
+			CtiLbStrategy.PositionState posState = ctiLbStrategy.peekPositionStateForTrailing(symbol);
+			if (entry != null && posState != null && posState != CtiLbStrategy.PositionState.NONE
+					&& entry.entryPrice() != null && entry.quantity() != null
+					&& entry.quantity().signum() != 0 && entry.entryPrice().signum() > 0) {
+				onPositionUpdate(symbol,
+						entry.entryPrice().doubleValue(),
+						entry.quantity().doubleValue(),
+						entry.side().name(),
+						leverageDefault());
+				snapshot = positionMap.get(symbol);
+			}
+			if (snapshot == null || snapshot.qty() == 0 || snapshot.entryPrice() <= 0) {
+				resetState(symbol);
+				return;
+			}
 		}
 		double pnlPct = calculatePnlPct(snapshot, markPrice);
 		TrailingState state = trailingMap.computeIfAbsent(symbol, ignored -> new TrailingState());
 		synchronized (state) {
 			state.lastPnlPct = pnlPct;
+			// ROI hard exits (intrabar via mark price): close immediately at configured ROI thresholds.
+			if (roiEnabled) {
+				// If a close attempt got stuck (network/API error), allow retry after a short window.
+				if (state.closingFlag.get() && state.closingSinceMs > 0
+						&& (System.currentTimeMillis() - state.closingSinceMs) > 5000) {
+					LOGGER.warn("EVENT=ROI_EXIT_RETRY_ARMED symbol={} pnlPct={} attempts={}",
+							symbol, String.format("%.2f", pnlPct), state.closingAttempts);
+					state.closingFlag.set(false);
+				}
+				if (!state.closingFlag.get()) {
+					double tp = strategyProperties.roiTakeProfitPct();
+					double sl = strategyProperties.roiStopLossPct();
+					if (pnlPct >= tp) {
+						state.closingFlag.set(true);
+						state.closingSinceMs = System.currentTimeMillis();
+						state.closingAttempts++;
+						String reason = "ROI_TAKE_PROFIT";
+						logTrailEvent("ROI_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
+						writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, Double.NaN, Double.NaN,
+								Double.NaN, Double.NaN);
+						ctiLbStrategy.requestTrailingExit(new TrailingExitRequest(symbol, snapshot.side(), snapshot.entryPrice(),
+								markPrice, snapshot.leverage(), pnlPct, reason, 0, 0, 0));
+						return;
+					}
+					if (pnlPct <= -sl) {
+						state.closingFlag.set(true);
+						state.closingSinceMs = System.currentTimeMillis();
+						state.closingAttempts++;
+						String reason = "ROI_STOP_LOSS";
+						logTrailEvent("ROI_EXIT_SIGNAL", symbol, snapshot, markPrice, pnlPct, state);
+						writeTrailSnapshot(symbol, snapshot, markPrice, pnlPct, reason, state, Double.NaN, Double.NaN,
+								Double.NaN, Double.NaN);
+						ctiLbStrategy.requestTrailingExit(new TrailingExitRequest(symbol, snapshot.side(), snapshot.entryPrice(),
+								markPrice, snapshot.leverage(), pnlPct, reason, 0, 0, 0));
+						return;
+					}
+				}
+			}
 			if (!state.profitArmed && pnlPct >= profitArmThreshold()) {
 				state.profitArmed = true;
 				state.peakProfitPct = pnlPct;
@@ -310,6 +367,10 @@ public class TrailingPnlService {
 	}
 
 	private int leverageDefault() {
+		// ROI exits are calibrated for 50x as requested.
+		if (strategyProperties.roiExitEnabled()) {
+			return 50;
+		}
 		return strategyProperties.leverage() > 0 ? strategyProperties.leverage() : 50;
 	}
 
@@ -370,6 +431,8 @@ public class TrailingPnlService {
 		private boolean lossHardExitReady;
 		private boolean lossRecoveryExitReady;
 		private final AtomicBoolean closingFlag = new AtomicBoolean(false);
+		private long closingSinceMs;
+		private int closingAttempts;
 
 		private TrailingState() {
 			reset();
@@ -390,6 +453,8 @@ public class TrailingPnlService {
 			lossHardExitReady = false;
 			lossRecoveryExitReady = false;
 			closingFlag.set(false);
+			closingSinceMs = 0L;
+			closingAttempts = 0;
 		}
 	}
 }

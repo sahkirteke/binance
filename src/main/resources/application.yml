@@ -41,7 +41,6 @@ strategy:
     - SOLUSDT
     - ADAUSDT
     - AVAXUSDT
-    - DOTUSDT
     - ARBUSDT
     - POLUSDT
     - CELRUSDT
@@ -82,6 +81,9 @@ strategy:
   stop-loss-bps: 18
   take-profit-bps: 22
   quantity-step: 1
+  roi-exit-enabled: true
+  roi-take-profit-pct: 20
+  roi-stop-loss-pct: 20
   price-tick: 0.01
   max-daily-loss-usdt: 100
   max-consecutive-losses: 3

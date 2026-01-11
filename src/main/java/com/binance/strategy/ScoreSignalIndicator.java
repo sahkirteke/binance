@@ -4,6 +4,7 @@ import org.ta4j.core.BarSeries;
 import org.ta4j.core.BaseBar;
 import org.ta4j.core.BaseBarSeriesBuilder;
 import org.ta4j.core.indicators.MACDIndicator;
+import org.ta4j.core.indicators.EMAIndicator;
 import org.ta4j.core.indicators.SMAIndicator;
 import org.ta4j.core.indicators.adx.ADXIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
@@ -19,7 +20,8 @@ public class ScoreSignalIndicator {
 	private final BarSeries macdSeries5m = new BaseBarSeriesBuilder().withName("macd5m").build();
 	private final ClosePriceIndicator macdClose5m = new ClosePriceIndicator(macdSeries5m);
 	private final MACDIndicator macdIndicator5m = new MACDIndicator(macdClose5m, 12, 26);
-	private final SMAIndicator macdSignal5m = new SMAIndicator(macdIndicator5m, 9);
+	private final EMAIndicator macdSignal5m =
+			new EMAIndicator(macdIndicator5m, 9);
 	private final BarSeries adxSeries = new BaseBarSeriesBuilder().withName("adx5m").build();
 	private final ADXIndicator adxIndicator = new ADXIndicator(adxSeries, ADX_PERIOD);
 	private final SMAIndicator adxSma10 = new SMAIndicator(adxIndicator, 10);
@@ -57,25 +59,18 @@ public class ScoreSignalIndicator {
 			return;
 		}
 		last1mCloseTime = candle.closeTime();
-		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
-		double cti1mValue = cti1mSignal.bfr();
-		double cti1mPrev = cti1mSignal.bfrPrev();
-		CtiDirection cti1mDir = resolveRawDirection(cti1mValue, cti1mPrev);
-		lastCti1mValue = cti1mValue;
-		lastCti1mPrev = cti1mPrev;
-		lastCti1mDir = cti1mDir;
+		// 1m CTI state resetlenmez (noise & fake signal önleme)
 	}
+
 
 	public void warmupOneMinuteCandle(Candle candle) {
 		if (candle.closeTime() <= last1mCloseTime) {
 			return;
 		}
 		last1mCloseTime = candle.closeTime();
-		TrendSignal cti1mSignal = scoreCalculator.updateCti(symbol, "1m", candle.close(), candle.closeTime());
-		lastCti1mValue = cti1mSignal.bfr();
-		lastCti1mPrev = cti1mSignal.bfrPrev();
-		lastCti1mDir = resolveRawDirection(lastCti1mValue, lastCti1mPrev);
+		// warmup sırasında da reset YOK
 	}
+
 
 	public void warmupFiveMinuteCandle(Candle candle) {
 		if (candle.closeTime() <= last5mCloseTime) {
@@ -155,10 +150,10 @@ public class ScoreSignalIndicator {
 
 		int score5m = lastCti5mDir == CtiDirection.LONG ? 1 : lastCti5mDir == CtiDirection.SHORT ? -1 : 0;
 		int score1m = lastCti1mDir == CtiDirection.LONG ? 1 : lastCti1mDir == CtiDirection.SHORT ? -1 : 0;
-		double weightedCtiScore = (score1m * 0.5) + (score5m * 0.5);
+		double weightedCtiScore = score5m;
 		int hamCtiScore = weightedCtiScore > 0.5 ? 1 : weightedCtiScore < -0.5 ? -1 : 0;
-		double ctiScore = resolveCtiScore(lastCti1mDir, lastCti5mDir);
-		CtiDirection bias = resolveBias(lastCti1mDir, lastCti5mDir);
+		double ctiScore = resolveCtiScore(lastCti5mDir);
+		CtiDirection bias = resolveBias(lastCti5mDir);
 		boolean cti5mReady = has5mCti && cti5mBarsSeen >= cti5mPeriod;
 		boolean adx5mReady = hasAdx && adx5mBarsSeen >= ADX_PERIOD;
 		boolean has5mTrend = cti5mReady && lastCti5mDir != CtiDirection.NEUTRAL;
@@ -330,28 +325,29 @@ public class ScoreSignalIndicator {
 	}
 
 	private CtiDirection resolveRawDirection(double ctiValue, double ctiPrevValue) {
-		int compare = java.math.BigDecimal.valueOf(ctiValue).compareTo(java.math.BigDecimal.valueOf(ctiPrevValue));
-		if (compare > 0) {
-			return CtiDirection.LONG;
+		// Guard against NaN/Infinity and floating jitter (esp. on 1m).
+		if (!Double.isFinite(ctiValue) || !Double.isFinite(ctiPrevValue)) {
+			return CtiDirection.NEUTRAL;
 		}
-		if (compare < 0) {
-			return CtiDirection.SHORT;
+		double delta = ctiValue - ctiPrevValue;
+		if (Math.abs(delta) < 1e-9) {
+			return CtiDirection.NEUTRAL;
 		}
-		return CtiDirection.NEUTRAL;
+		return delta > 0 ? CtiDirection.LONG : CtiDirection.SHORT;
 	}
 
-	private CtiDirection resolveBias(CtiDirection cti1mDir, CtiDirection cti5mDir) {
-		if (cti5mDir != CtiDirection.NEUTRAL) {
-			return cti5mDir;
+	private CtiDirection resolveBias(CtiDirection cti5mDir) {
+		if (cti5mDir == null) {
+			return CtiDirection.NEUTRAL;
 		}
-		return cti1mDir == null ? CtiDirection.NEUTRAL : cti1mDir;
+		return cti5mDir;
 	}
 
-	private double resolveCtiScore(CtiDirection cti1mDir, CtiDirection cti5mDir) {
-		if (cti1mDir == CtiDirection.LONG && cti5mDir == CtiDirection.LONG) {
+	private double resolveCtiScore(CtiDirection cti5mDir) {
+		if (cti5mDir == CtiDirection.LONG) {
 			return 1.0;
 		}
-		if (cti1mDir == CtiDirection.SHORT && cti5mDir == CtiDirection.SHORT) {
+		if (cti5mDir == CtiDirection.SHORT) {
 			return -1.0;
 		}
 		return 0.0;
