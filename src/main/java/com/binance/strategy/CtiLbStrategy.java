@@ -1612,7 +1612,7 @@ public class CtiLbStrategy {
 				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_5m(),
 				inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(), inputs.atr14(),
 				inputs.atrSma20(), inputs.bbMiddle_5m(), inputs.bbUpper_5m(), inputs.bbLower_5m(),
-				inputs.bbPercentB_5m(), inputs.bbWidth_5m(), inputs.bbOutside_5m(), qualityEvaluation.qualityScore(),
+				inputs.bbPercentB_5m(), inputs.bbWidth_5m(), inputs.bbOutside_5m(), 0, qualityEvaluation.qualityScore(),
 				qualityEvaluation.ema200Ok(),
 				qualityEvaluation.ema20Ok(), qualityEvaluation.rsiOk(), qualityEvaluation.volOk(),
 				qualityEvaluation.atrOk(), qualityEvaluation.blockReason());
@@ -1902,6 +1902,7 @@ public class CtiLbStrategy {
 			double bbPercentB_5m,
 			double bbWidth_5m,
 			boolean bbOutside_5m,
+			int bbScore_5m,
 			int qualityScore,
 			boolean ema200Ok,
 			boolean ema20Ok,
@@ -2747,6 +2748,9 @@ public class CtiLbStrategy {
 					if (Double.isFinite(entryFilterState.bbMiddle_5m())) {
 						indicatorsNode.put("bbOutside_5m", entryFilterState.bbOutside_5m());
 					}
+					CtiDirection bbSide = confirmedRec != null ? confirmedRec : recommendationUsed;
+					int bbScore = computeBbScore(entryFilterState.bbPercentB_5m(), bbSide);
+					indicatorsNode.put("bbScore_5m", bbScore);
 					indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
 					indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
 					indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
@@ -2864,6 +2868,40 @@ public class CtiLbStrategy {
 
 	private static Double finiteOrNull(double value) {
 		return Double.isFinite(value) ? value : null;
+	}
+
+	private static int computeBbScore(double percentB, CtiDirection side) {
+		if (Double.isNaN(percentB) || side == null || side == CtiDirection.NEUTRAL) {
+			return 0;
+		}
+		if (side == CtiDirection.LONG) {
+			if (percentB < 0.10) {
+				return -1;
+			}
+			if (percentB < 0.30) {
+				return 1;
+			}
+			if (percentB <= 0.80) {
+				return 2;
+			}
+			if (percentB <= 0.90) {
+				return 1;
+			}
+			return -1;
+		}
+		if (percentB > 0.90) {
+			return -1;
+		}
+		if (percentB > 0.70) {
+			return 1;
+		}
+		if (percentB >= 0.20) {
+			return 2;
+		}
+		if (percentB >= 0.10) {
+			return 1;
+		}
+		return -1;
 	}
 
 	private static BbSnapshot computeBbFromLast(List<Double> closes, double mult) {
