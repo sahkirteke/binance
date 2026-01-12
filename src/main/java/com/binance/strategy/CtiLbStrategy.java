@@ -212,6 +212,8 @@ public class CtiLbStrategy {
 			recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, null, System.currentTimeMillis(),
 					request.markPrice(), exitQty, current, null, entryState, null, null,
 					request.reason(), request.reason(), null, null, null);
+			trailingPnlService.resetClosingFlag(symbol);
+			cleanupPositionState(symbol);
 			return;
 		}
 
