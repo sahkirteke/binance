@@ -1542,7 +1542,7 @@ public class CtiLbStrategy {
 	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double close, double volume1m,
 			long nowMs, SymbolState state) {
 		List<Double> closes5m = extractCloses(state.series5m, BB_LENGTH);
-		BbSnapshot bbSnapshot = computeBb(closes5m, BB_LENGTH, BB_MULT);
+		BbSnapshot bbSnapshot = computeBbFromLast(closes5m, BB_MULT);
 		EntryFilterInputs inputs = new EntryFilterInputs(
 				fiveMinDir,
 				score1m,
@@ -1567,7 +1567,8 @@ public class CtiLbStrategy {
 				bbSnapshot.upper(),
 				bbSnapshot.lower(),
 				bbSnapshot.percentB(),
-				bbSnapshot.width());
+				bbSnapshot.width(),
+				bbSnapshot.outside());
 		return buildEntryFilterState(inputs, strategyProperties);
 	}
 
@@ -1611,7 +1612,8 @@ public class CtiLbStrategy {
 				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_5m(),
 				inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(), inputs.atr14(),
 				inputs.atrSma20(), inputs.bbMiddle_5m(), inputs.bbUpper_5m(), inputs.bbLower_5m(),
-				inputs.bbPercentB_5m(), inputs.bbWidth_5m(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
+				inputs.bbPercentB_5m(), inputs.bbWidth_5m(), inputs.bbOutside_5m(), qualityEvaluation.qualityScore(),
+				qualityEvaluation.ema200Ok(),
 				qualityEvaluation.ema20Ok(), qualityEvaluation.rsiOk(), qualityEvaluation.volOk(),
 				qualityEvaluation.atrOk(), qualityEvaluation.blockReason());
 	}
@@ -1899,6 +1901,7 @@ public class CtiLbStrategy {
 			double bbLower_5m,
 			double bbPercentB_5m,
 			double bbWidth_5m,
+			boolean bbOutside_5m,
 			int qualityScore,
 			boolean ema200Ok,
 			boolean ema20Ok,
@@ -1932,7 +1935,8 @@ public class CtiLbStrategy {
 			double bbUpper_5m,
 			double bbLower_5m,
 			double bbPercentB_5m,
-			double bbWidth_5m) {
+			double bbWidth_5m,
+			boolean bbOutside_5m) {
 	}
 
 	record EntryDecision(
@@ -2074,7 +2078,8 @@ public class CtiLbStrategy {
 			double upper,
 			double lower,
 			double percentB,
-			double width) {
+			double width,
+			boolean outside) {
 	}
 
 	record IndicatorsSnapshot(
@@ -2739,6 +2744,9 @@ public class CtiLbStrategy {
 					putFinite(indicatorsNode, "bbLower_5m", entryFilterState.bbLower_5m());
 					putFinite(indicatorsNode, "bbPercentB_5m", entryFilterState.bbPercentB_5m());
 					putFinite(indicatorsNode, "bbWidth_5m", entryFilterState.bbWidth_5m());
+					if (Double.isFinite(entryFilterState.bbMiddle_5m())) {
+						indicatorsNode.put("bbOutside_5m", entryFilterState.bbOutside_5m());
+					}
 					indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
 					indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
 					indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
@@ -2858,33 +2866,33 @@ public class CtiLbStrategy {
 		return Double.isFinite(value) ? value : null;
 	}
 
-	private static BbSnapshot computeBb(List<Double> closes, int length, double mult) {
-		if (closes == null || closes.size() < length) {
-			return new BbSnapshot(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+	private static BbSnapshot computeBbFromLast(List<Double> closes, double mult) {
+		if (closes == null || closes.size() < BB_LENGTH) {
+			return new BbSnapshot(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, false);
 		}
-		int start = closes.size() - length;
 		double sum = 0.0;
-		for (int i = start; i < closes.size(); i++) {
-			sum += closes.get(i);
+		for (double close : closes) {
+			sum += close;
 		}
-		double middle = sum / length;
+		double middle = sum / closes.size();
 		double variance = 0.0;
-		for (int i = start; i < closes.size(); i++) {
-			double delta = closes.get(i) - middle;
+		for (double close : closes) {
+			double delta = close - middle;
 			variance += delta * delta;
 		}
-		double stdev = Math.sqrt(variance / length);
+		double stdev = Math.sqrt(variance / closes.size());
 		double upper = middle + mult * stdev;
 		double lower = middle - mult * stdev;
 		double denom = upper - lower;
 		double lastClose = closes.get(closes.size() - 1);
 		double percentB = denom > 0.0 ? (lastClose - lower) / denom : Double.NaN;
 		double width = middle != 0.0 ? denom / middle : Double.NaN;
-		return new BbSnapshot(middle, upper, lower, percentB, width);
+		boolean outside = lastClose > upper || lastClose < lower;
+		return new BbSnapshot(middle, upper, lower, percentB, width, outside);
 	}
 
 	private static List<Double> extractCloses(BarSeries series, int length) {
-		if (series == null || series.getBarCount() < length) {
+		if (series == null || series.getEndIndex() < 0 || series.getEndIndex() + 1 < length) {
 			return List.of();
 		}
 		int endIndex = series.getEndIndex();
