@@ -136,8 +136,8 @@ strategy:
 
 warmup:
   enabled: true
-  candles1m: 240
-  candles5m: 120
+  candles1m: 1000
+  candles5m: 500
   concurrency: 3
   log-decisions: false
   decision-log-every: 0
@@ -147,3 +147,19 @@ management:
     web:
       exposure:
         include: health,info
+
+logging:
+  level:
+    com.binance: INFO
+    org.ta4j: WARN
+    ml.dmlc.xgboost4j: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/trading-system.log
+    max-size: 100MB
+  logback:
+    rollingpolicy:
+      max-history: 30
+      max-file-size: 100MB

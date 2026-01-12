@@ -858,7 +858,7 @@ public class CtiLbStrategy {
 		}
 		if (action != SignalAction.HOLD) {
 			Double adx5m = signal.adx5m();
-			if (adx5m != null && adx5m < 15.0) {
+			if (adx5m != null && adx5m < 20.0) {
 				action = SignalAction.HOLD;
 				decisionActionReason = "NO_ENTRY_ADX_BELOW_15";
 				decisionBlockReason = "NO_ENTRY_ADX_BELOW_15";
@@ -3072,7 +3072,7 @@ public class CtiLbStrategy {
 					position.positionAmt(),
 					formatPositionSide(local),
 					true);
-			LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
+//			LOGGER.info(StrategyLogLineBuilder.buildPositionSyncLine(dto));
 			return;
 		}
 		positionStates.put(symbol, updated);
