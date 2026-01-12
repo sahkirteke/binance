@@ -1780,10 +1780,16 @@ public class CtiLbStrategy {
 
 		// Require MACD histogram color to SUPPORT the 5m direction (same side).
 		if (candidateSide == CtiDirection.LONG) {
+			if (histColor == MacdHistColor.BLUE) {
+				return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_BLUE_LONG_DISABLED");
+			}
 			if (histColor != MacdHistColor.AQUA && histColor != MacdHistColor.BLUE) {
 				return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_NOT_LONG");
 			}
 		} else if (candidateSide == CtiDirection.SHORT) {
+			if (histColor == MacdHistColor.MAROON) {
+				return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_MAROON_SHORT_DISABLED");
+			}
 			if (histColor != MacdHistColor.RED && histColor != MacdHistColor.MAROON) {
 				return entryDecision.withBlockReason("ENTRY_BLOCK_MACD_NOT_SHORT");
 			}
