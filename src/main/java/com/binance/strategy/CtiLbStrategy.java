@@ -209,28 +209,37 @@ public class CtiLbStrategy {
 					symbol, request.reason(), current, request.entryPrice(), request.markPrice(),
 					request.leverageUsed(), String.format("%.4f", request.pnlPct()),
 					request.profitExitCount(), request.lossHardExitCount(), request.lossRecoveryExitCount());
+			recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, null, System.currentTimeMillis(),
+					request.markPrice(), exitQty, current, null, entryState, null, null,
+					request.reason(), request.reason(), null, null, null);
 			return;
 		}
 
+		final EntryState entryStateFinal = entryState;
+		final BigDecimal exitQtyFinal = exitQty;
+		final PositionState currentFinal = current;
 		orderClient.fetchHedgeModeEnabled()
 				.flatMap(hedgeMode -> {
 					String correlationId = orderTracker.nextCorrelationId(symbol, "TRAIL_EXIT");
-					return closePosition(symbol, current, exitQty, hedgeMode, correlationId)
+					return closePosition(symbol, currentFinal, exitQtyFinal, hedgeMode, correlationId)
 							.doOnNext(response -> {
 								orderTracker.registerSubmitted(symbol, correlationId, response, true);
 								logOrderEvent("TRAIL_EXIT_EXECUTED", symbol, request.reason(),
-										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-										hedgeMode ? current.name() : "", correlationId, response, null);
+										currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
+										hedgeMode ? currentFinal.name() : "", correlationId, response, null);
 							})
 							.doOnError(error -> {
 								logOrderEvent("TRAIL_EXIT_FAILED", symbol, request.reason(),
-										current == PositionState.LONG ? "SELL" : "BUY", exitQty, true,
-										hedgeMode ? current.name() : "", correlationId, null, error.getMessage());
+										currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
+										hedgeMode ? currentFinal.name() : "", correlationId, null, error.getMessage());
 								// ✅ CRITICAL: Reset trailing state on error to allow retry
 								trailingPnlService.resetClosingFlag(symbol);
 							});
 				})
 				.doOnNext(response -> {
+					recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, null, System.currentTimeMillis(),
+							request.markPrice(), exitQtyFinal, currentFinal, null, entryStateFinal, null, null,
+							request.reason(), request.reason(), null, null, null);
 					positionStates.put(symbol, PositionState.NONE);
 					entryStates.remove(symbol);
 					clearTrailingArmed(symbol);
