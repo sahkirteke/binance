@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -57,6 +59,8 @@ public class CtiLbStrategy {
 	private static final int ATR_14_PERIOD = 14;
 	private static final int ATR_SMA_20_PERIOD = 20;
 	private static final int VOLUME_SMA_10_PERIOD = 10;
+	private static final int BB_LENGTH = 20;
+	private static final double BB_MULT = 2.2;
 	private static final double MACD_HIST_EPS = 1e-6;
 	private static final double EMA20_MAX_DIST_PCT = 0.008;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
@@ -1537,6 +1541,8 @@ public class CtiLbStrategy {
 
 	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double close, double volume1m,
 			long nowMs, SymbolState state) {
+		List<Double> closes5m = extractCloses(state.series5m, BB_LENGTH);
+		BbSnapshot bbSnapshot = computeBb(closes5m, BB_LENGTH, BB_MULT);
 		EntryFilterInputs inputs = new EntryFilterInputs(
 				fiveMinDir,
 				score1m,
@@ -1556,7 +1562,12 @@ public class CtiLbStrategy {
 				state.atr14Value,
 				state.isAtrReady(),
 				state.atrSma20Value,
-				state.isAtrSmaReady());
+				state.isAtrSmaReady(),
+				bbSnapshot.middle(),
+				bbSnapshot.upper(),
+				bbSnapshot.lower(),
+				bbSnapshot.percentB(),
+				bbSnapshot.width());
 		return buildEntryFilterState(inputs, strategyProperties);
 	}
 
@@ -1599,7 +1610,8 @@ public class CtiLbStrategy {
 		return new EntryFilterState(inputs.fiveMinDir(), entryTrigger, scoreAligned,
 				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_5m(),
 				inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(), inputs.atr14(),
-				inputs.atrSma20(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
+				inputs.atrSma20(), inputs.bbMiddle_5m(), inputs.bbUpper_5m(), inputs.bbLower_5m(),
+				inputs.bbPercentB_5m(), inputs.bbWidth_5m(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
 				qualityEvaluation.ema20Ok(), qualityEvaluation.rsiOk(), qualityEvaluation.volOk(),
 				qualityEvaluation.atrOk(), qualityEvaluation.blockReason());
 	}
@@ -1882,6 +1894,11 @@ public class CtiLbStrategy {
 			double volumeSma10,
 			double atr14,
 			double atrSma20,
+			double bbMiddle_5m,
+			double bbUpper_5m,
+			double bbLower_5m,
+			double bbPercentB_5m,
+			double bbWidth_5m,
 			int qualityScore,
 			boolean ema200Ok,
 			boolean ema20Ok,
@@ -1910,7 +1927,12 @@ public class CtiLbStrategy {
 			double atr14,
 			boolean atrReady,
 			double atrSma20,
-			boolean atrSmaReady) {
+			boolean atrSmaReady,
+			double bbMiddle_5m,
+			double bbUpper_5m,
+			double bbLower_5m,
+			double bbPercentB_5m,
+			double bbWidth_5m) {
 	}
 
 	record EntryDecision(
@@ -2045,6 +2067,14 @@ public class CtiLbStrategy {
 			boolean volOk,
 			boolean atrOk,
 			String blockReason) {
+	}
+
+	private record BbSnapshot(
+			double middle,
+			double upper,
+			double lower,
+			double percentB,
+			double width) {
 	}
 
 	record IndicatorsSnapshot(
@@ -2696,18 +2726,23 @@ public class CtiLbStrategy {
 					}
 				}
 					ObjectNode indicatorsNode = objectMapper.createObjectNode();
-					if (entryFilterState != null) {
-						indicatorsNode.put("rsi9", entryFilterState.rsi9());
-						indicatorsNode.put("volume", entryFilterState.volume());
-						indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
-						indicatorsNode.put("atr14", entryFilterState.atr14());
-						indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
-						indicatorsNode.put("ema20_5m", entryFilterState.ema20_5m());
-						indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
-						indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
-						indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
-						indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
-						indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
+				if (entryFilterState != null) {
+					indicatorsNode.put("rsi9", entryFilterState.rsi9());
+					indicatorsNode.put("volume", entryFilterState.volume());
+					indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
+					indicatorsNode.put("atr14", entryFilterState.atr14());
+					indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
+					indicatorsNode.put("ema20_5m", entryFilterState.ema20_5m());
+					indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
+					putFinite(indicatorsNode, "bbMiddle_5m", entryFilterState.bbMiddle_5m());
+					putFinite(indicatorsNode, "bbUpper_5m", entryFilterState.bbUpper_5m());
+					putFinite(indicatorsNode, "bbLower_5m", entryFilterState.bbLower_5m());
+					putFinite(indicatorsNode, "bbPercentB_5m", entryFilterState.bbPercentB_5m());
+					putFinite(indicatorsNode, "bbWidth_5m", entryFilterState.bbWidth_5m());
+					indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
+					indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
+					indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
+					indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
 						indicatorsNode.put("volOk", entryFilterState.volOk());
 						indicatorsNode.put("atrOk", entryFilterState.atrOk());
 						if (entryFilterState.qualityBlockReason() != null) {
@@ -2821,6 +2856,44 @@ public class CtiLbStrategy {
 
 	private static Double finiteOrNull(double value) {
 		return Double.isFinite(value) ? value : null;
+	}
+
+	private static BbSnapshot computeBb(List<Double> closes, int length, double mult) {
+		if (closes == null || closes.size() < length) {
+			return new BbSnapshot(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+		}
+		int start = closes.size() - length;
+		double sum = 0.0;
+		for (int i = start; i < closes.size(); i++) {
+			sum += closes.get(i);
+		}
+		double middle = sum / length;
+		double variance = 0.0;
+		for (int i = start; i < closes.size(); i++) {
+			double delta = closes.get(i) - middle;
+			variance += delta * delta;
+		}
+		double stdev = Math.sqrt(variance / length);
+		double upper = middle + mult * stdev;
+		double lower = middle - mult * stdev;
+		double denom = upper - lower;
+		double lastClose = closes.get(closes.size() - 1);
+		double percentB = denom > 0.0 ? (lastClose - lower) / denom : Double.NaN;
+		double width = middle != 0.0 ? denom / middle : Double.NaN;
+		return new BbSnapshot(middle, upper, lower, percentB, width);
+	}
+
+	private static List<Double> extractCloses(BarSeries series, int length) {
+		if (series == null || series.getBarCount() < length) {
+			return List.of();
+		}
+		int endIndex = series.getEndIndex();
+		int startIndex = endIndex - length + 1;
+		List<Double> closes = new ArrayList<>(length);
+		for (int i = startIndex; i <= endIndex; i++) {
+			closes.add(series.getBar(i).getClosePrice().doubleValue());
+		}
+		return closes;
 	}
 
 	private static void putFinite(ObjectNode payload, String field, double value) {
