@@ -1534,7 +1534,7 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} rsi9Used={} outHist={} outHistPrev={} macdDelta={} ema20={} ema20DistPct={} ema20_5m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} rsi9Used={} outHist={} outHistPrev={} macdDelta={} ema20={} ema20DistPct={} ema20_5m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} bbPercentB_5m={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -1560,6 +1560,8 @@ public class CtiLbStrategy {
 				Double.isNaN(entryFilterState.atr14()) ? "NA" : String.format("%.6f", entryFilterState.atr14()),
 				Double.isNaN(entryFilterState.atrSma20()) ? "NA" : String.format("%.6f",
 						entryFilterState.atrSma20()),
+				Double.isNaN(entryFilterState.bbPercentB_5m()) ? "NA" : String.format("%.4f",
+						entryFilterState.bbPercentB_5m()),
 				entryFilterState.qualityScore(),
 				entryFilterState.ema200Ok(),
 				entryFilterState.ema20Ok(),
@@ -1786,7 +1788,10 @@ public class CtiLbStrategy {
 			return new EntryDecision(null, null, null);
 		}
 		if (properties.bbSpikeBlockEnabled()) {
-			String spikeReason = resolveBbSpikeBlock(entryFilterState);
+			CtiDirection candidateRec = entryFilterState.fiveMinDir() == 1
+					? CtiDirection.LONG
+					: entryFilterState.fiveMinDir() == -1 ? CtiDirection.SHORT : CtiDirection.NEUTRAL;
+			String spikeReason = resolveBbSpikeBlock(entryFilterState, candidateRec);
 			if (spikeReason != null) {
 				return new EntryDecision(null, spikeReason, spikeReason);
 			}
@@ -2993,8 +2998,11 @@ public class CtiLbStrategy {
 		return new BbEntryScoreResult(score, reason);
 	}
 
-	private static String resolveBbSpikeBlock(EntryFilterState entryFilterState) {
+	private static String resolveBbSpikeBlock(EntryFilterState entryFilterState, CtiDirection candidateRec) {
 		if (entryFilterState == null) {
+			return null;
+		}
+		if (candidateRec == null || candidateRec == CtiDirection.NEUTRAL) {
 			return null;
 		}
 		if (entryFilterState.bbOutside_5m()) {
@@ -3009,10 +3017,10 @@ public class CtiLbStrategy {
 		if (atr14 <= atrSma20 * 1.30) {
 			return null;
 		}
-		if (entryFilterState.fiveMinDir() == 1 && percentB >= 0.95) {
+		if (candidateRec == CtiDirection.LONG && percentB >= 0.95) {
 			return "ENTRY_BLOCK_BB_SPIKE_CHASE_LONG";
 		}
-		if (entryFilterState.fiveMinDir() == -1 && percentB <= 0.05) {
+		if (candidateRec == CtiDirection.SHORT && percentB <= 0.05) {
 			return "ENTRY_BLOCK_BB_SPIKE_CHASE_SHORT";
 		}
 		return null;

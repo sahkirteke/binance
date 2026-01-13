@@ -118,6 +118,7 @@ strategy:
   extreme-rsi-high: 85
   extreme-rsi-low: 15
   extreme-atr-block-mult: 3.0
+  bbSpikeBlockEnabled: false
   trail-activate-pct: 0.35
   trail-retrace-pct: 0.20
   trend-hold-min-profit-pct: 0.15
