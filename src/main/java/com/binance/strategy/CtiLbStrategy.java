@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -57,6 +59,8 @@ public class CtiLbStrategy {
 	private static final int ATR_14_PERIOD = 14;
 	private static final int ATR_SMA_20_PERIOD = 20;
 	private static final int VOLUME_SMA_10_PERIOD = 10;
+	private static final int BB_LENGTH = 20;
+	private static final double BB_MULT = 2.2;
 	private static final double MACD_HIST_EPS = 1e-6;
 	private static final double EMA20_MAX_DIST_PCT = 0.008;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
@@ -327,6 +331,36 @@ public class CtiLbStrategy {
 		}
 		if (signal.recReason() == CtiScoreCalculator.RecReason.TIE_HOLD) {
 			confirmedRec = CtiDirection.NEUTRAL;
+		}
+		double existingEntryScore = signal.adjustedScore();
+		double finalEntryScore = existingEntryScore;
+		int bbEntryScore = 0;
+		String bbReason = null;
+		CtiDirection candidateRec = confirmedRec;
+		if (current == PositionState.NONE
+				&& candidateRec != null
+				&& candidateRec != CtiDirection.NEUTRAL
+				&& Double.isFinite(existingEntryScore)) {
+			BbEntryScoreResult bbEntryScoreResult = computeBbEntryScore(
+					entryFilterState.bbPercentB_5m(),
+					entryFilterState.bbWidth_5m(),
+					entryFilterState.bbOutside_5m(),
+					candidateRec);
+			bbEntryScore = bbEntryScoreResult.score();
+			bbReason = bbEntryScoreResult.reason();
+			finalEntryScore = existingEntryScore + bbEntryScore;
+			boolean entryScorePass = candidateRec == CtiDirection.LONG ? finalEntryScore >= 1.0 : finalEntryScore <= -1.0;
+			if (!entryScorePass) {
+				confirmedRec = CtiDirection.NEUTRAL;
+				LOGGER.info(
+						"EVENT=ENTRY_SKIPPED_BY_SCORE symbol={} side={} existingEntryScore={} bbEntryScore={} finalEntryScore={} bbReason={}",
+						symbol,
+						candidateRec,
+						existingEntryScore,
+						bbEntryScore,
+						finalEntryScore,
+						bbReason == null ? "NA" : bbReason);
+			}
 		}
 		if (strategyProperties.pnlTrailEnabled()
 				&& current != PositionState.NONE
@@ -1500,7 +1534,7 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			return;
 		}
-		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} rsi9Used={} outHist={} outHistPrev={} macdDelta={} ema20={} ema20DistPct={} ema20_5m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
+		LOGGER.info("EVENT=ENTRY_FILTER_STATE symbol={} fiveMinDir={} lastFiveMinDirPrev={} flipTimeMs={} prevClose1m={} scoreAligned={} entryTrigger={} triggerReason={} blockReason={} rsi9Used={} outHist={} outHistPrev={} macdDelta={} ema20={} ema20DistPct={} ema20_5m={} ema200_5m={} rsi9={} vol={} volSma10={} atr14={} atrSma20={} bbPercentB_5m={} qualityScore={} ema200Ok={} ema20Ok={} rsiOk={} volOk={} atrOk={} qualityBlockReason={}",
 				symbol,
 				state.lastFiveMinDir,
 				state.prevFiveMinDir,
@@ -1526,6 +1560,8 @@ public class CtiLbStrategy {
 				Double.isNaN(entryFilterState.atr14()) ? "NA" : String.format("%.6f", entryFilterState.atr14()),
 				Double.isNaN(entryFilterState.atrSma20()) ? "NA" : String.format("%.6f",
 						entryFilterState.atrSma20()),
+				Double.isNaN(entryFilterState.bbPercentB_5m()) ? "NA" : String.format("%.4f",
+						entryFilterState.bbPercentB_5m()),
 				entryFilterState.qualityScore(),
 				entryFilterState.ema200Ok(),
 				entryFilterState.ema20Ok(),
@@ -1537,6 +1573,8 @@ public class CtiLbStrategy {
 
 	private EntryFilterState resolveEntryFilterState(int fiveMinDir, int score1m, double close, double volume1m,
 			long nowMs, SymbolState state) {
+		List<Double> closes5m = extractCloses(state.series5m, BB_LENGTH);
+		BbSnapshot bbSnapshot = computeBbFromLast(closes5m, BB_MULT);
 		EntryFilterInputs inputs = new EntryFilterInputs(
 				fiveMinDir,
 				score1m,
@@ -1556,7 +1594,13 @@ public class CtiLbStrategy {
 				state.atr14Value,
 				state.isAtrReady(),
 				state.atrSma20Value,
-				state.isAtrSmaReady());
+				state.isAtrSmaReady(),
+				bbSnapshot.middle(),
+				bbSnapshot.upper(),
+				bbSnapshot.lower(),
+				bbSnapshot.percentB(),
+				bbSnapshot.width(),
+				bbSnapshot.outside());
 		return buildEntryFilterState(inputs, strategyProperties);
 	}
 
@@ -1599,7 +1643,9 @@ public class CtiLbStrategy {
 		return new EntryFilterState(inputs.fiveMinDir(), entryTrigger, scoreAligned,
 				triggerReason, inputs.fiveMinFlipTimeMs(), inputs.fiveMinFlipPrice(), inputs.ema20_5m(),
 				inputs.ema200_5m(), inputs.rsi9(), inputs.volume1m(), inputs.volumeSma10(), inputs.atr14(),
-				inputs.atrSma20(), qualityEvaluation.qualityScore(), qualityEvaluation.ema200Ok(),
+				inputs.atrSma20(), inputs.bbMiddle_5m(), inputs.bbUpper_5m(), inputs.bbLower_5m(),
+				inputs.bbPercentB_5m(), inputs.bbWidth_5m(), inputs.bbOutside_5m(), 0, qualityEvaluation.qualityScore(),
+				qualityEvaluation.ema200Ok(),
 				qualityEvaluation.ema20Ok(), qualityEvaluation.rsiOk(), qualityEvaluation.volOk(),
 				qualityEvaluation.atrOk(), qualityEvaluation.blockReason());
 	}
@@ -1740,6 +1786,15 @@ public class CtiLbStrategy {
 		}
 		if (!entryFilterState.entryTrigger()) {
 			return new EntryDecision(null, null, null);
+		}
+		if (properties.bbSpikeBlockEnabled()) {
+			CtiDirection candidateRec = entryFilterState.fiveMinDir() == 1
+					? CtiDirection.LONG
+					: entryFilterState.fiveMinDir() == -1 ? CtiDirection.SHORT : CtiDirection.NEUTRAL;
+			String spikeReason = resolveBbSpikeBlock(entryFilterState, candidateRec);
+			if (spikeReason != null) {
+				return new EntryDecision(null, spikeReason, spikeReason);
+			}
 		}
 
 		// Mandatory: EMA20 must confirm direction.
@@ -1882,6 +1937,13 @@ public class CtiLbStrategy {
 			double volumeSma10,
 			double atr14,
 			double atrSma20,
+			double bbMiddle_5m,
+			double bbUpper_5m,
+			double bbLower_5m,
+			double bbPercentB_5m,
+			double bbWidth_5m,
+			boolean bbOutside_5m,
+			int bbScore_5m,
 			int qualityScore,
 			boolean ema200Ok,
 			boolean ema20Ok,
@@ -1910,7 +1972,13 @@ public class CtiLbStrategy {
 			double atr14,
 			boolean atrReady,
 			double atrSma20,
-			boolean atrSmaReady) {
+			boolean atrSmaReady,
+			double bbMiddle_5m,
+			double bbUpper_5m,
+			double bbLower_5m,
+			double bbPercentB_5m,
+			double bbWidth_5m,
+			boolean bbOutside_5m) {
 	}
 
 	record EntryDecision(
@@ -2045,6 +2113,20 @@ public class CtiLbStrategy {
 			boolean volOk,
 			boolean atrOk,
 			String blockReason) {
+	}
+
+	private record BbSnapshot(
+			double middle,
+			double upper,
+			double lower,
+			double percentB,
+			double width,
+			boolean outside) {
+	}
+
+	private record BbEntryScoreResult(
+			int score,
+			String reason) {
 	}
 
 	record IndicatorsSnapshot(
@@ -2696,18 +2778,42 @@ public class CtiLbStrategy {
 					}
 				}
 					ObjectNode indicatorsNode = objectMapper.createObjectNode();
-					if (entryFilterState != null) {
-						indicatorsNode.put("rsi9", entryFilterState.rsi9());
-						indicatorsNode.put("volume", entryFilterState.volume());
-						indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
-						indicatorsNode.put("atr14", entryFilterState.atr14());
-						indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
-						indicatorsNode.put("ema20_5m", entryFilterState.ema20_5m());
-						indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
-						indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
-						indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
-						indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
-						indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
+				if (entryFilterState != null) {
+					indicatorsNode.put("rsi9", entryFilterState.rsi9());
+					indicatorsNode.put("volume", entryFilterState.volume());
+					indicatorsNode.put("volumeSma10", entryFilterState.volumeSma10());
+					indicatorsNode.put("atr14", entryFilterState.atr14());
+					indicatorsNode.put("atrSma20", entryFilterState.atrSma20());
+					indicatorsNode.put("ema20_5m", entryFilterState.ema20_5m());
+					indicatorsNode.put("ema200_5m", entryFilterState.ema200_5m());
+					putFinite(indicatorsNode, "bbMiddle_5m", entryFilterState.bbMiddle_5m());
+					putFinite(indicatorsNode, "bbUpper_5m", entryFilterState.bbUpper_5m());
+					putFinite(indicatorsNode, "bbLower_5m", entryFilterState.bbLower_5m());
+					putFinite(indicatorsNode, "bbPercentB_5m", entryFilterState.bbPercentB_5m());
+					putFinite(indicatorsNode, "bbWidth_5m", entryFilterState.bbWidth_5m());
+					if (Double.isFinite(entryFilterState.bbMiddle_5m())) {
+						indicatorsNode.put("bbOutside_5m", entryFilterState.bbOutside_5m());
+					}
+					CtiDirection bbSide = confirmedRec != null ? confirmedRec : recommendationUsed;
+					int bbScore = computeBbScore(entryFilterState.bbPercentB_5m(), bbSide);
+					indicatorsNode.put("bbScore_5m", bbScore);
+					BbEntryScoreResult bbEntryScoreResult = computeBbEntryScore(
+							entryFilterState.bbPercentB_5m(),
+							entryFilterState.bbWidth_5m(),
+							entryFilterState.bbOutside_5m(),
+							bbSide);
+					double existingScore = signal == null ? Double.NaN : signal.adjustedScore();
+					double finalScore = Double.isFinite(existingScore) ? existingScore + bbEntryScoreResult.score() : Double.NaN;
+					indicatorsNode.put("bbEntryScore_5m", bbEntryScoreResult.score());
+					putFinite(indicatorsNode, "existingEntryScore", existingScore);
+					putFinite(indicatorsNode, "finalEntryScore", finalScore);
+					if (bbEntryScoreResult.reason() != null) {
+						indicatorsNode.put("bbReason", bbEntryScoreResult.reason());
+					}
+					indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
+					indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
+					indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
+					indicatorsNode.put("rsiOk", entryFilterState.rsiOk());
 						indicatorsNode.put("volOk", entryFilterState.volOk());
 						indicatorsNode.put("atrOk", entryFilterState.atrOk());
 						if (entryFilterState.qualityBlockReason() != null) {
@@ -2821,6 +2927,175 @@ public class CtiLbStrategy {
 
 	private static Double finiteOrNull(double value) {
 		return Double.isFinite(value) ? value : null;
+	}
+
+	private static BbEntryScoreResult computeBbEntryScore(double percentB, double bbWidth, boolean bbOutside,
+			CtiDirection side) {
+		if (!Double.isFinite(percentB) || side == null || side == CtiDirection.NEUTRAL) {
+			return new BbEntryScoreResult(0, "BB_NO_DATA");
+		}
+		int score;
+		String reason;
+		if (side == CtiDirection.LONG) {
+			if (!bbOutside && percentB >= 0.90) {
+				score = -3;
+				reason = "BB_CHASE_LONG_0.90+";
+			} else if (!bbOutside && percentB >= 0.80) {
+				score = -2;
+				reason = "BB_CHASE_LONG_0.80-0.90";
+			} else if (percentB >= 0.65) {
+				score = -1;
+				reason = "BB_STRETCH_LONG_0.65-0.80";
+			} else if (percentB >= 0.40) {
+				score = 3;
+				reason = "BB_IDEAL_LONG_0.40-0.65";
+			} else if (percentB >= 0.25) {
+				score = 1;
+				reason = "BB_OK_LONG_0.25-0.40";
+			} else {
+				score = 0;
+				reason = "BB_LOW_LONG_<0.25";
+			}
+		} else {
+			if (!bbOutside && percentB <= 0.10) {
+				score = -3;
+				reason = "BB_CHASE_SHORT_0.10-";
+			} else if (!bbOutside && percentB <= 0.20) {
+				score = -2;
+				reason = "BB_CHASE_SHORT_0.10-0.20";
+			} else if (percentB <= 0.35) {
+				score = -1;
+				reason = "BB_STRETCH_SHORT_0.20-0.35";
+			} else if (percentB <= 0.60) {
+				score = 3;
+				reason = "BB_IDEAL_SHORT_0.35-0.60";
+			} else if (percentB <= 0.75) {
+				score = 1;
+				reason = "BB_OK_SHORT_0.60-0.75";
+			} else {
+				score = 0;
+				reason = "BB_HIGH_SHORT_>0.75";
+			}
+		}
+		if (Double.isFinite(bbWidth)) {
+			if (bbWidth < 0.006) {
+				score -= 1;
+				reason = reason + "|BB_SQUEEZE_PENALTY";
+			} else if (bbWidth > 0.020) {
+				score -= 1;
+				reason = reason + "|BB_WIDE_PENALTY";
+			}
+		}
+		if (bbOutside && score < 0) {
+			score = 0;
+			reason = reason + "|BB_OUTSIDE_NO_PENALTY";
+		}
+		if (score > 3) {
+			score = 3;
+		} else if (score < -3) {
+			score = -3;
+		}
+		return new BbEntryScoreResult(score, reason);
+	}
+
+	private static String resolveBbSpikeBlock(EntryFilterState entryFilterState, CtiDirection candidateRec) {
+		if (entryFilterState == null) {
+			return null;
+		}
+		if (candidateRec == null || candidateRec == CtiDirection.NEUTRAL) {
+			return null;
+		}
+		if (entryFilterState.bbOutside_5m()) {
+			return null;
+		}
+		double percentB = entryFilterState.bbPercentB_5m();
+		double atr14 = entryFilterState.atr14();
+		double atrSma20 = entryFilterState.atrSma20();
+		if (!Double.isFinite(percentB) || !Double.isFinite(atr14) || !Double.isFinite(atrSma20) || atrSma20 <= 0.0) {
+			return null;
+		}
+		if (atr14 <= atrSma20 * 1.30) {
+			return null;
+		}
+		if (candidateRec == CtiDirection.LONG && percentB >= 0.95) {
+			return "ENTRY_BLOCK_BB_SPIKE_CHASE_LONG";
+		}
+		if (candidateRec == CtiDirection.SHORT && percentB <= 0.05) {
+			return "ENTRY_BLOCK_BB_SPIKE_CHASE_SHORT";
+		}
+		return null;
+	}
+
+	private static int computeBbScore(double percentB, CtiDirection side) {
+		if (Double.isNaN(percentB) || side == null || side == CtiDirection.NEUTRAL) {
+			return 0;
+		}
+		if (side == CtiDirection.LONG) {
+			if (percentB < 0.10) {
+				return -1;
+			}
+			if (percentB < 0.30) {
+				return 1;
+			}
+			if (percentB <= 0.80) {
+				return 2;
+			}
+			if (percentB <= 0.90) {
+				return 1;
+			}
+			return -1;
+		}
+		if (percentB > 0.90) {
+			return -1;
+		}
+		if (percentB > 0.70) {
+			return 1;
+		}
+		if (percentB >= 0.20) {
+			return 2;
+		}
+		if (percentB >= 0.10) {
+			return 1;
+		}
+		return -1;
+	}
+
+	private static BbSnapshot computeBbFromLast(List<Double> closes, double mult) {
+		if (closes == null || closes.size() < BB_LENGTH) {
+			return new BbSnapshot(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, false);
+		}
+		double sum = 0.0;
+		for (double close : closes) {
+			sum += close;
+		}
+		double middle = sum / closes.size();
+		double variance = 0.0;
+		for (double close : closes) {
+			double delta = close - middle;
+			variance += delta * delta;
+		}
+		double stdev = Math.sqrt(variance / closes.size());
+		double upper = middle + mult * stdev;
+		double lower = middle - mult * stdev;
+		double denom = upper - lower;
+		double lastClose = closes.get(closes.size() - 1);
+		double percentB = denom > 0.0 ? (lastClose - lower) / denom : Double.NaN;
+		double width = middle != 0.0 ? denom / middle : Double.NaN;
+		boolean outside = lastClose > upper || lastClose < lower;
+		return new BbSnapshot(middle, upper, lower, percentB, width, outside);
+	}
+
+	private static List<Double> extractCloses(BarSeries series, int length) {
+		if (series == null || series.getEndIndex() < 0 || series.getEndIndex() + 1 < length) {
+			return List.of();
+		}
+		int endIndex = series.getEndIndex();
+		int startIndex = endIndex - length + 1;
+		List<Double> closes = new ArrayList<>(length);
+		for (int i = startIndex; i <= endIndex; i++) {
+			closes.add(series.getBar(i).getClosePrice().doubleValue());
+		}
+		return closes;
 	}
 
 	private static void putFinite(ObjectNode payload, String field, double value) {

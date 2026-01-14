@@ -81,6 +81,7 @@ public record StrategyProperties(
 		double extremeRsiHigh,
 		double extremeRsiLow,
 		double extremeAtrBlockMult,
+		boolean bbSpikeBlockEnabled,
 		double trailActivatePct,
 		double trailRetracePct,
 		double trendHoldMinProfitPct,

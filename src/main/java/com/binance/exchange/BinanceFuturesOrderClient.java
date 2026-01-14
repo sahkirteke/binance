@@ -1,10 +1,12 @@
 package com.binance.exchange;
 
 import java.math.BigDecimal;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -16,14 +18,19 @@ import reactor.core.publisher.Mono;
 @Component
 public class BinanceFuturesOrderClient {
 
+	private static final long RECV_WINDOW_MS = 10_000L;
+	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private final WebClient binanceWebClient;
 	private final BinanceProperties properties;
 	private final SignatureUtil signatureUtil;
+	private final TimeSyncServices timeSyncService;
 
-	public BinanceFuturesOrderClient(WebClient binanceWebClient, BinanceProperties properties, SignatureUtil signatureUtil) {
+	public BinanceFuturesOrderClient(WebClient binanceWebClient, BinanceProperties properties, SignatureUtil signatureUtil,
+			TimeSyncServices timeSyncService) {
 		this.binanceWebClient = binanceWebClient;
 		this.properties = properties;
 		this.signatureUtil = signatureUtil;
+		this.timeSyncService = timeSyncService;
 	}
 
 	public Mono<OrderResponse> placeMarketOrder(String symbol, String side, BigDecimal quantity, String positionSide) {
@@ -37,39 +44,39 @@ public class BinanceFuturesOrderClient {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
-				? UUID.randomUUID().toString()
-				: clientOrderId;
-		String payload = String.format(
-				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
-				symbol,
-				side,
-				quantity.toPlainString(),
-				properties.recvWindowMillis(),
-				timestamp,
-				resolvedClientOrderId);
-		if (positionSide != null && !positionSide.isBlank()) {
-			payload = payload + "&positionSide=" + positionSide;
-		}
-		String signature = signatureUtil.sign(payload, properties.secretKey());
-		String signedPayload = payload + "&signature=" + signature;
-		return binanceWebClient
-				.post()
-				.uri(uriBuilder -> uriBuilder
-						.path("/fapi/v1/order")
-						.query(signedPayload)
-						.build())
-				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
-				.header("X-MBX-APIKEY", properties.apiKey())
-				.retrieve()
-				.onStatus(status -> status.isError(), response -> response
-						.bodyToMono(String.class)
-						.defaultIfEmpty("<empty>")
-						.flatMap(body -> Mono.error(new IllegalStateException(
-								"Binance order failed with status=" + response.statusCode().value()
-										+ ", body=" + body))))
-				.bodyToMono(OrderResponse.class);
+		return withTimestampRetry(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
+					? UUID.randomUUID().toString()
+					: clientOrderId;
+			String payload = String.format(
+					"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
+					symbol,
+					side,
+					quantity.toPlainString(),
+					RECV_WINDOW_MS,
+					timestamp,
+					resolvedClientOrderId);
+			if (positionSide != null && !positionSide.isBlank()) {
+				payload = payload + "&positionSide=" + positionSide;
+			}
+			String signedPayload = signPayload(payload);
+			return binanceWebClient
+					.post()
+					.uri(uriBuilder -> uriBuilder
+							.path("/fapi/v1/order")
+							.query(signedPayload)
+							.build())
+					.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+					.header("X-MBX-APIKEY", properties.apiKey())
+					.retrieve()
+					.onStatus(status -> status.isError(), response -> response
+							.bodyToMono(String.class)
+							.defaultIfEmpty("<empty>")
+							.flatMap(body -> Mono.error(toBinanceException("Binance order failed",
+									response.statusCode().value(), body))))
+					.bodyToMono(OrderResponse.class);
+		});
 	}
 
 	public Mono<OrderResponse> placeReduceOnlyMarketOrder(String symbol, String side, BigDecimal quantity,
@@ -99,30 +106,30 @@ public class BinanceFuturesOrderClient {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String payload = String.format("symbol=%s&recvWindow=%d&timestamp=%d",
-				symbol,
-				properties.recvWindowMillis(),
-				timestamp);
-		String signature = signatureUtil.sign(payload, properties.secretKey());
-		String signedPayload = payload + "&signature=" + signature;
+		return withTimestampRetry(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String payload = String.format("symbol=%s&recvWindow=%d&timestamp=%d",
+					symbol,
+					RECV_WINDOW_MS,
+					timestamp);
+			String signedPayload = signPayload(payload);
 
-		return binanceWebClient
-				.delete()
-				.uri(uriBuilder -> uriBuilder
-						.path("/fapi/v1/allOpenOrders")
-						.query(signedPayload)
-						.build())
-				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
-				.header("X-MBX-APIKEY", properties.apiKey())
-				.retrieve()
-				.onStatus(status -> status.isError(), response -> response
-						.bodyToMono(String.class)
-						.defaultIfEmpty("<empty>")
-						.flatMap(body -> Mono.error(new IllegalStateException(
-								"Binance cancel failed with status=" + response.statusCode().value()
-										+ ", body=" + body))))
-				.bodyToMono(Void.class);
+			return binanceWebClient
+					.delete()
+					.uri(uriBuilder -> uriBuilder
+							.path("/fapi/v1/allOpenOrders")
+							.query(signedPayload)
+							.build())
+					.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+					.header("X-MBX-APIKEY", properties.apiKey())
+					.retrieve()
+					.onStatus(status -> status.isError(), response -> response
+							.bodyToMono(String.class)
+							.defaultIfEmpty("<empty>")
+							.flatMap(body -> Mono.error(toBinanceException("Binance cancel failed",
+									response.statusCode().value(), body))))
+					.bodyToMono(Void.class);
+		});
 	}
 
 	public Mono<OrderResponse> fetchOrder(String symbol, Long orderId) {
@@ -134,31 +141,31 @@ public class BinanceFuturesOrderClient {
 		if (orderId == null) {
 			return Mono.error(new IllegalArgumentException("orderId is required"));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String payload = String.format("symbol=%s&orderId=%d&recvWindow=%d&timestamp=%d",
-				symbol,
-				orderId,
-				properties.recvWindowMillis(),
-				timestamp);
-		String signature = signatureUtil.sign(payload, properties.secretKey());
-		String signedPayload = payload + "&signature=" + signature;
+		return withTimestampRetry(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String payload = String.format("symbol=%s&orderId=%d&recvWindow=%d&timestamp=%d",
+					symbol,
+					orderId,
+					RECV_WINDOW_MS,
+					timestamp);
+			String signedPayload = signPayload(payload);
 
-		return binanceWebClient
-				.get()
-				.uri(uriBuilder -> uriBuilder
-						.path("/fapi/v1/order")
-						.query(signedPayload)
-						.build())
-				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
-				.header("X-MBX-APIKEY", properties.apiKey())
-				.retrieve()
-				.onStatus(status -> status.isError(), response -> response
-						.bodyToMono(String.class)
-						.defaultIfEmpty("<empty>")
-						.flatMap(body -> Mono.error(new IllegalStateException(
-								"Binance order fetch failed with status=" + response.statusCode().value()
-										+ ", body=" + body))))
-				.bodyToMono(OrderResponse.class);
+			return binanceWebClient
+					.get()
+					.uri(uriBuilder -> uriBuilder
+							.path("/fapi/v1/order")
+							.query(signedPayload)
+							.build())
+					.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+					.header("X-MBX-APIKEY", properties.apiKey())
+					.retrieve()
+					.onStatus(status -> status.isError(), response -> response
+							.bodyToMono(String.class)
+							.defaultIfEmpty("<empty>")
+							.flatMap(body -> Mono.error(toBinanceException("Binance order fetch failed",
+									response.statusCode().value(), body))))
+					.bodyToMono(OrderResponse.class);
+		});
 	}
 
 	public Mono<Boolean> fetchHedgeModeEnabled() {
@@ -167,28 +174,28 @@ public class BinanceFuturesOrderClient {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String payload = String.format("recvWindow=%d&timestamp=%d", properties.recvWindowMillis(), timestamp);
-		String signature = signatureUtil.sign(payload, properties.secretKey());
-		String signedPayload = payload + "&signature=" + signature;
+		return withTimestampRetry(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String payload = String.format("recvWindow=%d&timestamp=%d", RECV_WINDOW_MS, timestamp);
+			String signedPayload = signPayload(payload);
 
-		return binanceWebClient
-				.get()
-				.uri(uriBuilder -> uriBuilder
-						.path("/fapi/v1/positionSide/dual")
-						.query(signedPayload)
-						.build())
-				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
-				.header("X-MBX-APIKEY", properties.apiKey())
-				.retrieve()
-				.onStatus(status -> status.isError(), response -> response
-						.bodyToMono(String.class)
-						.defaultIfEmpty("<empty>")
-						.flatMap(body -> Mono.error(new IllegalStateException(
-								"Binance position mode fetch failed with status=" + response.statusCode().value()
-										+ ", body=" + body))))
-				.bodyToMono(PositionModeResponse.class)
-				.map(PositionModeResponse::dualSidePosition);
+			return binanceWebClient
+					.get()
+					.uri(uriBuilder -> uriBuilder
+							.path("/fapi/v1/positionSide/dual")
+							.query(signedPayload)
+							.build())
+					.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+					.header("X-MBX-APIKEY", properties.apiKey())
+					.retrieve()
+					.onStatus(status -> status.isError(), response -> response
+							.bodyToMono(String.class)
+							.defaultIfEmpty("<empty>")
+							.flatMap(body -> Mono.error(toBinanceException("Binance position mode fetch failed",
+									response.statusCode().value(), body))))
+					.bodyToMono(PositionModeResponse.class)
+					.map(PositionModeResponse::dualSidePosition);
+		});
 	}
 
 	public Mono<ExchangePosition> fetchPosition(String symbol) {
@@ -197,34 +204,34 @@ public class BinanceFuturesOrderClient {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String payload = String.format("recvWindow=%d&timestamp=%d", properties.recvWindowMillis(), timestamp);
-		String signature = signatureUtil.sign(payload, properties.secretKey());
-		String signedPayload = payload + "&signature=" + signature;
+		return withTimestampRetry(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String payload = String.format("recvWindow=%d&timestamp=%d", RECV_WINDOW_MS, timestamp);
+			String signedPayload = signPayload(payload);
 
-		return binanceWebClient
-				.get()
-				.uri(uriBuilder -> uriBuilder
-						.path("/fapi/v2/positionRisk")
-						.query(signedPayload)
-						.build())
-				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
-				.header("X-MBX-APIKEY", properties.apiKey())
-				.retrieve()
-				.onStatus(status -> status.isError(), response -> response
-						.bodyToMono(String.class)
-						.defaultIfEmpty("<empty>")
-						.flatMap(body -> Mono.error(new IllegalStateException(
-								"Binance position fetch failed with status=" + response.statusCode().value()
-										+ ", body=" + body))))
-				.bodyToFlux(PositionRiskResponse.class)
-				.filter(position -> symbol.equalsIgnoreCase(position.symbol()))
-				.next()
-				.map(position -> new ExchangePosition(
-						position.symbol(),
-						position.positionAmt(),
-						position.entryPrice(),
-						position.positionSide()));
+			return binanceWebClient
+					.get()
+					.uri(uriBuilder -> uriBuilder
+							.path("/fapi/v2/positionRisk")
+							.query(signedPayload)
+							.build())
+					.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+					.header("X-MBX-APIKEY", properties.apiKey())
+					.retrieve()
+					.onStatus(status -> status.isError(), response -> response
+							.bodyToMono(String.class)
+							.defaultIfEmpty("<empty>")
+							.flatMap(body -> Mono.error(toBinanceException("Binance position fetch failed",
+									response.statusCode().value(), body))))
+					.bodyToFlux(PositionRiskResponse.class)
+					.filter(position -> symbol.equalsIgnoreCase(position.symbol()))
+					.next()
+					.map(position -> new ExchangePosition(
+							position.symbol(),
+							position.positionAmt(),
+							position.entryPrice(),
+							position.positionSide()));
+		});
 	}
 
 	public Mono<ExchangeInfoResponse> fetchExchangeInfo() {
@@ -341,25 +348,27 @@ public class BinanceFuturesOrderClient {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
-				? UUID.randomUUID().toString()
-				: clientOrderId;
-		String payload = String.format(
-				"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
-				symbol,
-				side,
-				quantity.toPlainString(),
-				properties.recvWindowMillis(),
-				timestamp,
-				resolvedClientOrderId);
-		if (reduceOnly) {
-			payload = payload + "&reduceOnly=true";
-		}
-		if (positionSide != null && !positionSide.isBlank()) {
-			payload = payload + "&positionSide=" + positionSide;
-		}
-		return executeOrder(payload);
+		return executeOrder(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
+					? UUID.randomUUID().toString()
+					: clientOrderId;
+			String payload = String.format(
+					"symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
+					symbol,
+					side,
+					quantity.toPlainString(),
+					RECV_WINDOW_MS,
+					timestamp,
+					resolvedClientOrderId);
+			if (reduceOnly) {
+				payload = payload + "&reduceOnly=true";
+			}
+			if (positionSide != null && !positionSide.isBlank()) {
+				payload = payload + "&positionSide=" + positionSide;
+			}
+			return payload;
+		});
 	}
 
 	private Mono<OrderResponse> placeTriggeredOrder(String symbol, String side, BigDecimal quantity,
@@ -369,48 +378,50 @@ public class BinanceFuturesOrderClient {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
-				? UUID.randomUUID().toString()
-				: clientOrderId;
-		String payload = String.format(
-				"symbol=%s&side=%s&type=%s&quantity=%s&stopPrice=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
-				symbol,
-				side,
-				type,
-				quantity.toPlainString(),
-				stopPrice.toPlainString(),
-				properties.recvWindowMillis(),
-				timestamp,
-				resolvedClientOrderId);
-		if (reduceOnly) {
-			payload = payload + "&reduceOnly=true";
-		}
-		if (positionSide != null && !positionSide.isBlank()) {
-			payload = payload + "&positionSide=" + positionSide;
-		}
-		return executeOrder(payload);
+		return executeOrder(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
+					? UUID.randomUUID().toString()
+					: clientOrderId;
+			String payload = String.format(
+					"symbol=%s&side=%s&type=%s&quantity=%s&stopPrice=%s&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
+					symbol,
+					side,
+					type,
+					quantity.toPlainString(),
+					stopPrice.toPlainString(),
+					RECV_WINDOW_MS,
+					timestamp,
+					resolvedClientOrderId);
+			if (reduceOnly) {
+				payload = payload + "&reduceOnly=true";
+			}
+			if (positionSide != null && !positionSide.isBlank()) {
+				payload = payload + "&positionSide=" + positionSide;
+			}
+			return payload;
+		});
 	}
 
-	private Mono<OrderResponse> executeOrder(String payload) {
-		String signature = signatureUtil.sign(payload, properties.secretKey());
-		String signedPayload = payload + "&signature=" + signature;
-		return binanceWebClient
-				.post()
-				.uri(uriBuilder -> uriBuilder
-						.path("/fapi/v1/order")
-						.query(signedPayload)
-						.build())
-				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
-				.header("X-MBX-APIKEY", properties.apiKey())
-				.retrieve()
-				.onStatus(status -> status.isError(), response -> response
-						.bodyToMono(String.class)
-						.defaultIfEmpty("<empty>")
-						.flatMap(body -> Mono.error(new IllegalStateException(
-								"Binance order failed with status=" + response.statusCode().value()
-										+ ", body=" + body))))
-				.bodyToMono(OrderResponse.class);
+	private Mono<OrderResponse> executeOrder(Supplier<String> payloadSupplier) {
+		return withTimestampRetry(() -> {
+			String signedPayload = signPayload(payloadSupplier.get());
+			return binanceWebClient
+					.post()
+					.uri(uriBuilder -> uriBuilder
+							.path("/fapi/v1/order")
+							.query(signedPayload)
+							.build())
+					.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+					.header("X-MBX-APIKEY", properties.apiKey())
+					.retrieve()
+					.onStatus(status -> status.isError(), response -> response
+							.bodyToMono(String.class)
+							.defaultIfEmpty("<empty>")
+							.flatMap(body -> Mono.error(toBinanceException("Binance order failed",
+									response.statusCode().value(), body))))
+					.bodyToMono(OrderResponse.class);
+		});
 	}
 
 	public Mono<String> startUserDataStream() {
@@ -464,29 +475,72 @@ public class BinanceFuturesOrderClient {
 			return Mono.error(new IllegalStateException(
 					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
 		}
-		long timestamp = Instant.now().toEpochMilli();
-		String payload = String.format("symbol=%s&recvWindow=%d&timestamp=%d",
-				symbol,
-				properties.recvWindowMillis(),
-				timestamp);
+		return withTimestampRetry(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String payload = String.format("symbol=%s&recvWindow=%d&timestamp=%d",
+					symbol,
+					RECV_WINDOW_MS,
+					timestamp);
+			String signedPayload = signPayload(payload);
+			return binanceWebClient
+					.get()
+					.uri(uriBuilder -> uriBuilder
+							.path("/fapi/v1/openOrders")
+							.query(signedPayload)
+							.build())
+					.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
+					.header("X-MBX-APIKEY", properties.apiKey())
+					.retrieve()
+					.onStatus(status -> status.isError(), response -> response
+							.bodyToMono(String.class)
+							.defaultIfEmpty("<empty>")
+							.flatMap(body -> Mono.error(toBinanceException("Binance open orders failed",
+									response.statusCode().value(), body))))
+					.bodyToFlux(OpenOrder.class)
+					.collectMap(OpenOrder::orderId);
+		});
+	}
+
+	private String signPayload(String payload) {
 		String signature = signatureUtil.sign(payload, properties.secretKey());
-		String signedPayload = payload + "&signature=" + signature;
-		return binanceWebClient
-				.get()
-				.uri(uriBuilder -> uriBuilder
-						.path("/fapi/v1/openOrders")
-						.query(signedPayload)
-						.build())
-				.header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
-				.header("X-MBX-APIKEY", properties.apiKey())
-				.retrieve()
-				.onStatus(status -> status.isError(), response -> response
-						.bodyToMono(String.class)
-						.defaultIfEmpty("<empty>")
-						.flatMap(body -> Mono.error(new IllegalStateException(
-								"Binance open orders failed with status=" + response.statusCode().value()
-										+ ", body=" + body))))
-				.bodyToFlux(OpenOrder.class)
-				.collectMap(OpenOrder::orderId);
+		return payload + "&signature=" + signature;
+	}
+
+	private <T> Mono<T> withTimestampRetry(Supplier<Mono<T>> requestSupplier) {
+		return requestSupplier.get()
+				.onErrorResume(error -> {
+					if (!isTimestampError(error)) {
+						return Mono.error(error);
+					}
+					return timeSyncService.syncNow()
+							.then(requestSupplier.get());
+				});
+	}
+
+	private boolean isTimestampError(Throwable error) {
+		if (error instanceof BinanceApiException exception) {
+			return exception.code() != null && exception.code() == -1021;
+		}
+		return false;
+	}
+
+	private BinanceApiException toBinanceException(String prefix, int status, String body) {
+		return new BinanceApiException(extractCode(body),
+				prefix + " with status=" + status + ", body=" + body);
+	}
+
+	private Integer extractCode(String body) {
+		if (body == null) {
+			return null;
+		}
+		Matcher matcher = BINANCE_CODE_PATTERN.matcher(body);
+		if (!matcher.find()) {
+			return null;
+		}
+		try {
+			return Integer.parseInt(matcher.group(1));
+		} catch (NumberFormatException ignored) {
+			return null;
+		}
 	}
 }
