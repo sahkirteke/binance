@@ -166,6 +166,20 @@ public class CtiLbStrategy {
 		return strategyProperties.leverage() > 0 ? strategyProperties.leverage() : 50;
 	}
 
+	private BigDecimal resolveStopLossBps() {
+		if (strategyProperties.stopLossPct() > 0) {
+			return BigDecimal.valueOf(strategyProperties.stopLossPct() * 10000.0);
+		}
+		return strategyProperties.stopLossBps();
+	}
+
+	private BigDecimal resolveTakeProfitBps() {
+		if (strategyProperties.takeProfitPct() > 0) {
+			return BigDecimal.valueOf(strategyProperties.takeProfitPct() * 10000.0);
+		}
+		return strategyProperties.takeProfitBps();
+	}
+
 	private double calculateLeveragedPnlPct(EntryState entryState, double close) {
 		if (entryState == null || entryState.entryPrice() == null || entryState.entryPrice().signum() <= 0
 				|| close <= 0) {
@@ -320,11 +334,27 @@ public class CtiLbStrategy {
 				candle.volume(),
 				closeTime,
 				symbolState);
-		EntryDecision entryDecision = resolveEntryDecision(current, symbolState, entryFilterState);
-		entryDecision = applyPendingFlipGate(symbol, current, entryDecision, entryFilterState, closeTime);
-
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
+		CtiDirection candidateRecForEntry = recommendationUsed;
+		if (candidateRecForEntry == null || candidateRecForEntry == CtiDirection.NEUTRAL) {
+			candidateRecForEntry = fiveMinDir == 1
+					? CtiDirection.LONG
+					: fiveMinDir == -1 ? CtiDirection.SHORT : CtiDirection.NEUTRAL;
+		}
+		EntryDecision entryDecision = resolveEntryDecision(current, symbolState, entryFilterState,
+				candidateRecForEntry);
+		if (isBbFalseEntryBlock(entryDecision.blockReason())) {
+			LOGGER.info(
+					"EVENT=ENTRY_BLOCK_FALSE_ENTRY symbol={} side=LONG reason={} pB={} rsi={} bbOutside={}",
+					symbol,
+					entryDecision.blockReason(),
+					entryFilterState.bbPercentB_5m(),
+					entryFilterState.rsi9(),
+					entryFilterState.bbOutside_5m());
+		}
+		entryDecision = applyPendingFlipGate(symbol, current, entryDecision, entryFilterState, closeTime);
+
 		CtiDirection confirmedRec = recommendationUsed;
 		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
 			confirmedRec = entryDecision.confirmedRec();
@@ -542,8 +572,8 @@ public class CtiLbStrategy {
 				entryState == null ? null : entryState.side(),
 				entryState == null ? null : entryState.entryPrice(),
 				close,
-				strategyProperties.stopLossBps(),
-				strategyProperties.takeProfitBps(),
+				resolveStopLossBps(),
+				resolveTakeProfitBps(),
 				resolveFeeBps(),
 				strategyProperties.maxSpreadBps(),
 				strategyProperties.flipSpreadMaxBps(),
@@ -1768,12 +1798,13 @@ public class CtiLbStrategy {
 		return new FlipGateResult(false, "QUALITY_BELOW_FAST");
 	}
 
-	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state, EntryFilterState entryFilterState) {
-		return evaluateEntryDecision(current, entryFilterState, strategyProperties);
+	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state,
+			EntryFilterState entryFilterState, CtiDirection candidateRec) {
+		return evaluateEntryDecision(current, entryFilterState, candidateRec, strategyProperties);
 	}
 
 	static EntryDecision evaluateEntryDecision(PositionState current, EntryFilterState entryFilterState,
-			StrategyProperties properties) {
+			CtiDirection candidateRec, StrategyProperties properties) {
 		if (current != PositionState.NONE) {
 			return new EntryDecision(null, null, null);
 		}
@@ -1788,13 +1819,17 @@ public class CtiLbStrategy {
 			return new EntryDecision(null, null, null);
 		}
 		if (properties.bbSpikeBlockEnabled()) {
-			CtiDirection candidateRec = entryFilterState.fiveMinDir() == 1
+			CtiDirection spikeCandidateRec = entryFilterState.fiveMinDir() == 1
 					? CtiDirection.LONG
 					: entryFilterState.fiveMinDir() == -1 ? CtiDirection.SHORT : CtiDirection.NEUTRAL;
-			String spikeReason = resolveBbSpikeBlock(entryFilterState, candidateRec);
+			String spikeReason = resolveBbSpikeBlock(entryFilterState, spikeCandidateRec);
 			if (spikeReason != null) {
 				return new EntryDecision(null, spikeReason, spikeReason);
 			}
+		}
+		String falseEntryReason = resolveBbFalseEntryBlock(entryFilterState, candidateRec, properties);
+		if (falseEntryReason != null) {
+			return new EntryDecision(null, falseEntryReason, falseEntryReason);
 		}
 
 		// Mandatory: EMA20 must confirm direction.
@@ -2810,6 +2845,9 @@ public class CtiLbStrategy {
 					if (bbEntryScoreResult.reason() != null) {
 						indicatorsNode.put("bbReason", bbEntryScoreResult.reason());
 					}
+					if (isBbFalseEntryBlock(decisionBlockReason)) {
+						indicatorsNode.put("bbFalseEntryBlock", decisionBlockReason);
+					}
 					indicatorsNode.put("qualityScore", entryFilterState.qualityScore());
 					indicatorsNode.put("ema200Ok", entryFilterState.ema200Ok());
 					indicatorsNode.put("ema20Ok", entryFilterState.ema20Ok());
@@ -2978,12 +3016,9 @@ public class CtiLbStrategy {
 			}
 		}
 		if (Double.isFinite(bbWidth)) {
-			if (bbWidth < 0.006) {
+			if (bbWidth < 0.012) {
 				score -= 1;
-				reason = reason + "|BB_SQUEEZE_PENALTY";
-			} else if (bbWidth > 0.020) {
-				score -= 1;
-				reason = reason + "|BB_WIDE_PENALTY";
+				reason = reason + "|BB_NARROW_PENALTY";
 			}
 		}
 		if (bbOutside && score < 0) {
@@ -3024,6 +3059,42 @@ public class CtiLbStrategy {
 			return "ENTRY_BLOCK_BB_SPIKE_CHASE_SHORT";
 		}
 		return null;
+	}
+
+	private static String resolveBbFalseEntryBlock(
+			EntryFilterState efs,
+			CtiDirection candidateRec,
+			StrategyProperties props) {
+		if (efs == null) {
+			return null;
+		}
+		if (candidateRec == null || candidateRec == CtiDirection.NEUTRAL) {
+			return null;
+		}
+		if (props == null) {
+			return null;
+		}
+		if (!Double.isFinite(efs.bbPercentB_5m())) {
+			return null;
+		}
+		if (efs.bbOutside_5m()) {
+			return null;
+		}
+		if (props.bbOverboughtLongBlockEnabled()
+				&& candidateRec == CtiDirection.LONG
+				&& efs.bbPercentB_5m() >= props.bbOverboughtLongPctB()
+				&& Double.isFinite(efs.rsi9())
+				&& efs.rsi9() >= props.bbOverboughtLongRsi()) {
+			return "ENTRY_BLOCK_BB_OVERBOUGHT_LONG";
+		}
+		return null;
+	}
+
+	private static boolean isBbFalseEntryBlock(String reason) {
+		if (reason == null) {
+			return false;
+		}
+		return "ENTRY_BLOCK_BB_OVERBOUGHT_LONG".equals(reason);
 	}
 
 	private static int computeBbScore(double percentB, CtiDirection side) {
@@ -3136,6 +3207,9 @@ public class CtiLbStrategy {
 				strategyProperties.enableTieBreakBias(),
 				strategyProperties.flipCooldownMs(),
 				strategyProperties.maxFlipsPer5Min());
+		LOGGER.info("EVENT=RISK_CONFIG takeProfitPct={} stopLossPct={}",
+				strategyProperties.takeProfitPct(),
+				strategyProperties.stopLossPct());
 	}
 
 	private void triggerFilterRefresh() {
