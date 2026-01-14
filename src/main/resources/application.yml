@@ -20,7 +20,7 @@ binance:
   use-testnet: false
   api-key: ${BINANCE_API_KEY:}
   secret-key: ${BINANCE_SECRET_KEY:}
-  recv-window-millis: 5000
+  recv-window-millis: 10000
 
 strategy:
   active: CTI_LB
