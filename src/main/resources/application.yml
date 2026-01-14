@@ -18,46 +18,30 @@ binance:
   base-url: https://fapi.binance.com
   testnet-base-url: https://testnet.binancefuture.com
   use-testnet: false
-  api-key: ndurQDyVqY2fQNjcVuOzY57pAXvxhJFmtpNK2SETzxEh9ovXjmTFqHGyeXy861ze
-  secret-key: srA9Yl8W0P33pcKNkaC9iLMsrUiFdxo42Ox6yta0CDbEODAJ7Z8pYBaiAvH6IDcF
-  recv-window-millis: 10000
+  api-key: ${BINANCE_API_KEY:}
+  secret-key: ${BINANCE_SECRET_KEY:}
+  recv-window-millis: 5000
 
 strategy:
   active: CTI_LB
   reference-symbol: MANAUSDT
   trade-symbol: MANAUSDT
   trade-symbols:
-    - MANAUSDT
-    - XLMUSDT
-    - CHZUSDT
-    - RVNUSDT
-    - HOTUSDT
-    - XRPUSDT
     - ETHUSDT
-    - ONTUSDT
+    - XRPUSDT
     - DOGEUSDT
     - LTCUSDT
-    - SOLUSDT
     - ADAUSDT
     - AVAXUSDT
     - ARBUSDT
-    - POLUSDT
-    - CELRUSDT
-    - DENTUSDT
-    - SLPUSDT
+    - MANAUSDT
+    - XLMUSDT
+    - CHZUSDT
+    - ALGOUSDT
     - BANDUSDT
     - BATUSDT
-    - VETUSDT
-    - ALGOUSDT
     - CHRUSDT
-    - APEUSDT
-    - SANDUSDT
-    - AXSUSDT
-    - NEARUSDT
-    - FTMUSDT
-    - OPUSDT
-    - ENJUSDT
-    - GALAUSDT
+    - POLUSDT
 
 
   depth-limit: 50
@@ -158,6 +142,18 @@ management:
       exposure:
         include: health,info
 
-
-app:
-  signal-output-dir: signals
+logging:
+  level:
+    com.binance: INFO
+    org.ta4j: WARN
+    ml.dmlc.xgboost4j: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/trading-system.log
+    max-size: 100MB
+  logback:
+    rollingpolicy:
+      max-history: 30
+      max-file-size: 100MB
