@@ -18,8 +18,8 @@ binance:
   base-url: https://fapi.binance.com
   testnet-base-url: https://testnet.binancefuture.com
   use-testnet: false
-  api-key: ${BINANCE_API_KEY:}
-  secret-key: ${BINANCE_SECRET_KEY:}
+  api-key: ndurQDyVqY2fQNjcVuOzY57pAXvxhJFmtpNK2SETzxEh9ovXjmTFqHGyeXy861ze
+  secret-key: srA9Yl8W0P33pcKNkaC9iLMsrUiFdxo42Ox6yta0CDbEODAJ7Z8pYBaiAvH6IDcF
   recv-window-millis: 10000
 
 strategy:
@@ -50,6 +50,15 @@ strategy:
     - VETUSDT
     - ALGOUSDT
     - CHRUSDT
+    - APEUSDT
+    - SANDUSDT
+    - AXSUSDT
+    - NEARUSDT
+    - FTMUSDT
+    - OPUSDT
+    - ENJUSDT
+    - GALAUSDT
+
 
   depth-limit: 50
   market-quantity: 0.01
@@ -118,7 +127,7 @@ strategy:
   extreme-rsi-high: 85
   extreme-rsi-low: 15
   extreme-atr-block-mult: 3.0
-  bbSpikeBlockEnabled: false
+  bbSpikeBlockEnabled: true
   trail-activate-pct: 0.35
   trail-retrace-pct: 0.20
   trend-hold-min-profit-pct: 0.15
@@ -137,8 +146,8 @@ strategy:
 
 warmup:
   enabled: true
-  candles1m: 1000
-  candles5m: 500
+  candles1m: 250
+  candles5m: 200
   concurrency: 3
   log-decisions: false
   decision-log-every: 0
@@ -149,18 +158,6 @@ management:
       exposure:
         include: health,info
 
-logging:
-  level:
-    com.binance: INFO
-    org.ta4j: WARN
-    ml.dmlc.xgboost4j: WARN
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-  file:
-    name: logs/trading-system.log
-    max-size: 100MB
-  logback:
-    rollingpolicy:
-      max-history: 30
-      max-file-size: 100MB
+
+app:
+  signal-output-dir: signals

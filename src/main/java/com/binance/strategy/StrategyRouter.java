@@ -20,26 +20,18 @@ public class StrategyRouter {
 	private final Map<String, ScoreSignalIndicator> indicators = new ConcurrentHashMap<>();
 	private final Map<String, Long> warmupFinishedAtMs = new ConcurrentHashMap<>();
 	private static final long WARMUP_DUPLICATE_WINDOW_MS = 10_000L;
-	private final MLPredictionService mlPredictionService;
-	private final MLProperties mlProperties;
-	public StrategyRouter(StrategyProperties strategyProperties,
+ 	public StrategyRouter(StrategyProperties strategyProperties,
                           CtiLbStrategy ctiLbStrategy,
                           TimeSyncService timeSyncService,
-                          WarmupProperties warmupProperties,
-						  MLPredictionService mlPredictionService,
-						  MLProperties mlProperties) {
+                          WarmupProperties warmupProperties ) {
 		this.strategyProperties = strategyProperties;
 		this.ctiLbStrategy = ctiLbStrategy;
 		this.timeSyncService = timeSyncService;
 		this.warmupProperties = warmupProperties;
-        this.mlPredictionService = mlPredictionService;
-        this.mlProperties = mlProperties;
     }
 
 	public void onClosedOneMinuteCandle(String symbol, Candle candle) {
-		if (mlProperties.enabled()) {
-			mlPredictionService.onNewCandle(symbol, candle);
-		}
+
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			LOGGER.debug("Closed candle ignored (active={}, closeTime={})",
 					strategyProperties.active(),

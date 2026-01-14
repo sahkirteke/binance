@@ -23,10 +23,10 @@ public class BinanceFuturesOrderClient {
 	private final WebClient binanceWebClient;
 	private final BinanceProperties properties;
 	private final SignatureUtil signatureUtil;
-	private final TimeSyncService timeSyncService;
+	private final TimeSyncServices timeSyncService;
 
 	public BinanceFuturesOrderClient(WebClient binanceWebClient, BinanceProperties properties, SignatureUtil signatureUtil,
-			TimeSyncService timeSyncService) {
+			TimeSyncServices timeSyncService) {
 		this.binanceWebClient = binanceWebClient;
 		this.properties = properties;
 		this.signatureUtil = signatureUtil;

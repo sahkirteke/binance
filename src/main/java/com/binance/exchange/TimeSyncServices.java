@@ -11,15 +11,15 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
 @Component
-public class TimeSyncService {
+public class TimeSyncServices {
 
-	private static final Logger LOGGER = LoggerFactory.getLogger(TimeSyncService.class);
+	private static final Logger LOGGER = LoggerFactory.getLogger(TimeSyncServices.class);
 	private static final long SYNC_INTERVAL_MS = 60_000L;
 
 	private final WebClient binanceWebClient;
 	private final AtomicLong offsetMs = new AtomicLong();
 
-	public TimeSyncService(WebClient binanceWebClient) {
+	public TimeSyncServices(WebClient binanceWebClient) {
 		this.binanceWebClient = binanceWebClient;
 		syncNow().subscribe();
 	}
