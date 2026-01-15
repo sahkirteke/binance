@@ -64,8 +64,9 @@ public class CtiLbStrategy {
 	private static final double MACD_HIST_EPS = 1e-6;
 	private static final double EMA20_MAX_DIST_PCT = 0.008;
 	private static final double ENTRY_SCORE_MIN = 4.0;
-	private static final double BB_WIDTH_MIN = 0.011;
-	private static final double VOL_RATIO_BREAKOUT_MIN = 2.0;
+	private static final double BB_WIDTH_MIN_HARD = 0.0105;
+	private static final double BB_WIDTH_MIN_TRADE = 0.0130;
+	private static final double VOL_RATIO_BREAKOUT_MIN = 2.2;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
@@ -356,8 +357,6 @@ public class CtiLbStrategy {
 //					entryFilterState.rsi9(),
 //					entryFilterState.bbOutside_5m());
 		}
-		entryDecision = applyPendingFlipGate(symbol, current, entryDecision, entryFilterState, closeTime);
-
 		CtiDirection confirmedRec = recommendationUsed;
 		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
 			confirmedRec = entryDecision.confirmedRec();
@@ -2778,8 +2777,9 @@ public class CtiLbStrategy {
 					putFinite(indicatorsNode, "bbUpper_5m", entryFilterState.bbUpper_5m());
 					putFinite(indicatorsNode, "bbLower_5m", entryFilterState.bbLower_5m());
 					putFinite(indicatorsNode, "bbPercentB_5m", entryFilterState.bbPercentB_5m());
-					putFinite(indicatorsNode, "bbWidth_5m", entryFilterState.bbWidth_5m());
-					indicatorsNode.put("BB_WIDTH_MIN", BB_WIDTH_MIN);
+						putFinite(indicatorsNode, "bbWidth_5m", entryFilterState.bbWidth_5m());
+						indicatorsNode.put("BB_WIDTH_MIN_HARD", BB_WIDTH_MIN_HARD);
+						indicatorsNode.put("BB_WIDTH_MIN_TRADE", BB_WIDTH_MIN_TRADE);
 					if (Double.isFinite(entryFilterState.bbMiddle_5m())) {
 						indicatorsNode.put("bbOutside_5m", entryFilterState.bbOutside_5m());
 						if (Double.isFinite(closePrice)) {
@@ -2902,8 +2902,8 @@ public class CtiLbStrategy {
 			putFinite(payload, "volume5m", candle.volume());
 			putFinite(payload, "volumeSma10_5m", confidence.volumeSma10());
 			putFinite(payload, "volRatio", confidence.volRatio());
-			payload.put("VOL_RATIO_BREAKOUT_MIN", VOL_RATIO_BREAKOUT_MIN);
-			putFinite(payload, "ema20", entryFilterState == null ? Double.NaN : entryFilterState.ema20_5m());
+				payload.put("VOL_RATIO_BREAKOUT_MIN", VOL_RATIO_BREAKOUT_MIN);
+				putFinite(payload, "ema20", entryFilterState == null ? Double.NaN : entryFilterState.ema20_5m());
 			putFinite(payload, "volConf", confidence.volConf());
 			putFinite(payload, "rsiConf", confidence.rsiConf());
 			putFinite(payload, "conf", confidence.conf());
@@ -2924,7 +2924,8 @@ public class CtiLbStrategy {
 				putFinite(payload, "bbUpper_5m", entryFilterState.bbUpper_5m());
 				putFinite(payload, "bbLower_5m", entryFilterState.bbLower_5m());
 				putFinite(payload, "bbWidth_5m", entryFilterState.bbWidth_5m());
-				payload.put("BB_WIDTH_MIN", BB_WIDTH_MIN);
+				payload.put("BB_WIDTH_MIN_HARD", BB_WIDTH_MIN_HARD);
+				payload.put("BB_WIDTH_MIN_TRADE", BB_WIDTH_MIN_TRADE);
 				putFinite(payload, "bbPercentB_5m", entryFilterState.bbPercentB_5m());
 				payload.put("bbOutside_5m", entryFilterState.bbOutside_5m());
 				if (bbReason != null) {
@@ -3617,7 +3618,10 @@ public class CtiLbStrategy {
 			return new BbHardGateDecision("BB_STRETCH_BLOCK", null);
 		}
 		double bbWidth = entryFilterState == null ? Double.NaN : entryFilterState.bbWidth_5m();
-		if (Double.isFinite(bbWidth) && bbWidth < BB_WIDTH_MIN) {
+		if (Double.isFinite(bbWidth) && bbWidth < BB_WIDTH_MIN_HARD) {
+			return new BbHardGateDecision("BB_TOO_NARROW_HARD", null);
+		}
+		if (Double.isFinite(bbWidth) && bbWidth < BB_WIDTH_MIN_TRADE) {
 			boolean breakoutAllow = resolveBbNarrowBreakoutAllow(entryFilterState, close, signal, volume5m,
 					volumeSma10_5m, recommendationUsed);
 			if (!breakoutAllow) {
