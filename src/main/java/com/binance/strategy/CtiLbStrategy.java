@@ -377,10 +377,12 @@ public class CtiLbStrategy {
 			double volumeSma10_5m = symbolState.volumeSma10_5mValue;
 			double macdDelta = resolveMacdDelta(signal);
 			MacdHistColor histColor = signal.macdHistColor();
-			boolean continuationLong = histColor == MacdHistColor.AQUA && macdDelta > 0.0;
-			boolean continuationShort = histColor == MacdHistColor.RED && macdDelta < 0.0;
-			boolean reversalLongSetup = histColor == MacdHistColor.MAROON && macdDelta > 0.0;
-			boolean reversalShortSetup = histColor == MacdHistColor.BLUE && macdDelta < 0.0;
+			boolean ctiLong = signal.cti5mDir() == CtiDirection.LONG;
+			boolean ctiShort = signal.cti5mDir() == CtiDirection.SHORT;
+			boolean continuationLong = histColor == MacdHistColor.AQUA && macdDelta > 0.0 && ctiLong;
+			boolean continuationShort = histColor == MacdHistColor.RED && macdDelta < 0.0 && ctiShort;
+			boolean reversalLongSetup = histColor == MacdHistColor.MAROON && macdDelta > 0.0 && ctiLong;
+			boolean reversalShortSetup = histColor == MacdHistColor.BLUE && macdDelta < 0.0 && ctiShort;
 			boolean reclaimLong5m = false;
 			boolean reclaimShort5m = false;
 			boolean confirmLong1m = false;
@@ -414,10 +416,10 @@ public class CtiLbStrategy {
 						String allowReason = bbHardGate.allowReason();
 						if (recommendationUsed == CtiDirection.LONG && !continuationLong && !reversalLongSetup) {
 							confirmedRec = CtiDirection.NEUTRAL;
-							entryDecision = new EntryDecision(null, "MACD_DIR_MISMATCH", "MACD_DIR_MISMATCH");
+							entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
 						} else if (recommendationUsed == CtiDirection.SHORT && !continuationShort && !reversalShortSetup) {
 							confirmedRec = CtiDirection.NEUTRAL;
-							entryDecision = new EntryDecision(null, "MACD_DIR_MISMATCH", "MACD_DIR_MISMATCH");
+							entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
 						} else {
 							ReversalConfirmations confirmations = resolveReversalConfirmations(symbolState,
 									entryFilterState, close, reversalLongSetup, reversalShortSetup);
