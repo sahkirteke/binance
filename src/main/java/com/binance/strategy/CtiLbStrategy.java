@@ -3,9 +3,11 @@ package com.binance.strategy;
 import java.io.IOException;
 import java.math.MathContext;
 import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -2855,15 +2857,15 @@ public class CtiLbStrategy {
 		}
 	}
 
-	private void recordDecisionSnapshot(String symbol, ScoreSignal signal, Candle candle, double coreScore,
-			double bbShapeScore, double confirmBonus, double entryScore, String bbReason,
-			boolean reversalLongSetup, boolean reversalShortSetup, boolean reclaimLong5m, boolean reclaimShort5m,
-			boolean confirmLong1m, boolean confirmShort1m, VolRsiConfidence confidence, double rsiVolScore,
-			double rsiVolExitPressure, double adxScore, double scoreAfterSafety, double totalScore,
-			double totalScoreForExit, PositionState positionBefore, String decisionValue, EntryDecision entryDecision,
-			EntryFilterState entryFilterState, int fiveMinDir, CtiDirection confirmedRec,
-			CtiDirection recommendationUsed, boolean trendHoldActive, boolean scoreExitConfirmed,
-			boolean emergencyExitTriggered, boolean normalExitConfirmed) {
+		private void recordDecisionSnapshot(String symbol, ScoreSignal signal, Candle candle, double coreScore,
+				double bbShapeScore, double confirmBonus, double entryScore, String bbReason,
+				boolean reversalLongSetup, boolean reversalShortSetup, boolean reclaimLong5m, boolean reclaimShort5m,
+				boolean confirmLong1m, boolean confirmShort1m, VolRsiConfidence confidence, double rsiVolScore,
+				double rsiVolExitPressure, double adxScore, double scoreAfterSafety, double totalScore,
+				double totalScoreForExit, PositionState positionBefore, String decisionValue, EntryDecision entryDecision,
+				EntryFilterState entryFilterState, int fiveMinDir, CtiDirection confirmedRec,
+				CtiDirection recommendationUsed, boolean trendHoldActive, boolean scoreExitConfirmed,
+				boolean emergencyExitTriggered, boolean normalExitConfirmed) {
 		try {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
 			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-decision.json");
@@ -2972,9 +2974,82 @@ public class CtiLbStrategy {
 			payload.put("emergencyExitTriggered", emergencyExitTriggered);
 			payload.put("normalExitConfirmed", normalExitConfirmed);
 			objectMapper.writerWithDefaultPrettyPrinter().writeValue(outputFile.toFile(), payload);
+			appendDecisionJsonLine(symbol, signal, candle.close(), entryDecision, recommendationUsed, decisionValue,
+					coreScore, bbShapeScore, confirmBonus, entryScore, entryFilterState, bbReason, confidence);
 		} catch (IOException error) {
 			LOGGER.warn("EVENT=DECISION_SNAPSHOT_FAILED symbol={} error={}", symbol, error.getMessage());
 		}
+	}
+
+	private void appendDecisionJsonLine(String symbol, ScoreSignal signal, double closePrice,
+			EntryDecision entryDecision, CtiDirection recommendationUsed, String decisionValue, double coreScore,
+			double bbShapeScore, double confirmBonus, double entryScore, EntryFilterState entryFilterState,
+			String bbReason, VolRsiConfidence confidence) throws IOException {
+		Path baseDir = Paths.get("signals", "decisions");
+		Files.createDirectories(baseDir);
+		String fileName = symbol + "-" + formatDateYmd(signal.closeTime()) + ".jsonl";
+		Path path = baseDir.resolve(fileName);
+		ObjectNode line = objectMapper.createObjectNode();
+		line.put("symbol", symbol);
+		line.put("decisionTime", formatTimestamp(signal.closeTime()));
+		line.put("recommendationUsed", recommendationUsed == null ? "NA" : recommendationUsed.name());
+		line.put("action", decisionValue);
+		if (entryDecision != null && entryDecision.blockReason() != null) {
+			line.put("blockReason", entryDecision.blockReason());
+		} else if (entryDecision != null && entryDecision.decisionActionReason() != null) {
+			line.put("allowReason", entryDecision.decisionActionReason());
+		}
+		putFinite(line, "entryScore", entryScore);
+		line.put("ENTRY_SCORE_MIN", ENTRY_SCORE_MIN);
+		putFinite(line, "coreScore", coreScore);
+		putFinite(line, "bbEntryScore_5m", bbShapeScore);
+		putFinite(line, "confirmBonus", confirmBonus);
+		putFinite(line, "ctiScore", signal.ctiScore());
+		putFinite(line, "macdScore", signal.macdScore());
+		putFinite(line, "volume", entryFilterState == null ? Double.NaN : entryFilterState.volume());
+		putFinite(line, "volumeSma10", entryFilterState == null ? Double.NaN : entryFilterState.volumeSma10());
+		if (entryFilterState != null) {
+			putFinite(line, "bbWidth_5m", entryFilterState.bbWidth_5m());
+			line.put("BB_WIDTH_MIN", BB_WIDTH_MIN);
+			putFinite(line, "bbPercentB_5m", entryFilterState.bbPercentB_5m());
+			line.put("BB_PB_LONG_BLOCK", BB_PB_LONG_BLOCK);
+			line.put("BB_PB_SHORT_BLOCK", BB_PB_SHORT_BLOCK);
+			putFinite(line, "bbLower_5m", entryFilterState.bbLower_5m());
+			putFinite(line, "bbMiddle_5m", entryFilterState.bbMiddle_5m());
+			putFinite(line, "bbUpper_5m", entryFilterState.bbUpper_5m());
+			line.put("bbOutside_5m", entryFilterState.bbOutside_5m());
+			if (bbReason != null) {
+				line.put("bbReason", bbReason);
+			}
+			line.put("rsiOk", entryFilterState.rsiOk());
+			line.put("adxGate", signal.adxGate());
+			line.put("volOk", entryFilterState.volOk());
+			line.put("atrOk", entryFilterState.atrOk());
+			line.put("ema20Ok", entryFilterState.ema20Ok());
+			line.put("ema200Ok", entryFilterState.ema200Ok());
+			double ema20DistPct = resolveEma20DistPct(entryFilterState.ema20_5m(), closePrice);
+			putFinite(line, "ema20DistPct", ema20DistPct);
+			ArrayNode riskTagsNode = objectMapper.createArrayNode();
+			for (String tag : resolveRiskTags(entryFilterState, ema20DistPct)) {
+				riskTagsNode.add(tag);
+			}
+			line.set("riskTags", riskTagsNode);
+			line.put("qualityScore", resolveQualityScoreForLog(entryFilterState));
+			putFinite(line, "atr14", entryFilterState.atr14());
+			putFinite(line, "rsi9_5m", entryFilterState.rsi9());
+		}
+		line.put("cti5mDir", signal.cti5mDir() == null ? "NA" : signal.cti5mDir().name());
+		if (signal.macdHistColor() != null) {
+			line.put("macdHistColor", signal.macdHistColor().name());
+		}
+		putFinite(line, "outHist", signal.outHist());
+		putFinite(line, "outHistPrev", signal.outHistPrev());
+		putFinite(line, "macdDelta", resolveMacdDelta(signal));
+		putFinite(line, "volRatio", confidence.volRatio());
+		putFinite(line, "adx5m", signal.adx5m());
+		String jsonLine = objectMapper.writeValueAsString(line) + "\n";
+		Files.write(path, jsonLine.getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE,
+				StandardOpenOption.APPEND);
 	}
 
 	private static Double finiteOrNull(double value) {
@@ -3210,6 +3285,12 @@ public class CtiLbStrategy {
 		return java.time.Instant.ofEpochMilli(timestampMs)
 				.atZone(java.time.ZoneId.systemDefault())
 				.format(java.time.format.DateTimeFormatter.ofPattern("ddMMyyyy HH:mm:ss"));
+	}
+
+	private String formatDateYmd(long timestampMs) {
+		return java.time.Instant.ofEpochMilli(timestampMs)
+				.atZone(java.time.ZoneId.systemDefault())
+				.format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
 	}
 
 	private void logConfigSnapshot() {
