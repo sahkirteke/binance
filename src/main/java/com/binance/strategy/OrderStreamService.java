@@ -150,26 +150,26 @@ public class OrderStreamService {
 				leverage = positionNode.path("l").asInt();
 			}
 
-			LOGGER.info("EVENT=ACCOUNT_UPDATE symbol={} entryPrice={} positionAmt={} side={} leverage={}",
-					symbol, entryPrice, positionAmt, positionSide, leverage);
+//			LOGGER.info("EVENT=ACCOUNT_UPDATE symbol={} entryPrice={} positionAmt={} side={} leverage={}",
+//					symbol, entryPrice, positionAmt, positionSide, leverage);
 
 			trailingPnlService.onPositionUpdate(symbol, entryPrice, positionAmt, positionSide, leverage);
 		}
 	}
 
 	private void logOrderUpdate(OrderTracker.OrderUpdate update, OrderTracker.TrackedOrder tracked) {
-		LOGGER.info("EVENT=ORDER_UPDATE symbol={} orderId={} clientOrderId={} correlationId={} status={} execType={} side={} positionSide={} origQty={} execQty={} avgPrice={}",
-				update.symbol(),
-				update.orderId(),
-				update.clientOrderId(),
-				tracked.correlationId() == null ? "NA" : tracked.correlationId(),
-				update.status(),
-				update.execType(),
-				update.side(),
-				update.positionSide(),
-				update.origQty(),
-				update.executedQty(),
-				update.avgPrice());
+//		LOGGER.info("EVENT=ORDER_UPDATE symbol={} orderId={} clientOrderId={} correlationId={} status={} execType={} side={} positionSide={} origQty={} execQty={} avgPrice={}",
+//				update.symbol(),
+//				update.orderId(),
+//				update.clientOrderId(),
+//				tracked.correlationId() == null ? "NA" : tracked.correlationId(),
+//				update.status(),
+//				update.execType(),
+//				update.side(),
+//				update.positionSide(),
+//				update.origQty(),
+//				update.executedQty(),
+//				update.avgPrice());
 	}
 
 	private void startOpenOrdersPolling() {

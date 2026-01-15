@@ -7,61 +7,35 @@ spring:
       - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
   codec:
     max-in-memory-size: 5MB
-  datasource:
-    url: jdbc:postgresql://aws-1-eu-central-1.pooler.supabase.com:5432/postgres?user=postgres.qssdtvxgkxjnfvchzghw&password=N7wncMMz9asKnain
-    username: postgres
-    password: N7wncMMz9asKnain
-  jpa:
-    hibernate:
-      ddl-auto: update
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
 
 binance:
   base-url: https://fapi.binance.com
   testnet-base-url: https://testnet.binancefuture.com
   use-testnet: false
-  api-key: ndurQDyVqY2fQNjcVuOzY57pAXvxhJFmtpNK2SETzxEh9ovXjmTFqHGyeXy861ze
-  secret-key: srA9Yl8W0P33pcKNkaC9iLMsrUiFdxo42Ox6yta0CDbEODAJ7Z8pYBaiAvH6IDcF
-  recv-window-millis: 10000
+  api-key: ${BINANCE_API_KEY:}
+  secret-key: ${BINANCE_SECRET_KEY:}
+  recv-window-millis: 5000
 
 strategy:
   active: CTI_LB
   reference-symbol: MANAUSDT
   trade-symbol: MANAUSDT
   trade-symbols:
-    - MANAUSDT
-    - XLMUSDT
-    - CHZUSDT
-    - RVNUSDT
-    - HOTUSDT
-    - XRPUSDT
     - ETHUSDT
-    - ONTUSDT
+    - XRPUSDT
     - DOGEUSDT
     - LTCUSDT
-    - SOLUSDT
     - ADAUSDT
     - AVAXUSDT
     - ARBUSDT
-    - POLUSDT
-    - CELRUSDT
-    - DENTUSDT
-    - SLPUSDT
+    - MANAUSDT
+    - XLMUSDT
+    - CHZUSDT
+    - ALGOUSDT
     - BANDUSDT
     - BATUSDT
-    - VETUSDT
-    - ALGOUSDT
     - CHRUSDT
-    - APEUSDT
-    - SANDUSDT
-    - AXSUSDT
-    - NEARUSDT
-    - FTMUSDT
-    - OPUSDT
-    - ENJUSDT
-    - GALAUSDT
+    - POLUSDT
 
 
   depth-limit: 50

@@ -200,9 +200,9 @@ public class TrailingPnlService {
 		TrailingState state = trailingMap.remove(symbol);
 		if (state != null) {
 			synchronized (state) {
-				LOGGER.info("EVENT=TRAIL_STATE_RESET symbol={} profitArmed={} lossArmed={} closingAttempts={} lastPnl={}",
-						symbol, state.profitArmed, state.lossArmed, state.closingAttempts,
-						String.format("%.2f", state.lastPnlPct));
+//				LOGGER.info("EVENT=TRAIL_STATE_RESET symbol={} profitArmed={} lossArmed={} closingAttempts={} lastPnl={}",
+//						symbol, state.profitArmed, state.lossArmed, state.closingAttempts,
+//						String.format("%.2f", state.lastPnlPct));
 				state.reset();
 			}
 		}
@@ -212,8 +212,8 @@ public class TrailingPnlService {
 		TrailingState state = trailingMap.get(symbol);
 		if (state != null) {
 			synchronized (state) {
-				LOGGER.info("EVENT=TRAIL_CLOSING_FLAG_RESET symbol={} attempts={}",
-						symbol, state.closingAttempts);
+//				LOGGER.info("EVENT=TRAIL_CLOSING_FLAG_RESET symbol={} attempts={}",
+//						symbol, state.closingAttempts);
 				state.closingFlag.set(false);
 			}
 		}
@@ -237,8 +237,8 @@ public class TrailingPnlService {
 
 			// If entry price changed by more than 0.1%, it's a new position
 			if (priceChangePct > 0.1) {
-				LOGGER.info("EVENT=POSITION_CHANGED symbol={} oldEntry={} newEntry={} changePct={}",
-						symbol, existing.entryPrice(), entryPrice, String.format("%.4f", priceChangePct));
+//				LOGGER.info("EVENT=POSITION_CHANGED symbol={} oldEntry={} newEntry={} changePct={}",
+//						symbol, existing.entryPrice(), entryPrice, String.format("%.4f", priceChangePct));
 				resetState(symbol);
 			}
 		}
