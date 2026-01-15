@@ -39,7 +39,6 @@ public class TimeSyncServices {
 					offsetMs.set(offset);
 					return offset;
 				})
-				.doOnNext(offset -> LOGGER.info("EVENT=TIME_SYNC offsetMs={}", offset))
 				.doOnError(error -> LOGGER.warn("EVENT=TIME_SYNC_FAIL reason={}", error.getMessage()));
 	}
 

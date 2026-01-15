@@ -70,7 +70,7 @@ public class HistoricalWarmupService {
 	public Mono<Void> warmupAllSymbols(List<String> symbols) {
 		long start = System.currentTimeMillis();
 		int concurrency = resolveConcurrency();
-		LOGGER.info("EVENT=WARMUP_START symbolsCount={} concurrency={}", symbols.size(), concurrency);
+//		LOGGER.info("EVENT=WARMUP_START symbolsCount={} concurrency={}", symbols.size(), concurrency);
 		ctiLbStrategy.setWarmupMode(true);
 		AtomicInteger readySymbols = new AtomicInteger();
 		AtomicInteger failedSymbols = new AtomicInteger();
@@ -83,7 +83,7 @@ public class HistoricalWarmupService {
 						})
 						.onErrorResume(error -> {
 							failedSymbols.incrementAndGet();
-							LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} error={}", symbol, error.getMessage());
+//							LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} error={}", symbol, error.getMessage());
 							scheduleRetry(symbol);
 							return Mono.just(false);
 						}), concurrency)
@@ -117,14 +117,14 @@ public class HistoricalWarmupService {
 					ScoreSignalIndicator.WarmupStatus status = strategyRouter.warmupStatus(symbol);
 					boolean ready = status != null && status.cti5mReady() && status.adx5mReady();
 					long durationMs = System.currentTimeMillis() - start;
-					LOGGER.info("EVENT=WARMUP_DONE symbol={} candles1m={} candles5m={} cti5mBarsSeen={} adx5mBarsSeen={} ready={} durationMs={}",
-							symbol,
-							counts.candles1m(),
-							counts.candles5m(),
-							status == null ? 0 : status.cti5mBarsSeen(),
-							status == null ? 0 : status.adx5mBarsSeen(),
-							ready,
-							durationMs);
+//					LOGGER.info("EVENT=WARMUP_DONE symbol={} candles1m={} candles5m={} cti5mBarsSeen={} adx5mBarsSeen={} ready={} durationMs={}",
+//							symbol,
+//							counts.candles1m(),
+//							counts.candles5m(),
+//							status == null ? 0 : status.cti5mBarsSeen(),
+//							status == null ? 0 : status.adx5mBarsSeen(),
+//							ready,
+//							durationMs);
 					strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
 					return ready;
 				});
@@ -163,7 +163,7 @@ public class HistoricalWarmupService {
 		Mono.delay(Duration.ofSeconds(30))
 				.then(warmupSymbol(symbol))
 				.onErrorResume(error -> {
-					LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} retryError={}", symbol, error.getMessage());
+//					LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} retryError={}", symbol, error.getMessage());
 					return Mono.empty();
 				})
 				.subscribe();

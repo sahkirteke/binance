@@ -1,18 +1,12 @@
 spring:
   application:
     name: binance-trader
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
   codec:
     max-in-memory-size: 5MB
-  datasource:
-    url: jdbc:postgresql://aws-1-eu-central-1.pooler.supabase.com:5432/postgres?user=postgres.qssdtvxgkxjnfvchzghw&password=N7wncMMz9asKnain
-    username: postgres
-    password: N7wncMMz9asKnain
-  jpa:
-    hibernate:
-      ddl-auto: update
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
 
 binance:
   base-url: https://fapi.binance.com
@@ -72,6 +66,9 @@ strategy:
   position-notional-usdt: 50
   stop-loss-bps: 18
   take-profit-bps: 22
+  # ---- Risk management ----
+  take-profit-pct: 0.20
+  stop-loss-pct: 0.10
   quantity-step: 1
   roi-exit-enabled: true
   roi-take-profit-pct: 20
@@ -112,6 +109,10 @@ strategy:
   extreme-rsi-low: 15
   extreme-atr-block-mult: 3.0
   bbSpikeBlockEnabled: true
+  # ---- BB false-entry blocks (defaults ON) ----
+  bb-overbought-long-block-enabled: true
+  bb-overbought-long-pct-b: 0.72
+  bb-overbought-long-rsi: 60.0
   trail-activate-pct: 0.35
   trail-retrace-pct: 0.20
   trend-hold-min-profit-pct: 0.15
