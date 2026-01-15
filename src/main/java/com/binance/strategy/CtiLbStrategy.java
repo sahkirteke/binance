@@ -67,6 +67,8 @@ public class CtiLbStrategy {
 	private static final double BB_WIDTH_MIN_HARD = 0.0105;
 	private static final double BB_WIDTH_MIN_TRADE = 0.0130;
 	private static final double VOL_RATIO_BREAKOUT_MIN = 2.2;
+	private static final double MIDDLE_BUF_5M = 0.0010;
+	private static final double MIDDLE_BUF_1M = 0.0005;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
@@ -364,20 +366,30 @@ public class CtiLbStrategy {
 		if (signal.recReason() == CtiScoreCalculator.RecReason.TIE_HOLD) {
 			confirmedRec = CtiDirection.NEUTRAL;
 		}
-		double coreScore = signal.ctiScore() + signal.macdScore();
-		double entryScore = coreScore;
-		int bbEntryScore = 0;
-		double bbShapeScore = 0.0;
-		String bbReason = null;
-		double confirmBonus = resolveConfirmBonus(entryFilterState, signal);
-		entryScore = coreScore + bbShapeScore + confirmBonus;
-		double volume5m = candle.volume();
-		double volumeSma10_5m = symbolState.volumeSma10_5mValue;
-		CtiDirection candidateRec = confirmedRec;
-		if (current == PositionState.NONE
-				&& candidateRec != null
-				&& candidateRec != CtiDirection.NEUTRAL
-				&& Double.isFinite(coreScore)) {
+			double coreScore = signal.ctiScore() + signal.macdScore();
+			double entryScore = coreScore;
+			int bbEntryScore = 0;
+			double bbShapeScore = 0.0;
+			String bbReason = null;
+			double confirmBonus = resolveConfirmBonus(entryFilterState, signal);
+			entryScore = coreScore + bbShapeScore + confirmBonus;
+			double volume5m = candle.volume();
+			double volumeSma10_5m = symbolState.volumeSma10_5mValue;
+			double macdDelta = resolveMacdDelta(signal);
+			MacdHistColor histColor = signal.macdHistColor();
+			boolean continuationLong = histColor == MacdHistColor.AQUA && macdDelta > 0.0;
+			boolean continuationShort = histColor == MacdHistColor.RED && macdDelta < 0.0;
+			boolean reversalLongSetup = histColor == MacdHistColor.MAROON && macdDelta > 0.0;
+			boolean reversalShortSetup = histColor == MacdHistColor.BLUE && macdDelta < 0.0;
+			boolean reclaimLong5m = false;
+			boolean reclaimShort5m = false;
+			boolean confirmLong1m = false;
+			boolean confirmShort1m = false;
+			CtiDirection candidateRec = confirmedRec;
+			if (current == PositionState.NONE
+					&& candidateRec != null
+					&& candidateRec != CtiDirection.NEUTRAL
+					&& Double.isFinite(coreScore)) {
 			BbEntryScoreResult bbEntryScoreResult = computeBbEntryScore(
 					entryFilterState.bbPercentB_5m(),
 					entryFilterState.bbWidth_5m(),
@@ -395,24 +407,49 @@ public class CtiLbStrategy {
 					volume5m,
 					volumeSma10_5m,
 					recommendationUsed);
-				if (bbHardGate.blockReason() != null) {
-					confirmedRec = CtiDirection.NEUTRAL;
-					entryDecision = new EntryDecision(null, bbHardGate.blockReason(), bbHardGate.blockReason());
-				} else {
-					String allowReason = bbHardGate.allowReason();
-					entryScore = coreScore + bbShapeScore + confirmBonus;
-					boolean entryScorePass = recommendationUsed == CtiDirection.LONG
-							? entryScore >= ENTRY_SCORE_MIN
-							: recommendationUsed == CtiDirection.SHORT && entryScore <= -ENTRY_SCORE_MIN;
-					if (entryScorePass) {
-						confirmedRec = recommendationUsed;
-						entryDecision = new EntryDecision(
-								confirmedRec,
-								null,
-								allowReason == null ? "ENTRY_SCORE_OK" : allowReason);
-					} else {
+					if (bbHardGate.blockReason() != null) {
 						confirmedRec = CtiDirection.NEUTRAL;
-						entryDecision = new EntryDecision(null, "ENTRY_SCORE_BELOW_MIN", "ENTRY_SCORE_BELOW_MIN");
+						entryDecision = new EntryDecision(null, bbHardGate.blockReason(), bbHardGate.blockReason());
+					} else {
+						String allowReason = bbHardGate.allowReason();
+						if (recommendationUsed == CtiDirection.LONG && !continuationLong && !reversalLongSetup) {
+							confirmedRec = CtiDirection.NEUTRAL;
+							entryDecision = new EntryDecision(null, "MACD_DIR_MISMATCH", "MACD_DIR_MISMATCH");
+						} else if (recommendationUsed == CtiDirection.SHORT && !continuationShort && !reversalShortSetup) {
+							confirmedRec = CtiDirection.NEUTRAL;
+							entryDecision = new EntryDecision(null, "MACD_DIR_MISMATCH", "MACD_DIR_MISMATCH");
+						} else {
+							ReversalConfirmations confirmations = resolveReversalConfirmations(symbolState,
+									entryFilterState, close, reversalLongSetup, reversalShortSetup);
+							reclaimLong5m = confirmations.reclaimLong5m();
+							reclaimShort5m = confirmations.reclaimShort5m();
+							confirmLong1m = confirmations.confirmLong1m();
+							confirmShort1m = confirmations.confirmShort1m();
+							if (reversalLongSetup && recommendationUsed == CtiDirection.LONG
+									&& !(reclaimLong5m && confirmLong1m)) {
+								confirmedRec = CtiDirection.NEUTRAL;
+								entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
+										"REVERSAL_NEEDS_RECLAIM_CONFIRM");
+							} else if (reversalShortSetup && recommendationUsed == CtiDirection.SHORT
+									&& !(reclaimShort5m && confirmShort1m)) {
+								confirmedRec = CtiDirection.NEUTRAL;
+								entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
+										"REVERSAL_NEEDS_RECLAIM_CONFIRM");
+							} else {
+								entryScore = coreScore + bbShapeScore + confirmBonus;
+								boolean entryScorePass = recommendationUsed == CtiDirection.LONG
+										? entryScore >= ENTRY_SCORE_MIN
+										: recommendationUsed == CtiDirection.SHORT && entryScore <= -ENTRY_SCORE_MIN;
+								if (entryScorePass) {
+									confirmedRec = recommendationUsed;
+									entryDecision = new EntryDecision(
+											confirmedRec,
+											null,
+											allowReason == null ? "ENTRY_SCORE_OK" : allowReason);
+								} else {
+									confirmedRec = CtiDirection.NEUTRAL;
+									entryDecision = new EntryDecision(null, "ENTRY_SCORE_BELOW_MIN",
+											"ENTRY_SCORE_BELOW_MIN");
 //				LOGGER.info(
 //						"EVENT=ENTRY_SKIPPED_BY_SCORE symbol={} side={} existingEntryScore={} bbEntryScore={} finalEntryScore={} bbReason={}",
 //						symbol,
@@ -421,9 +458,12 @@ public class CtiLbStrategy {
 //						bbEntryScore,
 //						entryScore,
 //						bbReason == null ? "NA" : bbReason);
+								}
+							}
+						}
+					}
 				}
 			}
-		}
 		if (strategyProperties.pnlTrailEnabled()
 				&& current != PositionState.NONE
 				&& Boolean.TRUE.equals(trailingArmedBySymbol.get(symbol))) {
@@ -440,7 +480,9 @@ public class CtiLbStrategy {
 		double scoreAfterSafety = coreScore + rsiVolScore;
 		double adxScore = resolveAdxScore(scoreAfterSafety, signal.adx5m());
 		double totalScore = scoreAfterSafety + adxScore;
-		EntryGateMetrics entryGateMetrics = buildEntryGateMetrics(signal, entryFilterState, close);
+			EntryGateMetrics entryGateMetrics = buildEntryGateMetrics(signal, entryFilterState, close,
+					reversalLongSetup, reversalShortSetup, reclaimLong5m, reclaimShort5m, confirmLong1m,
+					confirmShort1m);
 		logEntryFilterState(symbol, symbolState, closeTime, close, prevClose, entryFilterState, entryDecision,
 				entryGateMetrics);
 		updateMacdStreak(symbolState, signal);
@@ -567,6 +609,12 @@ public class CtiLbStrategy {
 				confirmBonus,
 				entryScore,
 				bbReason,
+				reversalLongSetup,
+				reversalShortSetup,
+				reclaimLong5m,
+				reclaimShort5m,
+				confirmLong1m,
+				confirmShort1m,
 				confidence,
 				rsiVolScore,
 				rsiVolExitPressure,
@@ -1876,7 +1924,7 @@ public class CtiLbStrategy {
 			}
 		}
 		EntryGateMetrics metrics = new EntryGateMetrics(rsi9Used, outHist, outHistPrev, macdDelta, ema20, ema20DistPct,
-				updatedDecision.blockReason());
+				updatedDecision.blockReason(), null, null, null, null, null, null);
 		return new EntryGateEvaluation(updatedDecision, metrics);
 	}
 
@@ -2013,9 +2061,16 @@ public class CtiLbStrategy {
 			double macdDelta,
 			double ema20,
 			double ema20DistPct,
-			String blockReason) {
+			String blockReason,
+			Boolean reversalLongSetup,
+			Boolean reversalShortSetup,
+			Boolean reclaimLong5m,
+			Boolean reclaimShort5m,
+			Boolean confirmLong1m,
+			Boolean confirmShort1m) {
 		static EntryGateMetrics empty() {
-			return new EntryGateMetrics(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, null);
+			return new EntryGateMetrics(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, null,
+					null, null, null, null, null, null);
 		}
 
 		private String rsi9UsedLabel() {
@@ -2850,6 +2905,14 @@ public class CtiLbStrategy {
 						if (signal != null && signal.macdHistColor() != null) {
 							indicatorsNode.put("macdHistColor", signal.macdHistColor().name());
 						}
+						if (Boolean.TRUE.equals(entryGateMetrics.reversalLongSetup())) {
+							indicatorsNode.put("reclaimLong5m", entryGateMetrics.reclaimLong5m());
+							indicatorsNode.put("confirmLong1m", entryGateMetrics.confirmLong1m());
+						}
+						if (Boolean.TRUE.equals(entryGateMetrics.reversalShortSetup())) {
+							indicatorsNode.put("reclaimShort5m", entryGateMetrics.reclaimShort5m());
+							indicatorsNode.put("confirmShort1m", entryGateMetrics.confirmShort1m());
+						}
 						indicatorsNode.put("ema20", entryGateMetrics.ema20());
 						if (entryGateMetrics.blockReason() != null) {
 							indicatorsNode.put("entryBlockReason", entryGateMetrics.blockReason());
@@ -2878,12 +2941,14 @@ public class CtiLbStrategy {
 	}
 
 	private void recordDecisionSnapshot(String symbol, ScoreSignal signal, Candle candle, double coreScore,
-			double bbShapeScore, double confirmBonus, double entryScore, String bbReason, VolRsiConfidence confidence,
-			double rsiVolScore, double rsiVolExitPressure, double adxScore, double scoreAfterSafety,
-			double totalScore, double totalScoreForExit, PositionState positionBefore, String decisionValue,
-			EntryDecision entryDecision, EntryFilterState entryFilterState, int fiveMinDir,
-			CtiDirection confirmedRec, CtiDirection recommendationUsed, boolean trendHoldActive,
-			boolean scoreExitConfirmed, boolean emergencyExitTriggered, boolean normalExitConfirmed) {
+			double bbShapeScore, double confirmBonus, double entryScore, String bbReason,
+			boolean reversalLongSetup, boolean reversalShortSetup, boolean reclaimLong5m, boolean reclaimShort5m,
+			boolean confirmLong1m, boolean confirmShort1m, VolRsiConfidence confidence, double rsiVolScore,
+			double rsiVolExitPressure, double adxScore, double scoreAfterSafety, double totalScore,
+			double totalScoreForExit, PositionState positionBefore, String decisionValue, EntryDecision entryDecision,
+			EntryFilterState entryFilterState, int fiveMinDir, CtiDirection confirmedRec,
+			CtiDirection recommendationUsed, boolean trendHoldActive, boolean scoreExitConfirmed,
+			boolean emergencyExitTriggered, boolean normalExitConfirmed) {
 		try {
 			Files.createDirectories(SIGNAL_OUTPUT_DIR);
 			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-decision.json");
@@ -2913,6 +2978,7 @@ public class CtiLbStrategy {
 			putFinite(payload, "sma10", signal.adxSma10());
 			putFinite(payload, "adxScore", adxScore);
 			putFinite(payload, "coreScore", coreScore);
+			putFinite(payload, "bbEntryScore_5m", bbShapeScore);
 			putFinite(payload, "bbShapeScore", bbShapeScore);
 			putFinite(payload, "confirmBonus", confirmBonus);
 			putFinite(payload, "entryScore", entryScore);
@@ -2942,13 +3008,18 @@ public class CtiLbStrategy {
 				payload.set("riskTags", riskTagsNode);
 				payload.put("qualityScore", resolveQualityScoreForLog(entryFilterState));
 			}
+			if (reversalLongSetup) {
+				payload.put("reclaimLong5m", reclaimLong5m);
+				payload.put("confirmLong1m", confirmLong1m);
+			}
+			if (reversalShortSetup) {
+				payload.put("reclaimShort5m", reclaimShort5m);
+				payload.put("confirmShort1m", confirmShort1m);
+			}
 			if (signal != null && signal.macdHistColor() != null) {
 				payload.put("macdHistColor", signal.macdHistColor().name());
 			}
-			double macdDelta = Double.isNaN(signal.outHist()) || Double.isNaN(signal.outHistPrev())
-					? Double.NaN
-					: signal.outHist() - signal.outHistPrev();
-			putFinite(payload, "macdDelta", macdDelta);
+			putFinite(payload, "macdDelta", resolveMacdDelta(signal));
 			if (positionBefore == PositionState.NONE) {
 				putFinite(payload, "totalScoreUsedForEntry", totalScore);
 			} else {
@@ -3595,14 +3666,71 @@ public class CtiLbStrategy {
 		return tags;
 	}
 
+	private static double resolveMacdDelta(ScoreSignal signal) {
+		double outHist = signal == null ? Double.NaN : signal.outHist();
+		double outHistPrev = signal == null ? Double.NaN : signal.outHistPrev();
+		return Double.isNaN(outHist) || Double.isNaN(outHistPrev) ? Double.NaN : outHist - outHistPrev;
+	}
+
+	private record ReversalConfirmations(boolean reclaimLong5m, boolean reclaimShort5m, boolean confirmLong1m,
+			boolean confirmShort1m) {
+		static ReversalConfirmations empty() {
+			return new ReversalConfirmations(false, false, false, false);
+		}
+	}
+
+	private static ReversalConfirmations resolveReversalConfirmations(SymbolState state,
+			EntryFilterState entryFilterState, double close5m, boolean reversalLongSetup,
+			boolean reversalShortSetup) {
+		if (state == null || entryFilterState == null) {
+			return ReversalConfirmations.empty();
+		}
+		double middle = entryFilterState.bbMiddle_5m();
+		if (!Double.isFinite(middle)) {
+			return ReversalConfirmations.empty();
+		}
+		boolean reclaimLong5m = reversalLongSetup
+				&& Double.isFinite(close5m)
+				&& close5m >= middle * (1.0 + MIDDLE_BUF_5M);
+		boolean reclaimShort5m = reversalShortSetup
+				&& Double.isFinite(close5m)
+				&& close5m <= middle * (1.0 - MIDDLE_BUF_5M);
+		double close1mNow = resolveSeriesClose(state.series1m, 0);
+		double close1mPrev = resolveSeriesClose(state.series1m, 1);
+		boolean confirmLong1m = reversalLongSetup
+				&& Double.isFinite(close1mNow)
+				&& Double.isFinite(close1mPrev)
+				&& close1mNow >= middle * (1.0 + MIDDLE_BUF_1M)
+				&& close1mPrev >= middle * (1.0 + MIDDLE_BUF_1M);
+		boolean confirmShort1m = reversalShortSetup
+				&& Double.isFinite(close1mNow)
+				&& Double.isFinite(close1mPrev)
+				&& close1mNow <= middle * (1.0 - MIDDLE_BUF_1M)
+				&& close1mPrev <= middle * (1.0 - MIDDLE_BUF_1M);
+		return new ReversalConfirmations(reclaimLong5m, reclaimShort5m, confirmLong1m, confirmShort1m);
+	}
+
+	private static double resolveSeriesClose(BarSeries series, int offsetFromEnd) {
+		if (series == null || series.getEndIndex() < 0) {
+			return Double.NaN;
+		}
+		int index = series.getEndIndex() - offsetFromEnd;
+		if (index < 0) {
+			return Double.NaN;
+		}
+		return series.getBar(index).getClosePrice().doubleValue();
+	}
+
 	private static EntryGateMetrics buildEntryGateMetrics(ScoreSignal signal, EntryFilterState entryFilterState,
-			double close) {
+			double close, boolean reversalLongSetup, boolean reversalShortSetup, boolean reclaimLong5m,
+			boolean reclaimShort5m, boolean confirmLong1m, boolean confirmShort1m) {
 		double outHist = signal == null ? Double.NaN : signal.outHist();
 		double outHistPrev = signal == null ? Double.NaN : signal.outHistPrev();
 		double macdDelta = Double.isNaN(outHist) || Double.isNaN(outHistPrev) ? Double.NaN : outHist - outHistPrev;
 		double ema20 = entryFilterState == null ? Double.NaN : entryFilterState.ema20_5m();
 		double ema20DistPct = resolveEma20DistPct(ema20, close);
-		return new EntryGateMetrics(Double.NaN, outHist, outHistPrev, macdDelta, ema20, ema20DistPct, null);
+		return new EntryGateMetrics(Double.NaN, outHist, outHistPrev, macdDelta, ema20, ema20DistPct, null,
+				reversalLongSetup, reversalShortSetup, reclaimLong5m, reclaimShort5m, confirmLong1m, confirmShort1m);
 	}
 
 	private record BbHardGateDecision(String blockReason, String allowReason) {
