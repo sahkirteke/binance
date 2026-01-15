@@ -359,113 +359,24 @@ public class CtiLbStrategy {
 //					entryFilterState.rsi9(),
 //					entryFilterState.bbOutside_5m());
 		}
-		CtiDirection confirmedRec = recommendationUsed;
-		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
-			confirmedRec = entryDecision.confirmedRec();
-		}
-		if (signal.recReason() == CtiScoreCalculator.RecReason.TIE_HOLD) {
-			confirmedRec = CtiDirection.NEUTRAL;
-		}
-			double coreScore = signal.ctiScore() + signal.macdScore();
-			double entryScore = coreScore;
-			int bbEntryScore = 0;
-			double bbShapeScore = 0.0;
-			String bbReason = null;
-			double confirmBonus = resolveConfirmBonus(entryFilterState, signal);
-			entryScore = coreScore + bbShapeScore + confirmBonus;
-			double volume5m = candle.volume();
-			double volumeSma10_5m = symbolState.volumeSma10_5mValue;
-			double macdDelta = resolveMacdDelta(signal);
-			MacdHistColor histColor = signal.macdHistColor();
-			boolean ctiLong = signal.cti5mDir() == CtiDirection.LONG;
-			boolean ctiShort = signal.cti5mDir() == CtiDirection.SHORT;
-			boolean continuationLong = histColor == MacdHistColor.AQUA && macdDelta > 0.0 && ctiLong;
-			boolean continuationShort = histColor == MacdHistColor.RED && macdDelta < 0.0 && ctiShort;
-			boolean reversalLongSetup = histColor == MacdHistColor.MAROON && macdDelta > 0.0 && ctiLong;
-			boolean reversalShortSetup = histColor == MacdHistColor.BLUE && macdDelta < 0.0 && ctiShort;
-			boolean reclaimLong5m = false;
-			boolean reclaimShort5m = false;
-			boolean confirmLong1m = false;
-			boolean confirmShort1m = false;
-			CtiDirection candidateRec = confirmedRec;
-			if (current == PositionState.NONE
-					&& candidateRec != null
-					&& candidateRec != CtiDirection.NEUTRAL
-					&& Double.isFinite(coreScore)) {
-			BbEntryScoreResult bbEntryScoreResult = computeBbEntryScore(
-					entryFilterState.bbPercentB_5m(),
-					entryFilterState.bbWidth_5m(),
-					entryFilterState.bbOutside_5m(),
-					candidateRec);
-			bbEntryScore = bbEntryScoreResult.score();
-			bbShapeScore = bbEntryScoreResult.score();
-			bbReason = bbEntryScoreResult.reason();
-			BbHardGateDecision bbHardGate = resolveBbHardGate(
-					bbReason,
-					bbEntryScore,
-					entryFilterState,
-					close,
-					signal,
-					volume5m,
-					volumeSma10_5m,
-					recommendationUsed);
-					if (bbHardGate.blockReason() != null) {
-						confirmedRec = CtiDirection.NEUTRAL;
-						entryDecision = new EntryDecision(null, bbHardGate.blockReason(), bbHardGate.blockReason());
-					} else {
-						String allowReason = bbHardGate.allowReason();
-						if (recommendationUsed == CtiDirection.LONG && !continuationLong && !reversalLongSetup) {
-							confirmedRec = CtiDirection.NEUTRAL;
-							entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
-						} else if (recommendationUsed == CtiDirection.SHORT && !continuationShort && !reversalShortSetup) {
-							confirmedRec = CtiDirection.NEUTRAL;
-							entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
-						} else {
-							ReversalConfirmations confirmations = resolveReversalConfirmations(symbolState,
-									entryFilterState, close, reversalLongSetup, reversalShortSetup);
-							reclaimLong5m = confirmations.reclaimLong5m();
-							reclaimShort5m = confirmations.reclaimShort5m();
-							confirmLong1m = confirmations.confirmLong1m();
-							confirmShort1m = confirmations.confirmShort1m();
-							if (reversalLongSetup && recommendationUsed == CtiDirection.LONG
-									&& !(reclaimLong5m && confirmLong1m)) {
-								confirmedRec = CtiDirection.NEUTRAL;
-								entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
-										"REVERSAL_NEEDS_RECLAIM_CONFIRM");
-							} else if (reversalShortSetup && recommendationUsed == CtiDirection.SHORT
-									&& !(reclaimShort5m && confirmShort1m)) {
-								confirmedRec = CtiDirection.NEUTRAL;
-								entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
-										"REVERSAL_NEEDS_RECLAIM_CONFIRM");
-							} else {
-								entryScore = coreScore + bbShapeScore + confirmBonus;
-								boolean entryScorePass = recommendationUsed == CtiDirection.LONG
-										? entryScore >= ENTRY_SCORE_MIN
-										: recommendationUsed == CtiDirection.SHORT && entryScore <= -ENTRY_SCORE_MIN;
-								if (entryScorePass) {
-									confirmedRec = recommendationUsed;
-									entryDecision = new EntryDecision(
-											confirmedRec,
-											null,
-											allowReason == null ? "ENTRY_SCORE_OK" : allowReason);
-								} else {
-									confirmedRec = CtiDirection.NEUTRAL;
-									entryDecision = new EntryDecision(null, "ENTRY_SCORE_BELOW_MIN",
-											"ENTRY_SCORE_BELOW_MIN");
-//				LOGGER.info(
-//						"EVENT=ENTRY_SKIPPED_BY_SCORE symbol={} side={} existingEntryScore={} bbEntryScore={} finalEntryScore={} bbReason={}",
-//						symbol,
-//						candidateRec,
-//						coreScore,
-//						bbEntryScore,
-//						entryScore,
-//						bbReason == null ? "NA" : bbReason);
-								}
-							}
-						}
-					}
-				}
-			}
+		EntryScoringResult scoringResult = resolveEntryScoring(current, symbolState, signal, candle, entryFilterState,
+				recommendationUsed, entryDecision);
+		entryDecision = scoringResult.entryDecision();
+		CtiDirection confirmedRec = scoringResult.confirmedRec();
+		double coreScore = scoringResult.coreScore();
+		double entryScore = scoringResult.entryScore();
+		int bbEntryScore = scoringResult.bbEntryScore();
+		double bbShapeScore = scoringResult.bbShapeScore();
+		String bbReason = scoringResult.bbReason();
+		double confirmBonus = scoringResult.confirmBonus();
+		double volume5m = scoringResult.volume5m();
+		double volumeSma10_5m = scoringResult.volumeSma10_5m();
+		boolean reversalLongSetup = scoringResult.reversalLongSetup();
+		boolean reversalShortSetup = scoringResult.reversalShortSetup();
+		boolean reclaimLong5m = scoringResult.reclaimLong5m();
+		boolean reclaimShort5m = scoringResult.reclaimShort5m();
+		boolean confirmLong1m = scoringResult.confirmLong1m();
+		boolean confirmShort1m = scoringResult.confirmShort1m();
 		if (strategyProperties.pnlTrailEnabled()
 				&& current != PositionState.NONE
 				&& Boolean.TRUE.equals(trailingArmedBySymbol.get(symbol))) {
@@ -481,7 +392,7 @@ public class CtiLbStrategy {
 		double rsiVolScore = resolveRsiVolScore(dirSign, confidence.conf());
 		double scoreAfterSafety = coreScore + rsiVolScore;
 		double adxScore = resolveAdxScore(scoreAfterSafety, signal.adx5m());
-		double totalScore = scoreAfterSafety + adxScore;
+			double totalScore = scoreAfterSafety + adxScore;
 			EntryGateMetrics entryGateMetrics = buildEntryGateMetrics(signal, entryFilterState, close,
 					reversalLongSetup, reversalShortSetup, reclaimLong5m, reclaimShort5m, confirmLong1m,
 					confirmShort1m);
@@ -3629,6 +3540,131 @@ public class CtiLbStrategy {
 			confirmBonus += 0.5;
 		}
 		return ScoreMath.clamp(confirmBonus, 0.0, 2.0);
+	}
+
+	private record EntryScoringResult(
+			EntryDecision entryDecision,
+			CtiDirection confirmedRec,
+			double coreScore,
+			double entryScore,
+			int bbEntryScore,
+			double bbShapeScore,
+			String bbReason,
+			double confirmBonus,
+			double volume5m,
+			double volumeSma10_5m,
+			boolean reversalLongSetup,
+			boolean reversalShortSetup,
+			boolean reclaimLong5m,
+			boolean reclaimShort5m,
+			boolean confirmLong1m,
+			boolean confirmShort1m) {
+	}
+
+	private EntryScoringResult resolveEntryScoring(PositionState current, SymbolState symbolState, ScoreSignal signal,
+			Candle candle, EntryFilterState entryFilterState, CtiDirection recommendationUsed,
+			EntryDecision entryDecision) {
+		CtiDirection confirmedRec = recommendationUsed;
+		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
+			confirmedRec = entryDecision.confirmedRec();
+		}
+		if (signal.recReason() == CtiScoreCalculator.RecReason.TIE_HOLD) {
+			confirmedRec = CtiDirection.NEUTRAL;
+		}
+		double coreScore = signal.ctiScore() + signal.macdScore();
+		double entryScore = coreScore;
+		int bbEntryScore = 0;
+		double bbShapeScore = 0.0;
+		String bbReason = null;
+		double confirmBonus = resolveConfirmBonus(entryFilterState, signal);
+		entryScore = coreScore + bbShapeScore + confirmBonus;
+		double volume5m = candle.volume();
+		double volumeSma10_5m = symbolState.volumeSma10_5mValue;
+		double macdDelta = resolveMacdDelta(signal);
+		MacdHistColor histColor = signal.macdHistColor();
+		boolean ctiLong = signal.cti5mDir() == CtiDirection.LONG;
+		boolean ctiShort = signal.cti5mDir() == CtiDirection.SHORT;
+		boolean continuationLong = histColor == MacdHistColor.AQUA && macdDelta > 0.0 && ctiLong;
+		boolean continuationShort = histColor == MacdHistColor.RED && macdDelta < 0.0 && ctiShort;
+		boolean reversalLongSetup = histColor == MacdHistColor.MAROON && macdDelta > 0.0 && ctiLong;
+		boolean reversalShortSetup = histColor == MacdHistColor.BLUE && macdDelta < 0.0 && ctiShort;
+		boolean reclaimLong5m = false;
+		boolean reclaimShort5m = false;
+		boolean confirmLong1m = false;
+		boolean confirmShort1m = false;
+		CtiDirection candidateRec = confirmedRec;
+		if (current == PositionState.NONE
+				&& candidateRec != null
+				&& candidateRec != CtiDirection.NEUTRAL
+				&& Double.isFinite(coreScore)) {
+			BbEntryScoreResult bbEntryScoreResult = computeBbEntryScore(
+					entryFilterState.bbPercentB_5m(),
+					entryFilterState.bbWidth_5m(),
+					entryFilterState.bbOutside_5m(),
+					candidateRec);
+			bbEntryScore = bbEntryScoreResult.score();
+			bbShapeScore = bbEntryScoreResult.score();
+			bbReason = bbEntryScoreResult.reason();
+			BbHardGateDecision bbHardGate = resolveBbHardGate(
+					bbReason,
+					bbEntryScore,
+					entryFilterState,
+					candle.close(),
+					signal,
+					volume5m,
+					volumeSma10_5m,
+					recommendationUsed);
+			if (bbHardGate.blockReason() != null) {
+				confirmedRec = CtiDirection.NEUTRAL;
+				entryDecision = new EntryDecision(null, bbHardGate.blockReason(), bbHardGate.blockReason());
+			} else {
+				String allowReason = bbHardGate.allowReason();
+				if (recommendationUsed == CtiDirection.LONG && !continuationLong && !reversalLongSetup) {
+					confirmedRec = CtiDirection.NEUTRAL;
+					entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
+				} else if (recommendationUsed == CtiDirection.SHORT && !continuationShort && !reversalShortSetup) {
+					confirmedRec = CtiDirection.NEUTRAL;
+					entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
+				} else {
+					ReversalConfirmations confirmations = resolveReversalConfirmations(symbolState, entryFilterState,
+							candle.close(), reversalLongSetup, reversalShortSetup);
+					reclaimLong5m = confirmations.reclaimLong5m();
+					reclaimShort5m = confirmations.reclaimShort5m();
+					confirmLong1m = confirmations.confirmLong1m();
+					confirmShort1m = confirmations.confirmShort1m();
+					if (reversalLongSetup && recommendationUsed == CtiDirection.LONG
+							&& !(reclaimLong5m && confirmLong1m)) {
+						confirmedRec = CtiDirection.NEUTRAL;
+						entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
+								"REVERSAL_NEEDS_RECLAIM_CONFIRM");
+					} else if (reversalShortSetup && recommendationUsed == CtiDirection.SHORT
+							&& !(reclaimShort5m && confirmShort1m)) {
+						confirmedRec = CtiDirection.NEUTRAL;
+						entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
+								"REVERSAL_NEEDS_RECLAIM_CONFIRM");
+					} else {
+						entryScore = coreScore + bbShapeScore + confirmBonus;
+						boolean entryScorePass = recommendationUsed == CtiDirection.LONG
+								? entryScore >= ENTRY_SCORE_MIN
+								: recommendationUsed == CtiDirection.SHORT && entryScore <= -ENTRY_SCORE_MIN;
+						if (entryScorePass) {
+							confirmedRec = recommendationUsed;
+							entryDecision = new EntryDecision(
+									confirmedRec,
+									null,
+									allowReason == null ? "ENTRY_SCORE_OK" : allowReason);
+						} else {
+							confirmedRec = CtiDirection.NEUTRAL;
+							entryDecision = new EntryDecision(null, "ENTRY_SCORE_BELOW_MIN",
+									"ENTRY_SCORE_BELOW_MIN");
+						}
+					}
+				}
+			}
+		}
+		return new EntryScoringResult(entryDecision, confirmedRec, coreScore, entryScore, bbEntryScore, bbShapeScore,
+				bbReason, confirmBonus, volume5m, volumeSma10_5m, reversalLongSetup, reversalShortSetup,
+				reclaimLong5m, reclaimShort5m, confirmLong1m, confirmShort1m);
 	}
 
 	private static int resolveQualityScoreForLog(EntryFilterState entryFilterState) {
