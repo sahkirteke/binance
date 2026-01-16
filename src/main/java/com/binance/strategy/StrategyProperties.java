@@ -114,7 +114,8 @@ public record StrategyProperties(
 		int pnlTrailExitConfirmTicks,
 		boolean roiExitEnabled,
 		double roiTakeProfitPct,
-		double roiStopLossPct) {
+		double roiStopLossPct,
+		LongSetupProperties longSetups) {
 
 
 	public List<String> resolvedTradeSymbols() {

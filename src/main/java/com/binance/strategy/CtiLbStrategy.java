@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
@@ -46,6 +47,7 @@ import org.ta4j.core.indicators.ATRIndicator;
 import org.ta4j.core.indicators.helpers.ClosePriceIndicator;
 import org.ta4j.core.indicators.helpers.VolumeIndicator;
 import java.math.BigDecimal;
+import jakarta.annotation.PostConstruct;
 
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
@@ -55,6 +57,13 @@ import reactor.netty.http.client.PrematureCloseException;
 public class CtiLbStrategy {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(CtiLbStrategy.class);
+	enum LongEntrySetup {
+		SETUP_1,
+		SETUP_2,
+		SETUP_3,
+		SETUP_4,
+		SETUP_5
+	}
 	private static final int EMA_20_PERIOD = 20;
 	private static final int EMA_200_PERIOD = 200;
 	private static final int RSI_9_PERIOD = 9;
@@ -73,6 +82,8 @@ public class CtiLbStrategy {
 	private static final double MIDDLE_BUF_5M = 0.0010;
 	private static final double MIDDLE_BUF_1M = 0.0005;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
+	private static final Indicators EMPTY_LONG_SETUP_INDICATORS =
+			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN);
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
 	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
@@ -129,6 +140,11 @@ public class CtiLbStrategy {
 		this.orderTracker = orderTracker;
 		this.objectMapper = objectMapper;
 //		logConfigSnapshot();
+	}
+
+	@PostConstruct
+	void logLongSetupMode() {
+		LOGGER.info("LONG HIGH-WINRATE SETUPS ENABLED (5 SETUPS, OR LOGIC)");
 	}
 
 	public void setWarmupMode(boolean warmupMode) {
@@ -345,14 +361,11 @@ public class CtiLbStrategy {
 				symbolState);
 		CtiDirection recommendationRaw = signal.recommendation();
 		CtiDirection recommendationUsed = signal.insufficientData() ? CtiDirection.NEUTRAL : recommendationRaw;
-		CtiDirection candidateRecForEntry = recommendationUsed;
-		if (candidateRecForEntry == null || candidateRecForEntry == CtiDirection.NEUTRAL) {
-			candidateRecForEntry = fiveMinDir == 1
-					? CtiDirection.LONG
-					: fiveMinDir == -1 ? CtiDirection.SHORT : CtiDirection.NEUTRAL;
-		}
-		EntryDecision entryDecision = resolveEntryDecision(current, symbolState, entryFilterState,
-				candidateRecForEntry);
+		double volume5m = candle.volume();
+		double volumeSma10_5m = symbolState.volumeSma10_5mValue;
+		double volRatio = resolveVolRatio(volume5m, volumeSma10_5m);
+		Indicators longSetupIndicators = buildLongSetupIndicators(entryFilterState, volRatio, close);
+		EntryDecision entryDecision = resolveEntryDecision(recommendationUsed, longSetupIndicators);
 		if (isBbFalseEntryBlock(entryDecision.blockReason())) {
 //			LOGGER.info(
 //					"EVENT=ENTRY_BLOCK_FALSE_ENTRY symbol={} side=LONG reason={} pB={} rsi={} bbOutside={}",
@@ -372,8 +385,8 @@ public class CtiLbStrategy {
 		double bbShapeScore = scoringResult.bbShapeScore();
 		String bbReason = scoringResult.bbReason();
 		double confirmBonus = scoringResult.confirmBonus();
-		double volume5m = scoringResult.volume5m();
-		double volumeSma10_5m = scoringResult.volumeSma10_5m();
+		volume5m = scoringResult.volume5m();
+		volumeSma10_5m = scoringResult.volumeSma10_5m();
 		boolean reversalLongSetup = scoringResult.reversalLongSetup();
 		boolean reversalShortSetup = scoringResult.reversalShortSetup();
 		boolean reclaimLong5m = scoringResult.reclaimLong5m();
@@ -784,16 +797,17 @@ public class CtiLbStrategy {
 			return;
 		}
 
-		action = resolveAction(current, confirmedRec);
+		CtiDirection actionConfirmedRec = resolveActionConfirmedRec(current, confirmedRec, entryDecision);
+		action = resolveAction(current, actionConfirmedRec);
 		BigDecimal resolvedQty = resolveQuantity(symbol, close);
 		BigDecimal closeQty = current == PositionState.NONE ? resolvedQty : resolveExitQuantity(symbol, entryState, close);
 		boolean hasSignal = recommendationUsed != CtiDirection.NEUTRAL;
-		boolean confirmationMet = confirmedRec != CtiDirection.NEUTRAL;
-		PositionState target = confirmedRec == CtiDirection.LONG ? PositionState.LONG : PositionState.SHORT;
+		boolean confirmationMet = actionConfirmedRec != CtiDirection.NEUTRAL;
+		PositionState target = actionConfirmedRec == CtiDirection.LONG ? PositionState.LONG : PositionState.SHORT;
 		String decisionActionReason = action == SignalAction.HOLD
 				? resolveHoldReason(signal, hasSignal, confirmationMet)
 				: current == PositionState.NONE ? "OK" : resolveFlipReason(current, target);
-		String decisionBlockReason = resolveDecisionBlockReason(signal, action, confirmedRec, current);
+		String decisionBlockReason = resolveDecisionBlockReason(signal, action, actionConfirmedRec, current);
 		if (current != PositionState.NONE && action != SignalAction.HOLD && trailingExitOnly) {
 			action = SignalAction.HOLD;
 			decisionActionReason = "TRAILING_EXIT_ONLY";
@@ -1766,17 +1780,87 @@ public class CtiLbStrategy {
 		return new FlipGateResult(false, "QUALITY_BELOW_FAST");
 	}
 
-	private EntryDecision resolveEntryDecision(PositionState current, SymbolState state,
-			EntryFilterState entryFilterState, CtiDirection candidateRec) {
-		return evaluateEntryDecision(current, entryFilterState, candidateRec, strategyProperties);
+	private EntryDecision resolveEntryDecision(CtiDirection recommendationUsed, Indicators indicators) {
+		Indicators snapshot = indicators == null ? EMPTY_LONG_SETUP_INDICATORS : indicators;
+		if (recommendationUsed != CtiDirection.LONG) {
+			return new EntryDecision(null, "ONLY_LONG_ENABLED", null, null, snapshot);
+		}
+		Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
+		if (matched.isPresent()) {
+			return new EntryDecision(CtiDirection.LONG, null, "LONG_SETUP_MATCH", matched.get(), snapshot);
+		}
+		return new EntryDecision(null, "NO_LONG_SETUP_MATCHED", null, null, snapshot);
 	}
 
-	static EntryDecision evaluateEntryDecision(PositionState current, EntryFilterState entryFilterState,
-			CtiDirection candidateRec, StrategyProperties properties) {
-		if (current != PositionState.NONE) {
-			return new EntryDecision(null, null, null);
+	private Indicators buildLongSetupIndicators(EntryFilterState entryFilterState, double volRatio, double close) {
+		if (entryFilterState == null) {
+			return EMPTY_LONG_SETUP_INDICATORS;
 		}
-		return new EntryDecision(null, null, null);
+		double bbWidth = entryFilterState.bbWidth_5m();
+		double ema20DistPct = resolveEma20DistPct(entryFilterState.ema20_5m(), close);
+		double rsi9 = entryFilterState.rsi9();
+		return new Indicators(bbWidth, volRatio, ema20DistPct, rsi9);
+	}
+
+	private Optional<LongEntrySetup> evaluateLongSetup(Indicators indicators) {
+		if (indicators == null) {
+			return Optional.empty();
+		}
+		LongSetupProperties longSetups = strategyProperties.longSetups();
+		if (longSetups == null) {
+			return Optional.empty();
+		}
+		if (matchesSetup1(indicators)) {
+			return Optional.of(LongEntrySetup.SETUP_1);
+		}
+		if (matchesSetup2(indicators)) {
+			return Optional.of(LongEntrySetup.SETUP_2);
+		}
+		if (matchesSetup3(indicators)) {
+			return Optional.of(LongEntrySetup.SETUP_3);
+		}
+		if (matchesSetup4(indicators)) {
+			return Optional.of(LongEntrySetup.SETUP_4);
+		}
+		if (matchesSetup5(indicators)) {
+			return Optional.of(LongEntrySetup.SETUP_5);
+		}
+		return Optional.empty();
+	}
+
+	private boolean matchesSetup1(Indicators i) {
+		LongSetupProperties.Setup1 config = strategyProperties.longSetups().setup1();
+		return config != null
+				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
+				&& isFiniteBetween(i.volRatio(), config.volMin(), config.volMax());
+	}
+
+	private boolean matchesSetup2(Indicators i) {
+		LongSetupProperties.Setup2 config = strategyProperties.longSetups().setup2();
+		return config != null
+				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
+				&& isFiniteBetween(i.volRatio(), config.volMin(), config.volMax());
+	}
+
+	private boolean matchesSetup3(Indicators i) {
+		LongSetupProperties.Setup3 config = strategyProperties.longSetups().setup3();
+		return config != null
+				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
+				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
+	}
+
+	private boolean matchesSetup4(Indicators i) {
+		LongSetupProperties.Setup4 config = strategyProperties.longSetups().setup4();
+		return config != null
+				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
+				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
+	}
+
+	private boolean matchesSetup5(Indicators i) {
+		LongSetupProperties.Setup5 config = strategyProperties.longSetups().setup5();
+		return config != null
+				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
+				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin());
 	}
 
 	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection candidateSide, ScoreSignal signal) {
@@ -1928,20 +2012,29 @@ public class CtiLbStrategy {
 			boolean bbOutside_5m) {
 	}
 
+	record Indicators(
+			double bbWidth_5m,
+			double volRatio,
+			double ema20DistPct,
+			double rsi9_5m) {
+	}
+
 	record EntryDecision(
 			CtiDirection confirmedRec,
 			String blockReason,
-			String decisionActionReason) {
+			String decisionActionReason,
+			LongEntrySetup matchedSetup,
+			Indicators setupSnapshot) {
 		static EntryDecision defaultDecision() {
-			return new EntryDecision(null, null, null);
+			return new EntryDecision(null, null, null, null, null);
 		}
 
 		EntryDecision withBlockReason(String reason) {
-			return new EntryDecision(confirmedRec, reason, decisionActionReason);
+			return new EntryDecision(confirmedRec, reason, decisionActionReason, matchedSetup, setupSnapshot);
 		}
 
 		EntryDecision withDecisionActionReason(String reason) {
-			return new EntryDecision(confirmedRec, blockReason, reason);
+			return new EntryDecision(confirmedRec, blockReason, reason, matchedSetup, setupSnapshot);
 		}
 	}
 
@@ -2867,113 +2960,6 @@ public class CtiLbStrategy {
 				CtiDirection recommendationUsed, boolean trendHoldActive, boolean scoreExitConfirmed,
 				boolean emergencyExitTriggered, boolean normalExitConfirmed) {
 		try {
-			Files.createDirectories(SIGNAL_OUTPUT_DIR);
-			Path outputFile = SIGNAL_OUTPUT_DIR.resolve(symbol + "-decision.json");
-			ObjectNode payload = objectMapper.createObjectNode();
-			payload.put("decisionTime", formatTimestamp(signal.closeTime()));
-			payload.put("t5mCloseUsed", signal.t5mCloseUsed());
-			putFinite(payload, "close5m", candle.close());
-			putFinite(payload, "outHist", signal.outHist());
-			putFinite(payload, "outHistPrev", signal.outHistPrev());
-			payload.put("histColor", signal.macdHistColor() == null ? "NA" : signal.macdHistColor().name());
-			putFinite(payload, "macdScore", signal.macdScore());
-			payload.put("cti1mDir", signal.cti1mDir() == null ? "NA" : signal.cti1mDir().name());
-			payload.put("cti5mDir", signal.cti5mDir() == null ? "NA" : signal.cti5mDir().name());
-			putFinite(payload, "ctiScore", signal.ctiScore());
-			putFinite(payload, "rsi9_5m", confidence.rsi9());
-			putFinite(payload, "volume5m", candle.volume());
-			putFinite(payload, "volumeSma10_5m", confidence.volumeSma10());
-			putFinite(payload, "volRatio", confidence.volRatio());
-			payload.put("VOL_RATIO_BREAKOUT_MIN", VOL_RATIO_BREAKOUT_MIN);
-			putFinite(payload, "ema20", entryFilterState == null ? Double.NaN : entryFilterState.ema20_5m());
-			putFinite(payload, "volConf", confidence.volConf());
-			putFinite(payload, "rsiConf", confidence.rsiConf());
-			putFinite(payload, "conf", confidence.conf());
-			putFinite(payload, "rsiVolScore", rsiVolScore);
-			putFinite(payload, "rsiVolExitPressure", rsiVolExitPressure);
-			putFinite(payload, "adx", signal.adx5m());
-			putFinite(payload, "sma10", signal.adxSma10());
-			putFinite(payload, "adxScore", adxScore);
-			putFinite(payload, "coreScore", coreScore);
-			putFinite(payload, "bbEntryScore_5m", bbShapeScore);
-			putFinite(payload, "bbShapeScore", bbShapeScore);
-			putFinite(payload, "confirmBonus", confirmBonus);
-			putFinite(payload, "entryScore", entryScore);
-			payload.put("ENTRY_SCORE_MIN", ENTRY_SCORE_MIN);
-			putFinite(payload, "scoreAfterSafety", scoreAfterSafety);
-			putFinite(payload, "totalScore", totalScore);
-			if (entryFilterState != null) {
-				putFinite(payload, "bbMiddle_5m", entryFilterState.bbMiddle_5m());
-				putFinite(payload, "bbUpper_5m", entryFilterState.bbUpper_5m());
-				putFinite(payload, "bbLower_5m", entryFilterState.bbLower_5m());
-				putFinite(payload, "bbWidth_5m", entryFilterState.bbWidth_5m());
-				payload.put("BB_WIDTH_MIN", BB_WIDTH_MIN);
-				putFinite(payload, "bbPercentB_5m", entryFilterState.bbPercentB_5m());
-				payload.put("BB_PB_LONG_BLOCK", BB_PB_LONG_BLOCK);
-				payload.put("BB_PB_SHORT_BLOCK", BB_PB_SHORT_BLOCK);
-				payload.put("bbOutside_5m", entryFilterState.bbOutside_5m());
-				if (bbReason != null) {
-					payload.put("bbReason", bbReason);
-				}
-				payload.put("ema20Ok", entryFilterState.ema20Ok());
-				payload.put("ema200Ok", entryFilterState.ema200Ok());
-				payload.put("rsiOk", entryFilterState.rsiOk());
-				payload.put("volOk", entryFilterState.volOk());
-				payload.put("atrOk", entryFilterState.atrOk());
-				payload.put("adxGate", signal.adxGate());
-				double ema20DistPct = resolveEma20DistPct(entryFilterState.ema20_5m(), candle.close());
-				putFinite(payload, "ema20DistPct", ema20DistPct);
-				ArrayNode riskTagsNode = objectMapper.createArrayNode();
-				for (String tag : resolveRiskTags(entryFilterState, ema20DistPct)) {
-					riskTagsNode.add(tag);
-				}
-				payload.set("riskTags", riskTagsNode);
-				payload.put("qualityScore", resolveQualityScoreForLog(entryFilterState));
-				putFinite(payload, "atr14", entryFilterState.atr14());
-			}
-			if (reversalLongSetup) {
-				payload.put("reclaimLong5m", reclaimLong5m);
-				payload.put("confirmLong1m", confirmLong1m);
-			}
-			if (reversalShortSetup) {
-				payload.put("reclaimShort5m", reclaimShort5m);
-				payload.put("confirmShort1m", confirmShort1m);
-			}
-			if (signal != null && signal.macdHistColor() != null) {
-				payload.put("macdHistColor", signal.macdHistColor().name());
-			}
-			putFinite(payload, "macdDelta", resolveMacdDelta(signal));
-			if (positionBefore == PositionState.NONE) {
-				putFinite(payload, "totalScoreUsedForEntry", totalScore);
-			} else {
-				payload.putNull("totalScoreUsedForEntry");
-			}
-			payload.put("drop3", signal.drop3());
-			payload.put("crossDown", signal.crossDown());
-			payload.put("belowSma", signal.belowSma());
-			payload.put("deadZone", signal.deadZone());
-			putFinite(payload, "adxExitPressure", signal.adxExitPressure());
-			putFinite(payload, "totalScoreForExit", totalScoreForExit);
-			payload.put("positionBefore", positionBefore == null ? "NA" : positionBefore.name());
-			payload.put("decision", decisionValue);
-			payload.put("entryBlockReason", entryDecision == null || entryDecision.blockReason() == null
-					? "NA"
-					: entryDecision.blockReason());
-			payload.put("entryActionReason", entryDecision == null || entryDecision.decisionActionReason() == null
-					? "NA"
-					: entryDecision.decisionActionReason());
-			payload.put("entryConfirmedRec", entryDecision == null || entryDecision.confirmedRec() == null
-					? "NA"
-					: entryDecision.confirmedRec().name());
-			payload.put("entryQualityScore", resolveQualityScoreForLog(entryFilterState));
-			payload.put("fiveMinDir", fiveMinDir);
-			payload.put("confirmedRecUsed", confirmedRec == null ? "NA" : confirmedRec.name());
-			payload.put("recommendationUsed", recommendationUsed == null ? "NA" : recommendationUsed.name());
-			payload.put("trendHoldActive", trendHoldActive);
-			payload.put("scoreExitConfirmed", scoreExitConfirmed);
-			payload.put("emergencyExitTriggered", emergencyExitTriggered);
-			payload.put("normalExitConfirmed", normalExitConfirmed);
-			objectMapper.writerWithDefaultPrettyPrinter().writeValue(outputFile.toFile(), payload);
 			appendDecisionJsonLine(symbol, signal, candle.close(), entryDecision, recommendationUsed, decisionValue,
 					coreScore, bbShapeScore, confirmBonus, entryScore, entryFilterState, bbReason, confidence);
 		} catch (IOException error) {
@@ -2999,6 +2985,27 @@ public class CtiLbStrategy {
 		} else if (entryDecision != null && entryDecision.decisionActionReason() != null) {
 			line.put("allowReason", entryDecision.decisionActionReason());
 		}
+		boolean longSetupMatched = entryDecision != null && entryDecision.matchedSetup() != null;
+		line.put("longSetupMatched", longSetupMatched);
+		if (longSetupMatched) {
+			line.put("matchedSetup", entryDecision.matchedSetup().name());
+		} else {
+			line.putNull("matchedSetup");
+		}
+		Indicators setupSnapshot = entryDecision == null ? null : entryDecision.setupSnapshot();
+		ObjectNode setupSnapshotNode = objectMapper.createObjectNode();
+		if (setupSnapshot == null) {
+			setupSnapshotNode.putNull("bbWidth_5m");
+			setupSnapshotNode.putNull("volRatio");
+			setupSnapshotNode.putNull("ema20DistPct");
+			setupSnapshotNode.putNull("rsi9_5m");
+		} else {
+			putFinite(setupSnapshotNode, "bbWidth_5m", setupSnapshot.bbWidth_5m());
+			putFinite(setupSnapshotNode, "volRatio", setupSnapshot.volRatio());
+			putFinite(setupSnapshotNode, "ema20DistPct", setupSnapshot.ema20DistPct());
+			putFinite(setupSnapshotNode, "rsi9_5m", setupSnapshot.rsi9_5m());
+		}
+		line.set("setupSnapshot", setupSnapshotNode);
 		putFinite(line, "entryScore", entryScore);
 		line.put("ENTRY_SCORE_MIN", ENTRY_SCORE_MIN);
 		putFinite(line, "coreScore", coreScore);
@@ -3654,36 +3661,29 @@ public class CtiLbStrategy {
 			Candle candle, EntryFilterState entryFilterState, CtiDirection recommendationUsed,
 			EntryDecision entryDecision) {
 		CtiDirection confirmedRec = recommendationUsed;
-		if (current == PositionState.NONE && entryDecision.confirmedRec() != null) {
-			confirmedRec = entryDecision.confirmedRec();
-		}
 		if (signal.recReason() == CtiScoreCalculator.RecReason.TIE_HOLD) {
 			confirmedRec = CtiDirection.NEUTRAL;
 		}
 		double coreScore = signal.ctiScore() + signal.macdScore();
-		double entryScore = coreScore;
 		int bbEntryScore = 0;
 		double bbShapeScore = 0.0;
 		String bbReason = null;
 		double confirmBonus = resolveConfirmBonus(entryFilterState, signal);
-		entryScore = coreScore + bbShapeScore + confirmBonus;
+		double entryScore = coreScore + bbShapeScore + confirmBonus;
 		double volume5m = candle.volume();
 		double volumeSma10_5m = symbolState.volumeSma10_5mValue;
 		double macdDelta = resolveMacdDelta(signal);
 		MacdHistColor histColor = signal.macdHistColor();
 		boolean ctiLong = signal.cti5mDir() == CtiDirection.LONG;
 		boolean ctiShort = signal.cti5mDir() == CtiDirection.SHORT;
-		boolean continuationLong = histColor == MacdHistColor.AQUA && macdDelta > 0.0 && ctiLong;
-		boolean continuationShort = histColor == MacdHistColor.RED && macdDelta < 0.0 && ctiShort;
 		boolean reversalLongSetup = histColor == MacdHistColor.MAROON && macdDelta > 0.0 && ctiLong;
 		boolean reversalShortSetup = histColor == MacdHistColor.BLUE && macdDelta < 0.0 && ctiShort;
 		boolean reclaimLong5m = false;
 		boolean reclaimShort5m = false;
 		boolean confirmLong1m = false;
 		boolean confirmShort1m = false;
-		CtiDirection candidateRec = confirmedRec;
-		if (current == PositionState.NONE
-				&& candidateRec != null
+		CtiDirection candidateRec = recommendationUsed == null ? CtiDirection.NEUTRAL : recommendationUsed;
+		if (entryFilterState != null
 				&& candidateRec != CtiDirection.NEUTRAL
 				&& Double.isFinite(coreScore)) {
 			BbEntryScoreResult bbEntryScoreResult = computeBbEntryScore(
@@ -3694,59 +3694,14 @@ public class CtiLbStrategy {
 			bbEntryScore = bbEntryScoreResult.score();
 			bbShapeScore = bbEntryScoreResult.score();
 			bbReason = bbEntryScoreResult.reason();
-			BbHardGateDecision bbHardGate = resolveBbHardGate(
-					bbReason,
-					bbEntryScore,
-					entryFilterState,
-					recommendationUsed);
-			if (bbHardGate.blockReason() != null) {
-				confirmedRec = CtiDirection.NEUTRAL;
-				entryDecision = new EntryDecision(null, bbHardGate.blockReason(), bbHardGate.blockReason());
-			} else {
-				String allowReason = bbHardGate.allowReason();
-				if (recommendationUsed == CtiDirection.LONG && !continuationLong && !reversalLongSetup) {
-					confirmedRec = CtiDirection.NEUTRAL;
-					entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
-				} else if (recommendationUsed == CtiDirection.SHORT && !continuationShort && !reversalShortSetup) {
-					confirmedRec = CtiDirection.NEUTRAL;
-					entryDecision = new EntryDecision(null, "MACD_CTI_DIR_MISMATCH", "MACD_CTI_DIR_MISMATCH");
-				} else {
-					ReversalConfirmations confirmations = resolveReversalConfirmations(symbolState, entryFilterState,
-							candle.close(), reversalLongSetup, reversalShortSetup);
-					reclaimLong5m = confirmations.reclaimLong5m();
-					reclaimShort5m = confirmations.reclaimShort5m();
-					confirmLong1m = confirmations.confirmLong1m();
-					confirmShort1m = confirmations.confirmShort1m();
-					if (reversalLongSetup && recommendationUsed == CtiDirection.LONG
-							&& !(reclaimLong5m && confirmLong1m)) {
-						confirmedRec = CtiDirection.NEUTRAL;
-						entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
-								"REVERSAL_NEEDS_RECLAIM_CONFIRM");
-					} else if (reversalShortSetup && recommendationUsed == CtiDirection.SHORT
-							&& !(reclaimShort5m && confirmShort1m)) {
-						confirmedRec = CtiDirection.NEUTRAL;
-						entryDecision = new EntryDecision(null, "REVERSAL_NEEDS_RECLAIM_CONFIRM",
-								"REVERSAL_NEEDS_RECLAIM_CONFIRM");
-					} else {
-						entryScore = coreScore + bbShapeScore + confirmBonus;
-						boolean entryScorePass = recommendationUsed == CtiDirection.LONG
-								? entryScore >= ENTRY_SCORE_MIN
-								: recommendationUsed == CtiDirection.SHORT && entryScore <= -ENTRY_SCORE_MIN;
-						if (entryScorePass) {
-							confirmedRec = recommendationUsed;
-							entryDecision = new EntryDecision(
-									confirmedRec,
-									null,
-									allowReason == null ? "ENTRY_SCORE_OK" : allowReason);
-						} else {
-							confirmedRec = CtiDirection.NEUTRAL;
-							entryDecision = new EntryDecision(null, "ENTRY_SCORE_BELOW_MIN",
-									"ENTRY_SCORE_BELOW_MIN");
-						}
-					}
-				}
-			}
+			ReversalConfirmations confirmations = resolveReversalConfirmations(symbolState, entryFilterState,
+					candle.close(), reversalLongSetup, reversalShortSetup);
+			reclaimLong5m = confirmations.reclaimLong5m();
+			reclaimShort5m = confirmations.reclaimShort5m();
+			confirmLong1m = confirmations.confirmLong1m();
+			confirmShort1m = confirmations.confirmShort1m();
 		}
+		entryScore = coreScore + bbShapeScore + confirmBonus;
 		return new EntryScoringResult(entryDecision, confirmedRec, coreScore, entryScore, bbEntryScore, bbShapeScore,
 				bbReason, confirmBonus, volume5m, volumeSma10_5m, reversalLongSetup, reversalShortSetup,
 				reclaimLong5m, reclaimShort5m, confirmLong1m, confirmShort1m);
@@ -3886,6 +3841,21 @@ public class CtiLbStrategy {
 	}
 
 	// BB narrow breakout allow removed (hard veto only).
+
+	private static double resolveVolRatio(double volume5m, double volumeSma10_5m) {
+		if (Double.isFinite(volume5m) && Double.isFinite(volumeSma10_5m) && volumeSma10_5m > 0.0) {
+			return volume5m / volumeSma10_5m;
+		}
+		return Double.NaN;
+	}
+
+	private static boolean isFiniteBetween(double value, double min, double max) {
+		return Double.isFinite(value) && Double.isFinite(min) && Double.isFinite(max) && value >= min && value <= max;
+	}
+
+	private static boolean isFiniteAtLeast(double value, double min) {
+		return Double.isFinite(value) && Double.isFinite(min) && value >= min;
+	}
 
 	private VolRsiConfidence resolveVolRsiConfidence(int dirSign, double rsi9_5m, double volume5m,
 			double volumeSma10_5m) {
@@ -4143,6 +4113,21 @@ public class CtiLbStrategy {
 			double volumeSma10) {
 	}
 
+	private CtiDirection resolveActionConfirmedRec(PositionState current, CtiDirection confirmedRec,
+			EntryDecision entryDecision) {
+		if (confirmedRec == null || confirmedRec == CtiDirection.NEUTRAL) {
+			return CtiDirection.NEUTRAL;
+		}
+		if (confirmedRec == CtiDirection.SHORT) {
+			return CtiDirection.NEUTRAL;
+		}
+		if ((current == PositionState.NONE || current == PositionState.SHORT)
+				&& (entryDecision == null || entryDecision.confirmedRec() != CtiDirection.LONG)) {
+			return CtiDirection.NEUTRAL;
+		}
+		return confirmedRec;
+	}
+
 	private String resolveDecisionValue(PositionState current, double totalScore, boolean emergencyExit,
 			boolean normalExit, EntryDecision entryDecision) {
 		if (current == PositionState.NONE) {
@@ -4153,15 +4138,6 @@ public class CtiLbStrategy {
 				if (entryDecision.confirmedRec() == CtiDirection.LONG) {
 					return "ENTER_LONG";
 				}
-				if (entryDecision.confirmedRec() == CtiDirection.SHORT) {
-					return "ENTER_SHORT";
-				}
-			}
-			if (totalScore >= 3.0) {
-				return "ENTER_LONG";
-			}
-			if (totalScore <= -3.0) {
-				return "ENTER_SHORT";
 			}
 			return "NO_ENTRY";
 		}
