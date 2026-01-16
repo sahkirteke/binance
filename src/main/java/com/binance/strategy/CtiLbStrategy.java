@@ -3153,18 +3153,16 @@ public class CtiLbStrategy {
 		line.put("longSetupMatched", longSetupMatched);
 		line.put("shortSetupMatched", shortSetupMatched);
 		if (longSetupMatched) {
-			line.put("matchedSetup", matchedName);
 			line.put("matchedSetupLong", matchedName);
 			line.putNull("matchedSetupShort");
 		} else if (shortSetupMatched) {
-			line.putNull("matchedSetup");
 			line.putNull("matchedSetupLong");
 			line.put("matchedSetupShort", matchedName);
 		} else {
-			line.putNull("matchedSetup");
 			line.putNull("matchedSetupLong");
 			line.putNull("matchedSetupShort");
 		}
+		line.putNull("matchedSetup");
 		Indicators setupSnapshot = entryDecision == null ? null : entryDecision.setupSnapshot();
 		ObjectNode setupSnapshotNode = objectMapper.createObjectNode();
 		if (setupSnapshot == null) {
@@ -3187,12 +3185,12 @@ public class CtiLbStrategy {
 		line.set("setupSnapshot", setupSnapshotNode);
 		if (longSetupMatched) {
 			line.set("longSetupSnapshot", setupSnapshotNode.deepCopy());
-			line.putNull("shortSetupSnapshot");
-		} else if (shortSetupMatched) {
-			line.set("shortSetupSnapshot", setupSnapshotNode.deepCopy());
-			line.putNull("longSetupSnapshot");
 		} else {
 			line.putNull("longSetupSnapshot");
+		}
+		if (shortSetupMatched) {
+			line.set("shortSetupSnapshot", setupSnapshotNode.deepCopy());
+		} else {
 			line.putNull("shortSetupSnapshot");
 		}
 	}
