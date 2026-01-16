@@ -143,18 +143,3 @@ management:
       exposure:
         include: health,info
 
-logging:
-  level:
-    com.binance: INFO
-    org.ta4j: WARN
-    ml.dmlc.xgboost4j: WARN
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-  file:
-    name: logs/trading-system.log
-    max-size: 100MB
-  logback:
-    rollingpolicy:
-      max-history: 30
-      max-file-size: 100MB
