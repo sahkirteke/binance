@@ -373,7 +373,7 @@ public class CtiLbStrategy {
 		double volRatio = resolveVolRatio(volume5m, volumeSma10_5m);
 		double macdDelta = resolveMacdDelta(signal);
 		Indicators setupIndicators = buildSetupIndicators(entryFilterState, signal, volRatio, macdDelta, close);
-		EntryDecision entryDecision = resolveEntryDecision(recommendationUsed, setupIndicators);
+		EntryDecision entryDecision = resolveEntryDecision(current, recommendationUsed, setupIndicators);
 		if (isBbFalseEntryBlock(entryDecision.blockReason())) {
 //			LOGGER.info(
 //					"EVENT=ENTRY_BLOCK_FALSE_ENTRY symbol={} side=LONG reason={} pB={} rsi={} bbOutside={}",
@@ -1788,8 +1788,12 @@ public class CtiLbStrategy {
 		return new FlipGateResult(false, "QUALITY_BELOW_FAST");
 	}
 
-	private EntryDecision resolveEntryDecision(CtiDirection recommendationUsed, Indicators indicators) {
+	private EntryDecision resolveEntryDecision(PositionState current, CtiDirection recommendationUsed,
+			Indicators indicators) {
 		Indicators snapshot = indicators == null ? EMPTY_SETUP_INDICATORS : indicators;
+		if (current != null && current != PositionState.NONE) {
+			return new EntryDecision(null, "IN_POSITION_NO_ENTRY", null, null, null, snapshot);
+		}
 		if (recommendationUsed == null || recommendationUsed == CtiDirection.NEUTRAL) {
 			return new EntryDecision(null, "REC_NEUTRAL", null, null, null, snapshot);
 		}
@@ -1809,13 +1813,12 @@ public class CtiLbStrategy {
 
 	private Indicators buildSetupIndicators(EntryFilterState entryFilterState, ScoreSignal signal, double volRatio,
 			double macdDelta, double close) {
-		if (entryFilterState == null) {
-			return EMPTY_SETUP_INDICATORS;
-		}
-		double bbWidth = entryFilterState.bbWidth_5m();
-		double bbPercentB = entryFilterState.bbPercentB_5m();
-		double ema20DistPct = resolveEma20DistPct(entryFilterState.ema20_5m(), close);
-		double rsi9 = entryFilterState.rsi9();
+		double bbWidth = entryFilterState == null ? Double.NaN : entryFilterState.bbWidth_5m();
+		double bbPercentB = entryFilterState == null ? Double.NaN : entryFilterState.bbPercentB_5m();
+		double ema20DistPct = entryFilterState == null
+				? Double.NaN
+				: resolveEma20DistPct(entryFilterState.ema20_5m(), close);
+		double rsi9 = entryFilterState == null ? Double.NaN : entryFilterState.rsi9();
 		double adx5m = signal == null || signal.adx5m() == null ? Double.NaN : signal.adx5m();
 		return new Indicators(bbWidth, bbPercentB, volRatio, ema20DistPct, rsi9, adx5m, macdDelta);
 	}
