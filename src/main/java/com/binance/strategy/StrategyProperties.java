@@ -115,7 +115,8 @@ public record StrategyProperties(
 		boolean roiExitEnabled,
 		double roiTakeProfitPct,
 		double roiStopLossPct,
-		LongSetupProperties longSetups) {
+		LongSetupProperties longSetups,
+		ShortSetupProperties shortSetups) {
 
 
 	public List<String> resolvedTradeSymbols() {

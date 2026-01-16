@@ -64,6 +64,13 @@ public class CtiLbStrategy {
 		SETUP_4,
 		SETUP_5
 	}
+	enum ShortEntrySetup {
+		SETUP_S1,
+		SETUP_S2,
+		SETUP_S3,
+		SETUP_S4,
+		SETUP_S5
+	}
 	private static final int EMA_20_PERIOD = 20;
 	private static final int EMA_200_PERIOD = 200;
 	private static final int RSI_9_PERIOD = 9;
@@ -82,8 +89,8 @@ public class CtiLbStrategy {
 	private static final double MIDDLE_BUF_5M = 0.0010;
 	private static final double MIDDLE_BUF_1M = 0.0005;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
-	private static final Indicators EMPTY_LONG_SETUP_INDICATORS =
-			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+	private static final Indicators EMPTY_SETUP_INDICATORS =
+			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
 	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
@@ -144,7 +151,7 @@ public class CtiLbStrategy {
 
 	@PostConstruct
 	void logLongSetupMode() {
-		LOGGER.info("LONG HIGH-WINRATE SETUPS ENABLED (5 SETUPS, OR LOGIC)");
+		LOGGER.info("ENTRY SETUPS ENABLED: LONG(5) + SHORT(5), OR LOGIC");
 	}
 
 	public void setWarmupMode(boolean warmupMode) {
@@ -364,8 +371,9 @@ public class CtiLbStrategy {
 		double volume5m = candle.volume();
 		double volumeSma10_5m = symbolState.volumeSma10_5mValue;
 		double volRatio = resolveVolRatio(volume5m, volumeSma10_5m);
-		Indicators longSetupIndicators = buildLongSetupIndicators(entryFilterState, volRatio, close);
-		EntryDecision entryDecision = resolveEntryDecision(recommendationUsed, longSetupIndicators);
+		double macdDelta = resolveMacdDelta(signal);
+		Indicators setupIndicators = buildSetupIndicators(entryFilterState, signal, volRatio, macdDelta, close);
+		EntryDecision entryDecision = resolveEntryDecision(recommendationUsed, setupIndicators);
 		if (isBbFalseEntryBlock(entryDecision.blockReason())) {
 //			LOGGER.info(
 //					"EVENT=ENTRY_BLOCK_FALSE_ENTRY symbol={} side=LONG reason={} pB={} rsi={} bbOutside={}",
@@ -1781,25 +1789,35 @@ public class CtiLbStrategy {
 	}
 
 	private EntryDecision resolveEntryDecision(CtiDirection recommendationUsed, Indicators indicators) {
-		Indicators snapshot = indicators == null ? EMPTY_LONG_SETUP_INDICATORS : indicators;
-		if (recommendationUsed != CtiDirection.LONG) {
-			return new EntryDecision(null, "ONLY_LONG_ENABLED", null, null, snapshot);
+		Indicators snapshot = indicators == null ? EMPTY_SETUP_INDICATORS : indicators;
+		if (recommendationUsed == null || recommendationUsed == CtiDirection.NEUTRAL) {
+			return new EntryDecision(null, "REC_NEUTRAL", null, null, null, snapshot);
 		}
-		Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
+		if (recommendationUsed == CtiDirection.LONG) {
+			Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
+			if (matched.isPresent()) {
+				return new EntryDecision(CtiDirection.LONG, null, "LONG_SETUP_MATCH", matched.get(), null, snapshot);
+			}
+			return new EntryDecision(null, "NO_LONG_SETUP_MATCHED", null, null, null, snapshot);
+		}
+		Optional<ShortEntrySetup> matched = evaluateShortSetup(snapshot);
 		if (matched.isPresent()) {
-			return new EntryDecision(CtiDirection.LONG, null, "LONG_SETUP_MATCH", matched.get(), snapshot);
+			return new EntryDecision(CtiDirection.SHORT, null, "SHORT_SETUP_MATCH", null, matched.get(), snapshot);
 		}
-		return new EntryDecision(null, "NO_LONG_SETUP_MATCHED", null, null, snapshot);
+		return new EntryDecision(null, "NO_SHORT_SETUP_MATCHED", null, null, null, snapshot);
 	}
 
-	private Indicators buildLongSetupIndicators(EntryFilterState entryFilterState, double volRatio, double close) {
+	private Indicators buildSetupIndicators(EntryFilterState entryFilterState, ScoreSignal signal, double volRatio,
+			double macdDelta, double close) {
 		if (entryFilterState == null) {
-			return EMPTY_LONG_SETUP_INDICATORS;
+			return EMPTY_SETUP_INDICATORS;
 		}
 		double bbWidth = entryFilterState.bbWidth_5m();
+		double bbPercentB = entryFilterState.bbPercentB_5m();
 		double ema20DistPct = resolveEma20DistPct(entryFilterState.ema20_5m(), close);
 		double rsi9 = entryFilterState.rsi9();
-		return new Indicators(bbWidth, volRatio, ema20DistPct, rsi9);
+		double adx5m = signal == null || signal.adx5m() == null ? Double.NaN : signal.adx5m();
+		return new Indicators(bbWidth, bbPercentB, volRatio, ema20DistPct, rsi9, adx5m, macdDelta);
 	}
 
 	private Optional<LongEntrySetup> evaluateLongSetup(Indicators indicators) {
@@ -1824,6 +1842,32 @@ public class CtiLbStrategy {
 		}
 		if (matchesSetup5(indicators)) {
 			return Optional.of(LongEntrySetup.SETUP_5);
+		}
+		return Optional.empty();
+	}
+
+	private Optional<ShortEntrySetup> evaluateShortSetup(Indicators indicators) {
+		if (indicators == null) {
+			return Optional.empty();
+		}
+		ShortSetupProperties shortSetups = strategyProperties.shortSetups();
+		if (shortSetups == null) {
+			return Optional.empty();
+		}
+		if (matchesShortS1(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S1);
+		}
+		if (matchesShortS2(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S2);
+		}
+		if (matchesShortS3(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S3);
+		}
+		if (matchesShortS4(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S4);
+		}
+		if (matchesShortS5(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S5);
 		}
 		return Optional.empty();
 	}
@@ -1861,6 +1905,41 @@ public class CtiLbStrategy {
 		return config != null
 				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
 				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin());
+	}
+
+	private boolean matchesShortS1(Indicators i) {
+		ShortSetupProperties.S1 config = strategyProperties.shortSetups().s1();
+		return config != null
+				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
+				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
+	}
+
+	private boolean matchesShortS2(Indicators i) {
+		ShortSetupProperties.S2 config = strategyProperties.shortSetups().s2();
+		return config != null
+				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
+				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
+	}
+
+	private boolean matchesShortS3(Indicators i) {
+		ShortSetupProperties.S3 config = strategyProperties.shortSetups().s3();
+		return config != null
+				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
+				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax());
+	}
+
+	private boolean matchesShortS4(Indicators i) {
+		ShortSetupProperties.S4 config = strategyProperties.shortSetups().s4();
+		return config != null
+				&& isFiniteBetween(i.bbPercentB_5m(), config.bbPercentBMin(), config.bbPercentBMax())
+				&& isFiniteBetween(i.macdDelta(), config.macdDeltaMin(), config.macdDeltaMax());
+	}
+
+	private boolean matchesShortS5(Indicators i) {
+		ShortSetupProperties.S5 config = strategyProperties.shortSetups().s5();
+		return config != null
+				&& isFiniteBetween(i.adx5m(), config.adxMin(), config.adxMax())
+				&& isFiniteGreaterThan(i.macdDelta(), config.macdDeltaMinExclusive());
 	}
 
 	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection candidateSide, ScoreSignal signal) {
@@ -2014,9 +2093,12 @@ public class CtiLbStrategy {
 
 	record Indicators(
 			double bbWidth_5m,
+			double bbPercentB_5m,
 			double volRatio,
 			double ema20DistPct,
-			double rsi9_5m) {
+			double rsi9_5m,
+			double adx5m,
+			double macdDelta) {
 	}
 
 	record EntryDecision(
@@ -2024,17 +2106,19 @@ public class CtiLbStrategy {
 			String blockReason,
 			String decisionActionReason,
 			LongEntrySetup matchedSetup,
+			ShortEntrySetup matchedSetupShort,
 			Indicators setupSnapshot) {
 		static EntryDecision defaultDecision() {
-			return new EntryDecision(null, null, null, null, null);
+			return new EntryDecision(null, null, null, null, null, null);
 		}
 
 		EntryDecision withBlockReason(String reason) {
-			return new EntryDecision(confirmedRec, reason, decisionActionReason, matchedSetup, setupSnapshot);
+			return new EntryDecision(confirmedRec, reason, decisionActionReason, matchedSetup, matchedSetupShort,
+					setupSnapshot);
 		}
 
 		EntryDecision withDecisionActionReason(String reason) {
-			return new EntryDecision(confirmedRec, blockReason, reason, matchedSetup, setupSnapshot);
+			return new EntryDecision(confirmedRec, blockReason, reason, matchedSetup, matchedSetupShort, setupSnapshot);
 		}
 	}
 
@@ -2994,21 +3078,42 @@ public class CtiLbStrategy {
 			line.putNull("matchedSetup");
 			line.putNull("matchedSetupLong");
 		}
+		boolean shortSetupMatched = entryDecision != null && entryDecision.matchedSetupShort() != null;
+		line.put("shortSetupMatched", shortSetupMatched);
+		if (shortSetupMatched) {
+			line.put("matchedSetupShort", entryDecision.matchedSetupShort().name());
+		} else {
+			line.putNull("matchedSetupShort");
+		}
 		Indicators setupSnapshot = entryDecision == null ? null : entryDecision.setupSnapshot();
 		ObjectNode setupSnapshotNode = objectMapper.createObjectNode();
 		if (setupSnapshot == null) {
 			setupSnapshotNode.putNull("bbWidth_5m");
+			setupSnapshotNode.putNull("bbPercentB_5m");
 			setupSnapshotNode.putNull("volRatio");
 			setupSnapshotNode.putNull("ema20DistPct");
 			setupSnapshotNode.putNull("rsi9_5m");
+			setupSnapshotNode.putNull("adx5m");
+			setupSnapshotNode.putNull("macdDelta");
 		} else {
 			putFinite(setupSnapshotNode, "bbWidth_5m", setupSnapshot.bbWidth_5m());
+			putFinite(setupSnapshotNode, "bbPercentB_5m", setupSnapshot.bbPercentB_5m());
 			putFinite(setupSnapshotNode, "volRatio", setupSnapshot.volRatio());
 			putFinite(setupSnapshotNode, "ema20DistPct", setupSnapshot.ema20DistPct());
 			putFinite(setupSnapshotNode, "rsi9_5m", setupSnapshot.rsi9_5m());
+			putFinite(setupSnapshotNode, "adx5m", setupSnapshot.adx5m());
+			putFinite(setupSnapshotNode, "macdDelta", setupSnapshot.macdDelta());
 		}
 		line.set("setupSnapshot", setupSnapshotNode);
 		line.set("longSetupSnapshot", setupSnapshotNode.deepCopy());
+		ObjectNode shortSnapshotNode = objectMapper.createObjectNode();
+		shortSnapshotNode.set("bbWidth_5m", setupSnapshotNode.get("bbWidth_5m"));
+		shortSnapshotNode.set("bbPercentB_5m", setupSnapshotNode.get("bbPercentB_5m"));
+		shortSnapshotNode.set("rsi9_5m", setupSnapshotNode.get("rsi9_5m"));
+		shortSnapshotNode.set("adx5m", setupSnapshotNode.get("adx5m"));
+		shortSnapshotNode.set("macdDelta", setupSnapshotNode.get("macdDelta"));
+		shortSnapshotNode.set("ema20DistPct", setupSnapshotNode.get("ema20DistPct"));
+		line.set("shortSetupSnapshot", shortSnapshotNode);
 		putFinite(line, "entryScore", entryScore);
 		line.put("ENTRY_SCORE_MIN", ENTRY_SCORE_MIN);
 		putFinite(line, "coreScore", coreScore);
@@ -3860,6 +3965,10 @@ public class CtiLbStrategy {
 		return Double.isFinite(value) && Double.isFinite(min) && value >= min;
 	}
 
+	static boolean isFiniteGreaterThan(double value, double minExclusive) {
+		return Double.isFinite(value) && Double.isFinite(minExclusive) && value > minExclusive;
+	}
+
 	private VolRsiConfidence resolveVolRsiConfidence(int dirSign, double rsi9_5m, double volume5m,
 			double volumeSma10_5m) {
 		double volRatio = (Double.isFinite(volumeSma10_5m) && volumeSma10_5m > 0.0 && Double.isFinite(volume5m))
@@ -4121,12 +4230,17 @@ public class CtiLbStrategy {
 		if (confirmedRec == null || confirmedRec == CtiDirection.NEUTRAL) {
 			return CtiDirection.NEUTRAL;
 		}
-		if (confirmedRec == CtiDirection.SHORT) {
-			return CtiDirection.NEUTRAL;
-		}
 		if ((current == PositionState.NONE || current == PositionState.SHORT)
 				&& (entryDecision == null || entryDecision.confirmedRec() != CtiDirection.LONG)) {
-			return CtiDirection.NEUTRAL;
+			if (confirmedRec == CtiDirection.LONG) {
+				return CtiDirection.NEUTRAL;
+			}
+		}
+		if ((current == PositionState.NONE || current == PositionState.LONG)
+				&& (entryDecision == null || entryDecision.confirmedRec() != CtiDirection.SHORT)) {
+			if (confirmedRec == CtiDirection.SHORT) {
+				return CtiDirection.NEUTRAL;
+			}
 		}
 		return confirmedRec;
 	}
@@ -4140,6 +4254,9 @@ public class CtiLbStrategy {
 				}
 				if (entryDecision.confirmedRec() == CtiDirection.LONG) {
 					return "ENTER_LONG";
+				}
+				if (entryDecision.confirmedRec() == CtiDirection.SHORT) {
+					return "ENTER_SHORT";
 				}
 			}
 			return "NO_ENTRY";

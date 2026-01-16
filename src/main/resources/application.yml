@@ -153,6 +153,31 @@ strategy:
       rsiMin: 35
       rsiMax: 45
       ema20DistMin: 0.004
+  short-setups:
+    s1:
+      bbWidthMin: 0.0130
+      bbWidthMax: 0.0160
+      ema20DistMin: 0.0005
+      ema20DistMax: 0.0010
+    s2:
+      rsiMin: 40
+      rsiMax: 45
+      ema20DistMin: 0.0040
+      ema20DistMax: 0.0060
+    s3:
+      bbWidthMin: 0.0080
+      bbWidthMax: 0.0100
+      rsiMin: 55
+      rsiMax: 60
+    s4:
+      bbPercentBMin: 0.60
+      bbPercentBMax: 0.75
+      macdDeltaMin: 0.00001
+      macdDeltaMax: 0.00005
+    s5:
+      adxMin: 12.5
+      adxMax: 15.0
+      macdDeltaMinExclusive: 0.00005
 
 warmup:
   enabled: true

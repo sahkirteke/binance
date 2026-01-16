@@ -20,4 +20,11 @@ class CtiLbStrategyTest {
 		assertThat(CtiLbStrategy.isFiniteAtLeast(0.0039, 0.004)).isFalse();
 		assertThat(CtiLbStrategy.isFiniteAtLeast(Double.NaN, 0.004)).isFalse();
 	}
+
+	@Test
+	void isFiniteGreaterThanIsExclusive() {
+		assertThat(CtiLbStrategy.isFiniteGreaterThan(0.000051, 0.00005)).isTrue();
+		assertThat(CtiLbStrategy.isFiniteGreaterThan(0.00005, 0.00005)).isFalse();
+		assertThat(CtiLbStrategy.isFiniteGreaterThan(Double.NaN, 0.00005)).isFalse();
+	}
 }
