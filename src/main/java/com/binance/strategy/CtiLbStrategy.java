@@ -2989,8 +2989,10 @@ public class CtiLbStrategy {
 		line.put("longSetupMatched", longSetupMatched);
 		if (longSetupMatched) {
 			line.put("matchedSetup", entryDecision.matchedSetup().name());
+			line.put("matchedSetupLong", entryDecision.matchedSetup().name());
 		} else {
 			line.putNull("matchedSetup");
+			line.putNull("matchedSetupLong");
 		}
 		Indicators setupSnapshot = entryDecision == null ? null : entryDecision.setupSnapshot();
 		ObjectNode setupSnapshotNode = objectMapper.createObjectNode();
@@ -3006,6 +3008,7 @@ public class CtiLbStrategy {
 			putFinite(setupSnapshotNode, "rsi9_5m", setupSnapshot.rsi9_5m());
 		}
 		line.set("setupSnapshot", setupSnapshotNode);
+		line.set("longSetupSnapshot", setupSnapshotNode.deepCopy());
 		putFinite(line, "entryScore", entryScore);
 		line.put("ENTRY_SCORE_MIN", ENTRY_SCORE_MIN);
 		putFinite(line, "coreScore", coreScore);
@@ -3849,11 +3852,11 @@ public class CtiLbStrategy {
 		return Double.NaN;
 	}
 
-	private static boolean isFiniteBetween(double value, double min, double max) {
+	static boolean isFiniteBetween(double value, double min, double max) {
 		return Double.isFinite(value) && Double.isFinite(min) && Double.isFinite(max) && value >= min && value <= max;
 	}
 
-	private static boolean isFiniteAtLeast(double value, double min) {
+	static boolean isFiniteAtLeast(double value, double min) {
 		return Double.isFinite(value) && Double.isFinite(min) && value >= min;
 	}
 
