@@ -1794,21 +1794,20 @@ public class CtiLbStrategy {
 		if (current != null && current != PositionState.NONE) {
 			return new EntryDecision(null, "IN_POSITION_NO_ENTRY", null, null, null, snapshot);
 		}
-		if (recommendationUsed == null || recommendationUsed == CtiDirection.NEUTRAL) {
-			return new EntryDecision(null, "REC_NEUTRAL", null, null, null, snapshot);
-		}
 		if (recommendationUsed == CtiDirection.LONG) {
 			Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
 			if (matched.isPresent()) {
 				return new EntryDecision(CtiDirection.LONG, null, "LONG_SETUP_MATCH", matched.get(), null, snapshot);
 			}
 			return new EntryDecision(null, "NO_LONG_SETUP_MATCHED", null, null, null, snapshot);
+		} else if (recommendationUsed == CtiDirection.SHORT) {
+			Optional<ShortEntrySetup> matched = evaluateShortSetup(snapshot);
+			if (matched.isPresent()) {
+				return new EntryDecision(CtiDirection.SHORT, null, "SHORT_SETUP_MATCH", null, matched.get(), snapshot);
+			}
+			return new EntryDecision(null, "NO_SHORT_SETUP_MATCHED", null, null, null, snapshot);
 		}
-		Optional<ShortEntrySetup> matched = evaluateShortSetup(snapshot);
-		if (matched.isPresent()) {
-			return new EntryDecision(CtiDirection.SHORT, null, "SHORT_SETUP_MATCH", null, matched.get(), snapshot);
-		}
-		return new EntryDecision(null, "NO_SHORT_SETUP_MATCHED", null, null, null, snapshot);
+		return new EntryDecision(null, "REC_NEUTRAL", null, null, null, snapshot);
 	}
 
 	private Indicators buildSetupIndicators(EntryFilterState entryFilterState, ScoreSignal signal, double volRatio,
