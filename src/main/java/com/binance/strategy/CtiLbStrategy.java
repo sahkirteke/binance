@@ -3082,6 +3082,7 @@ public class CtiLbStrategy {
 		line.put("decisionTime", formatTimestamp(signal.closeTime()));
 		line.put("recommendationUsed", recommendationUsed == null ? "NA" : recommendationUsed.name());
 		line.put("action", decisionValue);
+		putFinite(line, "closePrice", closePrice);
 		addSetupMatchFields(objectMapper, line, entryDecision);
 		putFinite(line, "entryScore", entryScore);
 		line.put("ENTRY_SCORE_MIN", ENTRY_SCORE_MIN);
