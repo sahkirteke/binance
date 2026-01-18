@@ -26,12 +26,9 @@ public class MLPredictionService {
     private final TA4JFeatureService featureService;
     private final MLProperties mlProperties;
 
-    // Her sembol için son N bar (interval bazında)
     private final Map<String, Map<String, Deque<Candle>>> recentCandles = new ConcurrentHashMap<>();
+    private final Map<String, PredictionState> lastPredictions = new ConcurrentHashMap<>();
     private static final int MAX_RECENT_CANDLES = 500;
-
-    // Tahmin geçmişi
-    private final Map<String, List<PredictionRecord>> predictionHistory = new ConcurrentHashMap<>();
 
     public MLPredictionService(XGBoostTrainingService xgBoostService,
                                TA4JFeatureService featureService,
@@ -41,9 +38,10 @@ public class MLPredictionService {
         this.mlProperties = mlProperties;
     }
 
-    // Yeni bar geldiğinde çağırılacak
     public void onNewCandle(String symbol, String interval, Candle candle) {
-        if (!mlProperties.enabled()) return;
+        if (!mlProperties.enabled()) {
+            return;
+        }
 
         Map<String, Deque<Candle>> intervalMap = recentCandles
                 .computeIfAbsent(symbol, ignored -> new ConcurrentHashMap<>());
@@ -59,13 +57,35 @@ public class MLPredictionService {
             return;
         }
 
-        try {
-            if (!xgBoostService.isSymbolTrained(symbol)) {
-                LOGGER.debug("Model not trained for {}, skipping prediction", symbol);
-                return;
-            }
+        evaluatePreviousPrediction(symbol, candle);
+        createPrediction(symbol, intervalMap, candle);
+    }
 
-            List<Candle> baseCandles = new ArrayList<>(candles);
+    private void evaluatePreviousPrediction(String symbol, Candle currentCandle) {
+        PredictionState previous = lastPredictions.get(symbol);
+        if (previous == null) {
+            return;
+        }
+
+        boolean wentUp = currentCandle.close() > previous.closePrice();
+        boolean wentDown = currentCandle.close() < previous.closePrice();
+        boolean success = previous.predictedUp() ? wentUp : wentDown;
+
+        if (success) {
+            LOGGER.info("TAHMIN_TUTTU {} {}", symbol, previous.predictedUp() ? "LONG" : "SHORT");
+        } else {
+            LOGGER.info("TAHMIN_TUTMADI {} {}", symbol, previous.predictedUp() ? "LONG" : "SHORT");
+        }
+    }
+
+    private void createPrediction(String symbol, Map<String, Deque<Candle>> intervalMap, Candle candle) {
+        if (!xgBoostService.isSymbolTrained(symbol)) {
+            return;
+        }
+
+        try {
+            List<Candle> baseCandles = new ArrayList<>(intervalMap.getOrDefault(
+                    INTERVAL_15M, new ConcurrentLinkedDeque<>()));
             BarSeries series = featureService.createBarSeries(symbol, baseCandles, Duration.ofMinutes(15));
 
             List<Candle> candles1h = new ArrayList<>(intervalMap
@@ -81,52 +101,15 @@ public class MLPredictionService {
                     new XGBoostTrainingService.TimeframeContext(candles1h, candles4h, candles1d)
             );
 
-            savePrediction(symbol, prediction);
-            logPrediction(symbol, prediction, candle);
+            lastPredictions.put(symbol, new PredictionState(prediction.willRise(), candle.close()));
 
-        } catch (Exception e) {
-            LOGGER.warn("ML prediction failed for {}: {}", symbol, e.getMessage());
+        } catch (Exception ignored) {
+            // intentionally silent to keep logs clean
         }
     }
 
-    // XGBoost tahminini logla (İSTEĞİN GİBİ)
-    private void logPrediction(String symbol, XGBoostModel.PredictionResult prediction,
-                               Candle candle) {
-
-        String direction = prediction.willRise() ? "YUKARI ↑" : "AŞAĞI ↓";
-        String confidence = prediction.confidence();
-        double price = candle.close();
-
-        // Sadece yüksek güvenilirliği olan tahminleri logla
-        if (prediction.probability() > 0.65 || prediction.probability() < 0.35) {
-            LOGGER.info("🔥 COIN {} {} (XGBoost {} güven, Fiyat: ${})",
-                    symbol, direction, confidence, price);
-        }
-    }
-
-    private void savePrediction(String symbol, XGBoostModel.PredictionResult prediction) {
-        predictionHistory.computeIfAbsent(symbol, k -> new ArrayList<>())
-                .add(new PredictionRecord(prediction, System.currentTimeMillis()));
-
-        // Geçmişi sınırla
-        List<PredictionRecord> history = predictionHistory.get(symbol);
-        if (history.size() > 1000) {
-            history.subList(0, history.size() - 1000).clear();
-        }
-    }
-
-    // Son tahmini getir
-    public XGBoostModel.PredictionResult getLastPrediction(String symbol) {
-        List<PredictionRecord> history = predictionHistory.get(symbol);
-        if (history == null || history.isEmpty()) {
-            return new XGBoostModel.PredictionResult(0.5, false, "NO_PREDICTION");
-        }
-        return history.get(history.size() - 1).prediction();
-    }
-
-    // Record sınıfı
-    public record PredictionRecord(
-            XGBoostModel.PredictionResult prediction,
-            long timestamp
+    private record PredictionState(
+            boolean predictedUp,
+            double closePrice
     ) {}
 }

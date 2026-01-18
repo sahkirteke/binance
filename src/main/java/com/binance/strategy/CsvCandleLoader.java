@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -29,12 +30,9 @@ public class CsvCandleLoader {
 
     public List<Candle> loadCandles(String symbol, String interval) {
         MLProperties.CsvConfig csvConfig = mlProperties.csv();
-        String fileName = csvConfig.filePattern()
-                .replace("{symbol}", symbol)
-                .replace("{interval}", interval);
-        Path path = Path.of(csvConfig.dataDir(), fileName);
-        if (!Files.exists(path)) {
-            LOGGER.warn("CSV file not found for {} {} at {}", symbol, interval, path.toAbsolutePath());
+        Path path = resolveCsvPath(csvConfig, symbol, interval);
+        if (path == null || !Files.exists(path)) {
+            LOGGER.warn("CSV file not found for {} {}", symbol, interval);
             return List.of();
         }
 
@@ -68,6 +66,60 @@ public class CsvCandleLoader {
         candles.sort(Comparator.comparingLong(Candle::closeTime));
         LOGGER.info("Loaded {} candles for {} {} from {}", candles.size(), symbol, interval, path);
         return candles;
+    }
+
+    private Path resolveCsvPath(MLProperties.CsvConfig config, String symbol, String interval) {
+        String intervalDir = resolveIntervalDir(interval);
+        Path dir = Path.of(config.dataDir(), intervalDir);
+        String filePattern = config.filePattern()
+                .replace("{symbol}", symbol)
+                .replace("{interval}", interval);
+
+        if (filePattern.contains("*")) {
+            Path resolved = resolveMatchingFile(dir, filePattern);
+            if (resolved != null) {
+                return resolved;
+            }
+            if (filePattern.endsWith(".csv")) {
+                String fallbackPattern = filePattern.substring(0, filePattern.length() - 4) + ".cvs";
+                return resolveMatchingFile(dir, fallbackPattern);
+            }
+            return null;
+        }
+
+        Path resolvedPath = dir.resolve(filePattern);
+        if (Files.exists(resolvedPath)) {
+            return resolvedPath;
+        }
+        if (filePattern.endsWith(".csv")) {
+            Path fallback = dir.resolve(filePattern.substring(0, filePattern.length() - 4) + ".cvs");
+            if (Files.exists(fallback)) {
+                return fallback;
+            }
+        }
+        return resolvedPath;
+    }
+
+    private Path resolveMatchingFile(Path dir, String pattern) {
+        if (!Files.exists(dir)) {
+            return null;
+        }
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, pattern)) {
+            return stream.iterator().hasNext() ? stream.iterator().next() : null;
+        } catch (IOException e) {
+            LOGGER.warn("Failed to scan CSV directory {}: {}", dir, e.getMessage());
+            return null;
+        }
+    }
+
+    private String resolveIntervalDir(String interval) {
+        return switch (interval) {
+            case "1d" -> "oneday";
+            case "4h" -> "fourhour";
+            case "1h" -> "onehour";
+            case "15m" -> "fiften";
+            default -> interval;
+        };
     }
 
     private String[] splitCsvLine(String line, String delimiter) {

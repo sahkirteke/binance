@@ -146,23 +146,23 @@ ml:
   min-test-accuracy: 0.52
   max-parallel-training: 3
   csv:
-    data-dir: data
-    file-pattern: "{symbol}_{interval}.csv"
-    delimiter: ","
+    data-dir: csv
+    file-pattern: "{symbol}_{interval}_*.csv"
+    delimiter: "\t"
     has-header: true
     open-column: open
     high-column: high
     low-column: low
     close-column: close
     volume-column: volume
-    close-time-column: close_time
+    close-time-column: openTime
     close-time-unit: MILLIS
     open-index: 1
     high-index: 2
     low-index: 3
     close-index: 4
     volume-index: 5
-    close-time-index: 6
+    close-time-index: 0
 
 management:
   endpoints:

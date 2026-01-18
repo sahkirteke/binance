@@ -40,23 +40,23 @@ public record MLProperties(
         }
         if (csv == null) {
             csv = new CsvConfig(
-                    "data",
-                    "{symbol}_{interval}.csv",
-                    ",",
+                    "csv",
+                    "{symbol}_{interval}_*.csv",
+                    "\t",
                     true,
                     "open",
                     "high",
                     "low",
                     "close",
                     "volume",
-                    "close_time",
+                    "openTime",
                     "MILLIS",
                     1,
                     2,
                     3,
                     4,
                     5,
-                    6
+                    0
             );
         }
     }
