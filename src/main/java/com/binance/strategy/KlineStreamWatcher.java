@@ -28,11 +28,17 @@ public class KlineStreamWatcher {
 	private static final Logger LOGGER = LoggerFactory.getLogger(KlineStreamWatcher.class);
 	private static final String KLINE_INTERVAL_1M = "1m";
 	private static final String KLINE_INTERVAL_5M = "5m";
+	private static final String KLINE_INTERVAL_15M = "15m";
+	private static final String KLINE_INTERVAL_1H = "1h";
+	private static final String KLINE_INTERVAL_4H = "4h";
+	private static final String KLINE_INTERVAL_1D = "1d";
 
 	private final BinanceProperties binanceProperties;
 	private final StrategyProperties strategyProperties;
 	private final StrategyRouter strategyRouter;
 	private final WarmupProperties warmupProperties;
+	private final MLPredictionService mlPredictionService;
+	private final MLProperties mlProperties;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
@@ -44,11 +50,15 @@ public class KlineStreamWatcher {
 			StrategyProperties strategyProperties,
 			StrategyRouter strategyRouter,
 			WarmupProperties warmupProperties,
+			MLPredictionService mlPredictionService,
+			MLProperties mlProperties,
 			ObjectMapper objectMapper) {
 		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.strategyRouter = strategyRouter;
 		this.warmupProperties = warmupProperties;
+		this.mlPredictionService = mlPredictionService;
+		this.mlProperties = mlProperties;
 		this.objectMapper = objectMapper;
 	}
 
@@ -118,8 +128,10 @@ public class KlineStreamWatcher {
 					kline.closeTime());
 			if (KLINE_INTERVAL_5M.equals(message.interval())) {
 				strategyRouter.onClosedFiveMinuteCandle(event.symbol(), candle);
-			} else {
+			} else if (KLINE_INTERVAL_1M.equals(message.interval())) {
 				strategyRouter.onClosedOneMinuteCandle(event.symbol(), candle);
+			} else {
+				mlPredictionService.onNewCandle(event.symbol(), message.interval(), candle);
 			}
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse kline message", ex);
@@ -128,9 +140,21 @@ public class KlineStreamWatcher {
 
 	private void startCombinedStream() {
 		List<String> streams = strategyProperties.resolvedTradeSymbols().stream()
-				.flatMap(symbol -> java.util.stream.Stream.of(
-						symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1M,
-						symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_5M))
+				.flatMap(symbol -> {
+					java.util.stream.Stream<String> baseStream = java.util.stream.Stream.of(
+							symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1M,
+							symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_5M
+					);
+					if (mlProperties.enabled()) {
+						return java.util.stream.Stream.concat(baseStream, java.util.stream.Stream.of(
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_15M,
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1H,
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_4H,
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1D
+						));
+					}
+					return baseStream;
+				})
 				.toList();
 		String streamPath = streams.stream().collect(Collectors.joining("/"));
 		String streamBaseUrl = "wss://fstream.binance.com/stream?streams=";
@@ -153,6 +177,12 @@ public class KlineStreamWatcher {
 			String lowerSymbol = symbol.toLowerCase();
 			subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1M));
 			subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_5M));
+			if (mlProperties.enabled()) {
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_15M));
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1H));
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_4H));
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1D));
+			}
 		}
 		testnetSubscriptionsRef.set(subscriptions);
 	}

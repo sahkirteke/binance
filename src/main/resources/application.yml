@@ -137,9 +137,35 @@ warmup:
   log-decisions: false
   decision-log-every: 0
 
+ml:
+  enabled: false
+  train-on-startup: false
+  historical-bars: 2000
+  prediction-threshold: 0.55
+  look-ahead-bars: 1
+  min-test-accuracy: 0.52
+  max-parallel-training: 3
+  csv:
+    data-dir: data
+    file-pattern: "{symbol}_{interval}.csv"
+    delimiter: ","
+    has-header: true
+    open-column: open
+    high-column: high
+    low-column: low
+    close-column: close
+    volume-column: volume
+    close-time-column: close_time
+    close-time-unit: MILLIS
+    open-index: 1
+    high-index: 2
+    low-index: 3
+    close-index: 4
+    volume-index: 5
+    close-time-index: 6
+
 management:
   endpoints:
     web:
       exposure:
         include: health,info
-
