@@ -28,11 +28,17 @@ public class KlineStreamWatcher {
 	private static final Logger LOGGER = LoggerFactory.getLogger(KlineStreamWatcher.class);
 	private static final String KLINE_INTERVAL_1M = "1m";
 	private static final String KLINE_INTERVAL_5M = "5m";
+	private static final String KLINE_INTERVAL_15M = "15m";
+	private static final String KLINE_INTERVAL_1H = "1h";
+	private static final String KLINE_INTERVAL_4H = "4h";
+	private static final String KLINE_INTERVAL_1D = "1d";
 
 	private final BinanceProperties binanceProperties;
 	private final StrategyProperties strategyProperties;
 	private final StrategyRouter strategyRouter;
 	private final WarmupProperties warmupProperties;
+	private final MLPredictionService mlPredictionService;
+	private final MLProperties mlProperties;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
@@ -44,21 +50,26 @@ public class KlineStreamWatcher {
 			StrategyProperties strategyProperties,
 			StrategyRouter strategyRouter,
 			WarmupProperties warmupProperties,
+			MLPredictionService mlPredictionService,
+			MLProperties mlProperties,
 			ObjectMapper objectMapper) {
 		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.strategyRouter = strategyRouter;
 		this.warmupProperties = warmupProperties;
+		this.mlPredictionService = mlPredictionService;
+		this.mlProperties = mlProperties;
 		this.objectMapper = objectMapper;
 	}
 
 	@PostConstruct
 	public void start() {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
-			LOGGER.info("Kline stream not started (active={})", strategyProperties.active());
+		if (!isCtiEnabled() && !mlProperties.enabled()) {
+			LOGGER.info("Kline stream not started (strategy={}, mlEnabled={})",
+					strategyProperties.active(), mlProperties.enabled());
 			return;
 		}
-		if (warmupProperties.enabled()) {
+		if (isCtiEnabled() && warmupProperties.enabled()) {
 			LOGGER.info("Kline stream delayed until warmup completes.");
 			return;
 		}
@@ -67,10 +78,10 @@ public class KlineStreamWatcher {
 	}
 
 	public void startStreams() {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
+		if (!isCtiEnabled() && !mlProperties.enabled()) {
 			return;
 		}
-		if (!warmupComplete.get()) {
+		if (isCtiEnabled() && !warmupComplete.get()) {
 			LOGGER.info("Kline stream start skipped (warmup not complete).");
 			return;
 		}
@@ -100,6 +111,10 @@ public class KlineStreamWatcher {
 		}
 	}
 
+	private boolean isCtiEnabled() {
+		return false;
+	}
+
 	private void handleKlineMessage(String payload, String intervalHint) {
 		try {
 			KlineMessage message = parseKlineMessage(payload, intervalHint);
@@ -116,10 +131,12 @@ public class KlineStreamWatcher {
 			}
 			Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.volume(),
 					kline.closeTime());
-			if (KLINE_INTERVAL_5M.equals(message.interval())) {
+			if (isCtiEnabled() && KLINE_INTERVAL_5M.equals(message.interval())) {
 				strategyRouter.onClosedFiveMinuteCandle(event.symbol(), candle);
-			} else {
+			} else if (isCtiEnabled() && KLINE_INTERVAL_1M.equals(message.interval())) {
 				strategyRouter.onClosedOneMinuteCandle(event.symbol(), candle);
+			} else if (mlProperties.enabled()) {
+				mlPredictionService.onNewCandle(event.symbol(), message.interval(), candle);
 			}
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse kline message", ex);
@@ -128,9 +145,24 @@ public class KlineStreamWatcher {
 
 	private void startCombinedStream() {
 		List<String> streams = strategyProperties.resolvedTradeSymbols().stream()
-				.flatMap(symbol -> java.util.stream.Stream.of(
-						symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1M,
-						symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_5M))
+				.flatMap(symbol -> {
+					java.util.stream.Stream<String> stream = java.util.stream.Stream.empty();
+					if (isCtiEnabled()) {
+						stream = java.util.stream.Stream.concat(stream, java.util.stream.Stream.of(
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1M,
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_5M
+						));
+					}
+					if (mlProperties.enabled()) {
+						stream = java.util.stream.Stream.concat(stream, java.util.stream.Stream.of(
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_15M,
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1H,
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_4H,
+								symbol.toLowerCase() + "@kline_" + KLINE_INTERVAL_1D
+						));
+					}
+					return stream;
+				})
 				.toList();
 		String streamPath = streams.stream().collect(Collectors.joining("/"));
 		String streamBaseUrl = "wss://fstream.binance.com/stream?streams=";
@@ -142,8 +174,7 @@ public class KlineStreamWatcher {
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
 				.subscribe();
 		subscriptionRef.set(subscription);
-		LOGGER.info("Kline combined stream started for {} interval {}", streams,
-				List.of(KLINE_INTERVAL_1M, KLINE_INTERVAL_5M));
+		LOGGER.info("Kline combined stream started for {}", streams);
 	}
 
 	private void startTestnetStreams() {
@@ -151,8 +182,16 @@ public class KlineStreamWatcher {
 		List<Disposable> subscriptions = new ArrayList<>();
 		for (String symbol : strategyProperties.resolvedTradeSymbols()) {
 			String lowerSymbol = symbol.toLowerCase();
-			subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1M));
-			subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_5M));
+			if (isCtiEnabled()) {
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1M));
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_5M));
+			}
+			if (mlProperties.enabled()) {
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_15M));
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1H));
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_4H));
+				subscriptions.add(startTestnetStream(baseUrl, lowerSymbol, KLINE_INTERVAL_1D));
+			}
 		}
 		testnetSubscriptionsRef.set(subscriptions);
 	}

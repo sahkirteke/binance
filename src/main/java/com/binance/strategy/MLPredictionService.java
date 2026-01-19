@@ -1,111 +1,135 @@
-//// file: MLPredictionService.java (XGBoost entegre)
-//package com.binance.strategy;
-//
-//import org.slf4j.Logger;
-//import org.slf4j.LoggerFactory;
-//import org.springframework.stereotype.Service;
-//import org.ta4j.core.BarSeries;
-//
-//import java.time.Instant;
-//import java.util.*;
-//import java.util.concurrent.ConcurrentHashMap;
-//
-//@Service
-//public class MLPredictionService {
-//    private static final Logger LOGGER = LoggerFactory.getLogger(MLPredictionService.class);
-//
-//    private final XGBoostTrainingService xgBoostService;
-//    private final TA4JFeatureService featureService;
-//    private final MLProperties mlProperties;
-//
-//    // Her sembol için son N bar
-//    private final Map<String, List<Candle>> recentCandles = new ConcurrentHashMap<>();
-//    private final int MAX_RECENT_CANDLES = 100;
-//
-//    // Tahmin geçmişi
-//    private final Map<String, List<PredictionRecord>> predictionHistory = new ConcurrentHashMap<>();
-//
-//    public MLPredictionService(XGBoostTrainingService xgBoostService,
-//                               TA4JFeatureService featureService,
-//                               MLProperties mlProperties) {
-//        this.xgBoostService = xgBoostService;
-//        this.featureService = featureService;
-//        this.mlProperties = mlProperties;
-//    }
-//
-//    // Yeni bar geldiğinde çağırılacak
-//    public void onNewCandle(String symbol, Candle candle) {
-//        if (!mlProperties.enabled()) return;
-//
-//        try {
-//            // 1. Bar'ı kaydet
-//            recentCandles.computeIfAbsent(symbol, k -> new ArrayList<>())
-//                    .add(candle);
-//
-//            List<Candle> candles = recentCandles.get(symbol);
-//            if (candles.size() > MAX_RECENT_CANDLES) {
-//                candles.remove(0);
-//            }
-//
-//            // 2. Model eğitilmiş mi kontrol et
-//            if (!xgBoostService.isSymbolTrained(symbol)) {
-//                LOGGER.debug("Model not trained for {}, skipping prediction", symbol);
-//                return;
-//            }
-//
-//            // 3. BarSeries oluştur
-//            BarSeries series = featureService.createBarSeries(symbol, candles);
-//
-//            // 4. XGBoost ile tahmin yap
-//            XGBoostModel.PredictionResult prediction = xgBoostService.predict(symbol, series);
-//
-//            // 5. Kaydet ve logla
-//            savePrediction(symbol, prediction);
-//            logPrediction(symbol, prediction, candle);
-//
-//        } catch (Exception e) {
-//            LOGGER.warn("ML prediction failed for {}: {}", symbol, e.getMessage());
-//        }
-//    }
-//
-//    // XGBoost tahminini logla (İSTEĞİN GİBİ)
-//    private void logPrediction(String symbol, XGBoostModel.PredictionResult prediction,
-//                               Candle candle) {
-//
-//        String direction = prediction.willRise() ? "YUKARI ↑" : "AŞAĞI ↓";
-//        String confidence = prediction.confidence();
-//        double price = candle.close();
-//
-//        // Sadece yüksek güvenilirliği olan tahminleri logla
-//        if (prediction.probability() > 0.65 || prediction.probability() < 0.35) {
-//            LOGGER.info("🔥 COIN {} {} (XGBoost {} güven, Fiyat: ${})",
-//                    symbol, direction, confidence, price);
-//        }
-//    }
-//
-//    private void savePrediction(String symbol, XGBoostModel.PredictionResult prediction) {
-//        predictionHistory.computeIfAbsent(symbol, k -> new ArrayList<>())
-//                .add(new PredictionRecord(prediction, System.currentTimeMillis()));
-//
-//        // Geçmişi sınırla
-//        List<PredictionRecord> history = predictionHistory.get(symbol);
-//        if (history.size() > 1000) {
-//            history.subList(0, history.size() - 1000).clear();
-//        }
-//    }
-//
-//    // Son tahmini getir
-//    public XGBoostModel.PredictionResult getLastPrediction(String symbol) {
-//        List<PredictionRecord> history = predictionHistory.get(symbol);
-//        if (history == null || history.isEmpty()) {
-//            return new XGBoostModel.PredictionResult(0.5, false, "NO_PREDICTION");
-//        }
-//        return history.get(history.size() - 1).prediction();
-//    }
-//
-//    // Record sınıfı
-//    public record PredictionRecord(
-//            XGBoostModel.PredictionResult prediction,
-//            long timestamp
-//    ) {}
-//}
+package com.binance.strategy;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.ta4j.core.BarSeries;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
+
+@Service
+public class MLPredictionService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(MLPredictionService.class);
+
+    private static final String INTERVAL_15M = "15m";
+    private static final String INTERVAL_1H = "1h";
+    private static final String INTERVAL_4H = "4h";
+    private static final String INTERVAL_1D = "1d";
+    private static final DateTimeFormatter HOUR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
+
+    private final XGBoostTrainingService xgBoostService;
+    private final TA4JFeatureService featureService;
+    private final MLProperties mlProperties;
+
+    private final Map<String, Map<String, Deque<Candle>>> recentCandles = new ConcurrentHashMap<>();
+    private final Map<String, PredictionState> lastPredictions = new ConcurrentHashMap<>();
+    private static final int MAX_RECENT_CANDLES = 500;
+
+    public MLPredictionService(XGBoostTrainingService xgBoostService,
+                               TA4JFeatureService featureService,
+                               MLProperties mlProperties) {
+        this.xgBoostService = xgBoostService;
+        this.featureService = featureService;
+        this.mlProperties = mlProperties;
+    }
+
+    public void onNewCandle(String symbol, String interval, Candle candle) {
+        if (!mlProperties.enabled()) {
+            return;
+        }
+
+        Map<String, Deque<Candle>> intervalMap = recentCandles
+                .computeIfAbsent(symbol, ignored -> new ConcurrentHashMap<>());
+        Deque<Candle> candles = intervalMap
+                .computeIfAbsent(interval, ignored -> new ConcurrentLinkedDeque<>());
+
+        candles.addLast(candle);
+        while (candles.size() > MAX_RECENT_CANDLES) {
+            candles.pollFirst();
+        }
+
+        if (!INTERVAL_15M.equals(interval)) {
+            return;
+        }
+
+        evaluatePreviousPrediction(symbol, candle);
+        createPrediction(symbol, intervalMap, candle);
+    }
+
+    private void evaluatePreviousPrediction(String symbol, Candle currentCandle) {
+        PredictionState previous = lastPredictions.get(symbol);
+        if (previous == null) {
+            return;
+        }
+
+        boolean wentUp = currentCandle.close() > previous.closePrice();
+        boolean wentDown = currentCandle.close() < previous.closePrice();
+        boolean success = previous.predictedUp() ? wentUp : wentDown;
+
+        if (success) {
+            LOGGER.info("TAHMIN_TUTTU {} {}", symbol, previous.predictedUp() ? "LONG" : "SHORT");
+        } else {
+            LOGGER.info("TAHMIN_TUTMADI {} {}", symbol, previous.predictedUp() ? "LONG" : "SHORT");
+        }
+    }
+
+    private void createPrediction(String symbol, Map<String, Deque<Candle>> intervalMap, Candle candle) {
+        if (!xgBoostService.isSymbolTrained(symbol)) {
+            return;
+        }
+
+        try {
+            List<Candle> baseCandles = new ArrayList<>(intervalMap.getOrDefault(
+                    INTERVAL_15M, new ConcurrentLinkedDeque<>()));
+            BarSeries series = featureService.createBarSeries(symbol, baseCandles, Duration.ofMinutes(15));
+
+            List<Candle> candles1h = new ArrayList<>(intervalMap
+                    .getOrDefault(INTERVAL_1H, new ConcurrentLinkedDeque<>()));
+            List<Candle> candles4h = new ArrayList<>(intervalMap
+                    .getOrDefault(INTERVAL_4H, new ConcurrentLinkedDeque<>()));
+            List<Candle> candles1d = new ArrayList<>(intervalMap
+                    .getOrDefault(INTERVAL_1D, new ConcurrentLinkedDeque<>()));
+
+            XGBoostModel.PredictionResult prediction = xgBoostService.predict(
+                    symbol,
+                    series,
+                    new XGBoostTrainingService.TimeframeContext(candles1h, candles4h, candles1d)
+            );
+
+            logPredictionJson(symbol, prediction, candle);
+            lastPredictions.put(symbol, new PredictionState(prediction.willRise(), candle.close()));
+
+        } catch (Exception ignored) {
+            // intentionally silent to keep logs clean
+        }
+    }
+
+    private void logPredictionJson(String symbol, XGBoostModel.PredictionResult prediction, Candle candle) {
+        double confidencePercent = prediction.probability() * 100.0;
+        double predictedMovePercent = (prediction.probability() - 0.5) * 200.0;
+        String direction = prediction.willRise() ? "YUKARI" : "ASAGI";
+        String humanHour = Instant.ofEpochMilli(candle.closeTime())
+                .atZone(ZoneId.systemDefault())
+                .format(HOUR_FORMATTER);
+
+        String json = String.format(Locale.US,
+                "{\"symbol\":\"%s\",\"direction\":\"%s\",\"confidencePercent\":%.2f,\"time\":\"%s\",\"predictedMovePercent\":%.2f}",
+                symbol, direction, confidencePercent, humanHour, predictedMovePercent);
+        LOGGER.info(json);
+    }
+
+    private record PredictionState(
+            boolean predictedUp,
+            double closePrice
+    ) {}
+}
