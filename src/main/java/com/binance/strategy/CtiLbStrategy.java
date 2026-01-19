@@ -879,6 +879,18 @@ public class CtiLbStrategy {
 			return;
 		}
 
+		if (current != PositionState.NONE) {
+			SignalAction holdAction = SignalAction.HOLD;
+			String inPositionReason = "IN_POSITION_NO_ENTRY";
+			logDecision(symbol, signal, close, holdAction, confirmedRec, recommendationUsed,
+					recommendationRaw, null, entryState, estimatedPnlPct, inPositionReason,
+					inPositionReason, decisionTrailState, decisionContinuationState, flipGateReason,
+					qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+					trendHoldReason, flipQualityScore, decisionTpTrailingState,
+					trendAlignedWithPosition, false);
+			return;
+		}
+
 		CtiDirection actionConfirmedRec = resolveActionConfirmedRec(current, confirmedRec, entryDecision);
 		action = resolveAction(current, actionConfirmedRec);
 		BigDecimal resolvedQty = resolveQuantity(symbol, close);
