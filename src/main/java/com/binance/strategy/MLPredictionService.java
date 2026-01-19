@@ -6,9 +6,13 @@ import org.springframework.stereotype.Service;
 import org.ta4j.core.BarSeries;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -21,6 +25,7 @@ public class MLPredictionService {
     private static final String INTERVAL_1H = "1h";
     private static final String INTERVAL_4H = "4h";
     private static final String INTERVAL_1D = "1d";
+    private static final DateTimeFormatter HOUR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
 
     private final XGBoostTrainingService xgBoostService;
     private final TA4JFeatureService featureService;
@@ -101,11 +106,26 @@ public class MLPredictionService {
                     new XGBoostTrainingService.TimeframeContext(candles1h, candles4h, candles1d)
             );
 
+            logPredictionJson(symbol, prediction, candle);
             lastPredictions.put(symbol, new PredictionState(prediction.willRise(), candle.close()));
 
         } catch (Exception ignored) {
             // intentionally silent to keep logs clean
         }
+    }
+
+    private void logPredictionJson(String symbol, XGBoostModel.PredictionResult prediction, Candle candle) {
+        double confidencePercent = prediction.probability() * 100.0;
+        double predictedMovePercent = (prediction.probability() - 0.5) * 200.0;
+        String direction = prediction.willRise() ? "YUKARI" : "ASAGI";
+        String humanHour = Instant.ofEpochMilli(candle.closeTime())
+                .atZone(ZoneId.systemDefault())
+                .format(HOUR_FORMATTER);
+
+        String json = String.format(Locale.US,
+                "{\"symbol\":\"%s\",\"direction\":\"%s\",\"confidencePercent\":%.2f,\"time\":\"%s\",\"predictedMovePercent\":%.2f}",
+                symbol, direction, confidencePercent, humanHour, predictedMovePercent);
+        LOGGER.info(json);
     }
 
     private record PredictionState(

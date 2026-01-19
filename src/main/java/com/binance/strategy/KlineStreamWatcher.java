@@ -112,7 +112,7 @@ public class KlineStreamWatcher {
 	}
 
 	private boolean isCtiEnabled() {
-		return strategyProperties.active() == StrategyType.CTI_LB && !mlProperties.enabled();
+		return false;
 	}
 
 	private void handleKlineMessage(String payload, String intervalHint) {
