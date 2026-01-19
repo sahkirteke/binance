@@ -46,7 +46,8 @@ class CtiLbStrategyTest {
 				0.0002,
 				58.0,
 				13.0,
-				0.00002);
+				0.00002,
+				null);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
@@ -63,7 +64,8 @@ class CtiLbStrategyTest {
 				0.0008,
 				40.0,
 				14.0,
-				0.00001);
+				0.00001,
+				null);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.LONG,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
@@ -81,7 +83,8 @@ class CtiLbStrategyTest {
 				0.0007,
 				42.0,
 				13.2,
-				0.00004);
+				0.00004,
+				null);
 		CtiLbStrategy.EntryDecision longDecision = CtiLbStrategy.EntryDecision
 				.longMatch(CtiLbStrategy.LongEntrySetup.SETUP_1, indicators);
 		CtiLbStrategy.addSetupMatchFields(mapper, line, longDecision);
@@ -130,7 +133,8 @@ class CtiLbStrategyTest {
 				new ShortSetupProperties.S2(40, 45, 0.0040, 0.0060),
 				new ShortSetupProperties.S3(0.0080, 0.0100, 55, 60),
 				new ShortSetupProperties.S4(0.60, 0.75, 0.00001, 0.00005),
-				new ShortSetupProperties.S5(12.5, 15.0, 0.00005));
+				new ShortSetupProperties.S5(12.5, 15.0, 0.00005),
+				new ShortSetupProperties.S6(2.2, 0.020, 0.010, 25));
 		return new StrategyProperties(
 				StrategyType.CTI_LB,
 				"REF",
@@ -234,6 +238,22 @@ class CtiLbStrategyTest {
 				false,
 				20.0,
 				20.0,
+				true,
+				0.010,
+				true,
+				45.0,
+				60.0,
+				0.80,
+				false,
+				true,
+				true,
+				true,
+				2.2,
+				0.020,
+				0.010,
+				25.0,
+				true,
+				1,
 				longSetups,
 				shortSetups);
 	}

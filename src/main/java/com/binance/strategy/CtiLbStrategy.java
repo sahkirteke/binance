@@ -69,7 +69,8 @@ public class CtiLbStrategy {
 		SETUP_S2,
 		SETUP_S3,
 		SETUP_S4,
-		SETUP_S5
+		SETUP_S5,
+		SETUP_S6
 	}
 	private static final int EMA_20_PERIOD = 20;
 	private static final int EMA_200_PERIOD = 200;
@@ -90,7 +91,7 @@ public class CtiLbStrategy {
 	private static final double MIDDLE_BUF_1M = 0.0005;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
 	private static final Indicators EMPTY_SETUP_INDICATORS =
-			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, null);
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
 	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
@@ -122,6 +123,7 @@ public class CtiLbStrategy {
 	private final Map<String, Boolean> stateDesyncBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> hedgeModeBySymbol = new ConcurrentHashMap<>();
 	private final Map<String, Boolean> trailingArmedBySymbol = new ConcurrentHashMap<>();
+	private final Map<String, Integer> closeInFlightBars = new ConcurrentHashMap<>();
 	private final Map<String, LongAdder> warmupDecisionCounters = new ConcurrentHashMap<>();
 	private final Map<String, SymbolState> symbolStates = new ConcurrentHashMap<>();
 	private final Map<String, Long> lastOppositeExitAtMs = new ConcurrentHashMap<>();
@@ -178,6 +180,53 @@ public class CtiLbStrategy {
 
 	private void clearTrailingArmed(String symbol) {
 		setTrailingArmed(symbol, false);
+	}
+
+	private void tickCloseInFlight(String symbol, PositionState current) {
+		if (symbol == null) {
+			return;
+		}
+		if (current == null || current == PositionState.NONE) {
+			closeInFlightBars.remove(symbol);
+			return;
+		}
+		Integer remaining = closeInFlightBars.get(symbol);
+		if (remaining == null) {
+			return;
+		}
+		int next = remaining - 1;
+		if (next <= 0) {
+			closeInFlightBars.remove(symbol);
+		} else {
+			closeInFlightBars.put(symbol, next);
+		}
+	}
+
+	private boolean isCloseInFlight(String symbol) {
+		Integer remaining = closeInFlightBars.get(symbol);
+		return remaining != null && remaining > 0;
+	}
+
+	private void markCloseInFlight(String symbol) {
+		if (symbol == null) {
+			return;
+		}
+		int bars = Math.max(1, strategyProperties.closeInFlightCooldownBars());
+		closeInFlightBars.put(symbol, bars);
+	}
+
+	private String resolveExitReasonForDecision(String decisionValue, boolean emergencyExit,
+			boolean normalExitConfirmed) {
+		if (decisionValue == null || "HOLD".equals(decisionValue) || "NO_ENTRY".equals(decisionValue)) {
+			return "NONE";
+		}
+		if (decisionValue.contains("EMERGENCY") || emergencyExit) {
+			return "EMERGENCY";
+		}
+		if (decisionValue.startsWith("CLOSE") || normalExitConfirmed) {
+			return "REVERSAL";
+		}
+		return "NONE";
 	}
 
 	private boolean isTrailingExitOnly(String symbol, PositionState current) {
@@ -345,6 +394,8 @@ public class CtiLbStrategy {
 			return;
 		}
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
+		tickCloseInFlight(symbol, current);
+		boolean closingInFlight = isCloseInFlight(symbol);
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
 		double close = candle.close();
 		double prevClose = symbolState.prevClose1m;
@@ -537,6 +588,8 @@ public class CtiLbStrategy {
 				barsInPosition,
 				strategyProperties);
 		String trendHoldReason = null;
+		String exitReasonForLog = resolveExitReasonForDecision(decisionValue, emergencyExitTriggered,
+				normalExitConfirmed);
 		recordDecisionSnapshot(
 				symbol,
 				signal,
@@ -569,7 +622,10 @@ public class CtiLbStrategy {
 				trendHoldActive,
 				scoreExitConfirmed,
 				emergencyExitTriggered,
-				normalExitConfirmed);
+				normalExitConfirmed,
+				current,
+				closingInFlight,
+				exitReasonForLog);
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
 				entryState == null ? null : entryState.entryPrice(),
@@ -599,6 +655,12 @@ public class CtiLbStrategy {
 		}
 		if (trailingExitOnly) {
 			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "TRAILING_EXIT_ONLY", exitDecision.pnlBps());
+		}
+		if (strategyProperties.enableReversalExitOnlyWhenProfitable()
+				&& "SCORE_REVERSAL_CONFIRMED".equals(exitDecision.reason())
+				&& exitDecision.pnlBps() <= 0.0) {
+			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "REVERSAL_EXIT_UNPROFITABLE",
+					exitDecision.pnlBps());
 		}
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
 		double pnlBps = exitDecision.pnlBps();
@@ -630,6 +692,17 @@ public class CtiLbStrategy {
 			SignalAction exitAction = SignalAction.HOLD;
 			String decisionActionReason = exitDecision.reason();
 			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
+			if (closingInFlight) {
+				decisionActionReason = "CLOSE_IN_FLIGHT";
+				decisionBlockReason = "CLOSE_IN_FLIGHT";
+				logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
+						recommendationRaw, null, entryState, estimatedPnlPct, decisionActionReason,
+						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
+						qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+						trendHoldReason, flipQualityScore, decisionTpTrailingState,
+						trendAlignedWithPosition, false);
+				return;
+			}
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
 			boolean stopLossExit = isStopLossExit(decisionActionReason);
 			boolean hardExitReason = isHardExitReason(decisionActionReason);
@@ -778,6 +851,7 @@ public class CtiLbStrategy {
 			final String decisionActionReasonFinal = decisionActionReason;
 			final BigDecimal exitQtyFinal = exitQty;
 			final PositionState currentFinal = current;
+			markCloseInFlight(symbol);
 			orderClient.fetchHedgeModeEnabled()
 					.flatMap(hedgeMode -> {
 						String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT");
@@ -1795,12 +1869,32 @@ public class CtiLbStrategy {
 			return EntryDecision.block("IN_POSITION_NO_ENTRY", snapshot);
 		}
 		if (recommendationUsed == CtiDirection.LONG) {
+			if (strategyProperties.enableLongQualityGate()) {
+				if (!isFiniteAtLeast(snapshot.bbWidth_5m(), strategyProperties.longMinBbWidth())) {
+					return EntryDecision.block("LONG_QUALITY_BBWIDTH_FAIL", snapshot);
+				}
+			}
+			if (strategyProperties.enableLongRsiQuality()) {
+				if (!isFiniteBetween(snapshot.rsi9_5m(), strategyProperties.longRsiMin(), strategyProperties.longRsiMax())) {
+					return EntryDecision.block("LONG_QUALITY_RSI_FAIL", snapshot);
+				}
+			}
+			if (Double.isFinite(snapshot.bbPercentB_5m())
+					&& snapshot.bbPercentB_5m() >= strategyProperties.longBbChasePbMin()) {
+				return EntryDecision.block("LONG_BB_CHASE_VETO", snapshot);
+			}
 			Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
 			if (matched.isPresent()) {
 				return EntryDecision.longMatch(matched.get(), snapshot);
 			}
 			return EntryDecision.block("NO_LONG_SETUP_MATCHED", snapshot);
 		} else if (recommendationUsed == CtiDirection.SHORT) {
+			if (strategyProperties.enableShortMacdDeltaNegativeGate()) {
+				boolean macdOk = snapshot.macdDelta() < 0.0 || snapshot.macdHistColor() == MacdHistColor.RED;
+				if (!macdOk) {
+					return EntryDecision.block("SHORT_MACD_NEGATIVE_REQUIRED", snapshot);
+				}
+			}
 			Optional<ShortEntrySetup> matched = evaluateShortSetup(snapshot);
 			if (matched.isPresent()) {
 				return EntryDecision.shortMatch(matched.get(), snapshot);
@@ -1819,7 +1913,8 @@ public class CtiLbStrategy {
 				: resolveEma20DistPct(entryFilterState.ema20_5m(), close);
 		double rsi9 = entryFilterState == null ? Double.NaN : entryFilterState.rsi9();
 		double adx5m = signal == null || signal.adx5m() == null ? Double.NaN : signal.adx5m();
-		return new Indicators(bbWidth, bbPercentB, volRatio, ema20DistPct, rsi9, adx5m, macdDelta);
+		MacdHistColor macdHistColor = signal == null ? null : signal.macdHistColor();
+		return new Indicators(bbWidth, bbPercentB, volRatio, ema20DistPct, rsi9, adx5m, macdDelta, macdHistColor);
 	}
 
 	private Optional<LongEntrySetup> evaluateLongSetup(Indicators indicators) {
@@ -1839,7 +1934,7 @@ public class CtiLbStrategy {
 		if (matchesSetup3(indicators)) {
 			return Optional.of(LongEntrySetup.SETUP_3);
 		}
-		if (matchesSetup4(indicators)) {
+		if (strategyProperties.enableLongSetup4() && matchesSetup4(indicators)) {
 			return Optional.of(LongEntrySetup.SETUP_4);
 		}
 		if (matchesSetup5(indicators)) {
@@ -1856,6 +1951,15 @@ public class CtiLbStrategy {
 		if (shortSetups == null) {
 			return Optional.empty();
 		}
+		if (strategyProperties.enableShortS2Only()) {
+			if (matchesShortS2(indicators)) {
+				return Optional.of(ShortEntrySetup.SETUP_S2);
+			}
+			if (strategyProperties.enableShortS6() && matchesShortS6(indicators)) {
+				return Optional.of(ShortEntrySetup.SETUP_S6);
+			}
+			return Optional.empty();
+		}
 		if (matchesShortS1(indicators)) {
 			return Optional.of(ShortEntrySetup.SETUP_S1);
 		}
@@ -1870,6 +1974,9 @@ public class CtiLbStrategy {
 		}
 		if (matchesShortS5(indicators)) {
 			return Optional.of(ShortEntrySetup.SETUP_S5);
+		}
+		if (strategyProperties.enableShortS6() && matchesShortS6(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S6);
 		}
 		return Optional.empty();
 	}
@@ -1942,6 +2049,19 @@ public class CtiLbStrategy {
 		return config != null
 				&& isFiniteBetween(i.adx5m(), config.adxMin(), config.adxMax())
 				&& isFiniteGreaterThan(i.macdDelta(), config.macdDeltaMinExclusive());
+	}
+
+	private boolean matchesShortS6(Indicators i) {
+		ShortSetupProperties.S6 config = strategyProperties.shortSetups().s6();
+		if (config == null) {
+			return false;
+		}
+		boolean macdOk = i.macdDelta() < 0.0 || i.macdHistColor() == MacdHistColor.RED;
+		return macdOk
+				&& isFiniteAtLeast(i.volRatio(), config.volRatioMin())
+				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
+				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin())
+				&& isFiniteAtLeast(i.adx5m(), config.adxMin());
 	}
 
 	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection candidateSide, ScoreSignal signal) {
@@ -2100,7 +2220,8 @@ public class CtiLbStrategy {
 			double ema20DistPct,
 			double rsi9_5m,
 			double adx5m,
-			double macdDelta) {
+			double macdDelta,
+			MacdHistColor macdHistColor) {
 	}
 
 	record EntryDecision(
@@ -3052,18 +3173,20 @@ public class CtiLbStrategy {
 		}
 	}
 
-		private void recordDecisionSnapshot(String symbol, ScoreSignal signal, Candle candle, double coreScore,
-				double bbShapeScore, double confirmBonus, double entryScore, String bbReason,
-				boolean reversalLongSetup, boolean reversalShortSetup, boolean reclaimLong5m, boolean reclaimShort5m,
-				boolean confirmLong1m, boolean confirmShort1m, VolRsiConfidence confidence, double rsiVolScore,
-				double rsiVolExitPressure, double adxScore, double scoreAfterSafety, double totalScore,
-				double totalScoreForExit, PositionState positionBefore, String decisionValue, EntryDecision entryDecision,
-				EntryFilterState entryFilterState, int fiveMinDir, CtiDirection confirmedRec,
-				CtiDirection recommendationUsed, boolean trendHoldActive, boolean scoreExitConfirmed,
-				boolean emergencyExitTriggered, boolean normalExitConfirmed) {
+	private void recordDecisionSnapshot(String symbol, ScoreSignal signal, Candle candle, double coreScore,
+			double bbShapeScore, double confirmBonus, double entryScore, String bbReason,
+			boolean reversalLongSetup, boolean reversalShortSetup, boolean reclaimLong5m, boolean reclaimShort5m,
+			boolean confirmLong1m, boolean confirmShort1m, VolRsiConfidence confidence, double rsiVolScore,
+			double rsiVolExitPressure, double adxScore, double scoreAfterSafety, double totalScore,
+			double totalScoreForExit, PositionState positionBefore, String decisionValue, EntryDecision entryDecision,
+			EntryFilterState entryFilterState, int fiveMinDir, CtiDirection confirmedRec,
+			CtiDirection recommendationUsed, boolean trendHoldActive, boolean scoreExitConfirmed,
+			boolean emergencyExitTriggered, boolean normalExitConfirmed, PositionState positionStateAtDecision,
+			boolean closingInFlight, String exitReason) {
 		try {
 			appendDecisionJsonLine(symbol, signal, candle.close(), entryDecision, recommendationUsed, decisionValue,
-					coreScore, bbShapeScore, confirmBonus, entryScore, entryFilterState, bbReason, confidence);
+					coreScore, bbShapeScore, confirmBonus, entryScore, entryFilterState, bbReason, confidence,
+					positionStateAtDecision, closingInFlight, exitReason);
 		} catch (IOException error) {
 			LOGGER.warn("EVENT=DECISION_SNAPSHOT_FAILED symbol={} error={}", symbol, error.getMessage());
 		}
@@ -3072,7 +3195,8 @@ public class CtiLbStrategy {
 	private void appendDecisionJsonLine(String symbol, ScoreSignal signal, double closePrice,
 			EntryDecision entryDecision, CtiDirection recommendationUsed, String decisionValue, double coreScore,
 			double bbShapeScore, double confirmBonus, double entryScore, EntryFilterState entryFilterState,
-			String bbReason, VolRsiConfidence confidence) throws IOException {
+			String bbReason, VolRsiConfidence confidence, PositionState positionStateAtDecision,
+			boolean closingInFlight, String exitReason) throws IOException {
 		Path baseDir = Paths.get("signals", "decisions");
 		Files.createDirectories(baseDir);
 		String fileName = symbol + "-" + formatDateYmd(signal.closeTime()) + ".jsonl";
@@ -3084,6 +3208,9 @@ public class CtiLbStrategy {
 		line.put("action", decisionValue);
 		putFinite(line, "closePrice", closePrice);
 		addSetupMatchFields(objectMapper, line, entryDecision);
+		line.put("positionStateAtDecision", positionStateAtDecision == null ? "NA" : positionStateAtDecision.name());
+		line.put("closingInFlight", closingInFlight);
+		line.put("exitReason", exitReason == null ? "NONE" : exitReason);
 		putFinite(line, "entryScore", entryScore);
 		line.put("ENTRY_SCORE_MIN", ENTRY_SCORE_MIN);
 		putFinite(line, "coreScore", coreScore);
@@ -3666,6 +3793,7 @@ public class CtiLbStrategy {
 		if (updated == PositionState.NONE) {
 			entryStates.remove(symbol);
 			clearTrailingArmed(symbol);
+			closeInFlightBars.remove(symbol);
 		} else {
 			BigDecimal entryPrice = position.entryPrice();
 			EntryState existing = entryStates.get(symbol);

@@ -128,6 +128,22 @@ strategy:
   tp-trailing-enabled: true
   tp-start-pct: 0.25
   tp-trail-pct: 0.15
+  enable-long-quality-gate: true
+  long-min-bb-width: 0.010
+  enable-long-rsi-quality: true
+  long-rsi-min: 45
+  long-rsi-max: 60
+  long-bb-chase-pb-min: 0.80
+  enable-long-setup4: false
+  enable-short-macd-delta-negative-gate: true
+  enable-short-s2-only: true
+  enable-short-s6: true
+  short-s6-vol-ratio-min: 2.2
+  short-s6-bb-width-min: 0.020
+  short-s6-ema20-dist-min: 0.010
+  short-s6-adx-min: 25
+  enable-reversal-exit-only-when-profitable: true
+  close-in-flight-cooldown-bars: 1
   long-setups:
     setup1:
       bbWidthMin: 0.0114
@@ -178,6 +194,11 @@ strategy:
       adxMin: 12.5
       adxMax: 15.0
       macdDeltaMinExclusive: 0.00005
+    s6:
+      volRatioMin: 2.2
+      bbWidthMin: 0.020
+      ema20DistMin: 0.010
+      adxMin: 25
 
 warmup:
   enabled: true
