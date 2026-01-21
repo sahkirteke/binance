@@ -6,7 +6,8 @@ public record ShortSetupProperties(
 		S3 s3,
 		S4 s4,
 		S5 s5,
-		S6 s6) {
+		S6 s6,
+		S7 s7) {
 
 	public record S1(
 			double bbWidthMin,
@@ -47,5 +48,13 @@ public record ShortSetupProperties(
 			double bbWidthMin,
 			double ema20DistMin,
 			double adxMin) {
+	}
+
+	public record S7(
+			double volRatioMin,
+			double bbWidthMin,
+			double ema20DistMin,
+			double adxMin,
+			double bbPercentBMax) {
 	}
 }

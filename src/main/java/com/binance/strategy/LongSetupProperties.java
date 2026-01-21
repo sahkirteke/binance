@@ -5,7 +5,8 @@ public record LongSetupProperties(
 		Setup2 setup2,
 		Setup3 setup3,
 		Setup4 setup4,
-		Setup5 setup5) {
+		Setup5 setup5,
+		Setup7 setup7) {
 
 	public record Setup1(
 			double bbWidthMin,
@@ -39,5 +40,14 @@ public record LongSetupProperties(
 			double rsiMin,
 			double rsiMax,
 			double ema20DistMin) {
+	}
+
+	public record Setup7(
+			double macdDeltaMinExclusive,
+			double macdDeltaMaxInclusive,
+			double bbPercentBMax,
+			double bbWidthMin,
+			double volRatioMax,
+			double adxMin) {
 	}
 }

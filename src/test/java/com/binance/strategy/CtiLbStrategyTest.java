@@ -37,7 +37,7 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
-	void resolveEntryDecisionDoesNotAllowShortMatchInLongBranch() throws Exception {
+	void resolveEntryDecisionBlocksWhenLongGlobalGateFails() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
 				0.0090,
@@ -51,7 +51,25 @@ class CtiLbStrategyTest {
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("NO_LONG_SETUP_MATCHED");
+		assertThat(decision.blockReason()).isEqualTo("LONG_GLOBAL_GATE_FAIL");
+	}
+
+	@Test
+	void resolveEntryDecisionBlocksWhenLongSetup7Fails() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.0114,
+				0.50,
+				0.9,
+				0.0008,
+				50.0,
+				10.0,
+				0.02,
+				MacdHistColor.AQUA);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.LONG, indicators);
+		assertThat(decision.confirmedRec()).isNull();
+		assertThat(decision.blockReason()).isEqualTo("LONG_SETUP7_GATE_FAIL");
 	}
 
 	@Test
@@ -94,11 +112,11 @@ class CtiLbStrategyTest {
 		assertThat(line.path("matchedSetupShort").isNull()).isTrue();
 		ObjectNode lineShort = mapper.createObjectNode();
 		CtiLbStrategy.EntryDecision shortDecision = CtiLbStrategy.EntryDecision
-				.shortMatch(CtiLbStrategy.ShortEntrySetup.SETUP_S4, indicators);
+				.shortMatch(CtiLbStrategy.ShortEntrySetup.SETUP_S6, indicators);
 		CtiLbStrategy.addSetupMatchFields(mapper, lineShort, shortDecision);
 		assertThat(lineShort.path("longSetupMatched").asBoolean()).isFalse();
 		assertThat(lineShort.path("shortSetupMatched").asBoolean()).isTrue();
-		assertThat(lineShort.path("matchedSetupShort").asText()).isEqualTo("SETUP_S4");
+		assertThat(lineShort.path("matchedSetupShort").asText()).isEqualTo("SETUP_S6");
 		assertThat(lineShort.path("matchedSetupLong").isNull()).isTrue();
 	}
 
@@ -127,14 +145,16 @@ class CtiLbStrategyTest {
 				new LongSetupProperties.Setup2(0.0100, 0.0114, 1.0, 1.2),
 				new LongSetupProperties.Setup3(0.0100, 0.0114, 0.0005, 0.0010),
 				new LongSetupProperties.Setup4(0.0080, 0.0100, 0.0010, 0.0015),
-				new LongSetupProperties.Setup5(35, 45, 0.004));
+				new LongSetupProperties.Setup5(35, 45, 0.004),
+				new LongSetupProperties.Setup7(0.0, 0.05, 0.61, 0.0108, 1.03, 21.5));
 		ShortSetupProperties shortSetups = new ShortSetupProperties(
 				new ShortSetupProperties.S1(0.0130, 0.0160, 0.0005, 0.0010),
 				new ShortSetupProperties.S2(40, 45, 0.0040, 0.0060),
 				new ShortSetupProperties.S3(0.0080, 0.0100, 55, 60),
 				new ShortSetupProperties.S4(0.60, 0.75, 0.00001, 0.00005),
 				new ShortSetupProperties.S5(12.5, 15.0, 0.00005),
-				new ShortSetupProperties.S6(2.2, 0.020, 0.010, 25));
+				new ShortSetupProperties.S6(2.2, 0.020, 0.010, 25),
+				new ShortSetupProperties.S7(1.0, 0.014, 0.004, 15.0, 0.20));
 		return new StrategyProperties(
 				StrategyType.CTI_LB,
 				"REF",
@@ -240,13 +260,19 @@ class CtiLbStrategyTest {
 				20.0,
 				true,
 				0.010,
+				0.62,
 				true,
 				45.0,
 				60.0,
 				0.80,
 				false,
 				true,
+				2,
 				true,
+				true,
+				1.0,
+				false,
+				0.20,
 				true,
 				2.2,
 				0.020,

@@ -70,7 +70,8 @@ public class CtiLbStrategy {
 		SETUP_S3,
 		SETUP_S4,
 		SETUP_S5,
-		SETUP_S6
+		SETUP_S6,
+		SETUP_S7
 	}
 	private static final int EMA_20_PERIOD = 20;
 	private static final int EMA_200_PERIOD = 200;
@@ -661,6 +662,14 @@ public class CtiLbStrategy {
 				&& exitDecision.pnlBps() <= 0.0) {
 			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "REVERSAL_EXIT_UNPROFITABLE",
 					exitDecision.pnlBps());
+		}
+		if (!exitDecision.exit()
+				&& strategyProperties.enableLongTimeStopExit()
+				&& current == PositionState.LONG
+				&& entryState != null
+				&& barsInPosition >= strategyProperties.longTimeStopBars()
+				&& exitDecision.pnlBps() <= 0.0) {
+			exitDecision = new CtiLbDecisionEngine.ExitDecision(true, "EXIT_TIME_STOP_LONG", exitDecision.pnlBps());
 		}
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
 		double pnlBps = exitDecision.pnlBps();
@@ -1895,8 +1904,14 @@ public class CtiLbStrategy {
 					&& snapshot.bbPercentB_5m() >= strategyProperties.longBbChasePbMin()) {
 				return EntryDecision.block("LONG_BB_CHASE_VETO", snapshot);
 			}
+			if (!passesLongGlobalGate(snapshot)) {
+				return EntryDecision.block("LONG_GLOBAL_GATE_FAIL", snapshot);
+			}
 			Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
 			if (matched.isPresent()) {
+				if (!matchesLongSetup7(snapshot)) {
+					return EntryDecision.block("LONG_SETUP7_GATE_FAIL", snapshot);
+				}
 				return EntryDecision.longMatch(matched.get(), snapshot);
 			}
 			return EntryDecision.block("NO_LONG_SETUP_MATCHED", snapshot);
@@ -1907,13 +1922,43 @@ public class CtiLbStrategy {
 					return EntryDecision.block("SHORT_MACD_NEGATIVE_REQUIRED", snapshot);
 				}
 			}
-			Optional<ShortEntrySetup> matched = evaluateShortSetup(snapshot);
-			if (matched.isPresent()) {
-				return EntryDecision.shortMatch(matched.get(), snapshot);
-			}
-			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
+			return evaluateShortEntryDecision(snapshot);
 		}
 		return EntryDecision.block("REC_NEUTRAL", snapshot);
+	}
+
+	private boolean passesLongGlobalGate(Indicators snapshot) {
+		if (!isFiniteAtLeast(snapshot.bbWidth_5m(), strategyProperties.longMinBbWidth())) {
+			return false;
+		}
+		if (!isFiniteAtMost(snapshot.bbPercentB_5m(), strategyProperties.longMaxBbPercentB())) {
+			return false;
+		}
+		return snapshot.macdHistColor() == MacdHistColor.AQUA;
+	}
+
+	private EntryDecision evaluateShortEntryDecision(Indicators snapshot) {
+		if (snapshot == null) {
+			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", EMPTY_SETUP_INDICATORS);
+		}
+		ShortSetupProperties shortSetups = strategyProperties.shortSetups();
+		if (shortSetups == null) {
+			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
+		}
+		if (matchesShortS7(snapshot)) {
+			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S7, snapshot)
+					.withDecisionActionReason("SHORT_SETUP7_MATCH");
+		}
+		if (strategyProperties.enableShortS6() && matchesShortS6(snapshot)) {
+			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S6, snapshot);
+		}
+		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(snapshot)) {
+			if (!passesShortS2Filter(snapshot)) {
+				return EntryDecision.block("SHORT_S2_FILTER_FAIL", snapshot);
+			}
+			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S2, snapshot);
+		}
+		return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
 	}
 
 	private Indicators buildSetupIndicators(EntryFilterState entryFilterState, ScoreSignal signal, double volRatio,
@@ -1963,32 +2008,14 @@ public class CtiLbStrategy {
 		if (shortSetups == null) {
 			return Optional.empty();
 		}
-		if (strategyProperties.enableShortS2Only()) {
-			if (matchesShortS2(indicators)) {
-				return Optional.of(ShortEntrySetup.SETUP_S2);
-			}
-			if (strategyProperties.enableShortS6() && matchesShortS6(indicators)) {
-				return Optional.of(ShortEntrySetup.SETUP_S6);
-			}
-			return Optional.empty();
-		}
-		if (matchesShortS1(indicators)) {
-			return Optional.of(ShortEntrySetup.SETUP_S1);
-		}
-		if (matchesShortS2(indicators)) {
-			return Optional.of(ShortEntrySetup.SETUP_S2);
-		}
-		if (matchesShortS3(indicators)) {
-			return Optional.of(ShortEntrySetup.SETUP_S3);
-		}
-		if (matchesShortS4(indicators)) {
-			return Optional.of(ShortEntrySetup.SETUP_S4);
-		}
-		if (matchesShortS5(indicators)) {
-			return Optional.of(ShortEntrySetup.SETUP_S5);
+		if (matchesShortS7(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S7);
 		}
 		if (strategyProperties.enableShortS6() && matchesShortS6(indicators)) {
 			return Optional.of(ShortEntrySetup.SETUP_S6);
+		}
+		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(indicators) && passesShortS2Filter(indicators)) {
+			return Optional.of(ShortEntrySetup.SETUP_S2);
 		}
 		return Optional.empty();
 	}
@@ -2011,7 +2038,9 @@ public class CtiLbStrategy {
 		LongSetupProperties.Setup3 config = strategyProperties.longSetups().setup3();
 		return config != null
 				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
-				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
+				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax())
+				&& isFiniteAtMost(i.volRatio(), 0.8)
+				&& isFiniteAtMost(i.bbPercentB_5m(), 0.60);
 	}
 
 	private boolean matchesSetup4(Indicators i) {
@@ -2036,6 +2065,13 @@ public class CtiLbStrategy {
 	}
 
 	private boolean matchesShortS2(Indicators i) {
+		ShortSetupProperties.S2 config = strategyProperties.shortSetups().s2();
+		return config != null
+				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
+				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
+	}
+
+	private boolean matchesShortS2Base(Indicators i) {
 		ShortSetupProperties.S2 config = strategyProperties.shortSetups().s2();
 		return config != null
 				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
@@ -2073,6 +2109,48 @@ public class CtiLbStrategy {
 				&& isFiniteAtLeast(i.volRatio(), config.volRatioMin())
 				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
 				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin())
+				&& isFiniteAtLeast(i.adx5m(), config.adxMin());
+	}
+
+	private boolean matchesShortS7(Indicators i) {
+		ShortSetupProperties.S7 config = strategyProperties.shortSetups().s7();
+		if (config == null) {
+			return false;
+		}
+		return i.macdHistColor() == MacdHistColor.RED
+				&& Double.isFinite(i.macdDelta())
+				&& i.macdDelta() < 0.0
+				&& isFiniteAtLeast(i.volRatio(), config.volRatioMin())
+				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
+				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin())
+				&& isFiniteAtLeast(i.adx5m(), config.adxMin())
+				&& isFiniteAtMost(i.bbPercentB_5m(), config.bbPercentBMax());
+	}
+
+	private boolean passesShortS2Filter(Indicators i) {
+		if (!isFiniteAtLeast(i.volRatio(), strategyProperties.shortS2VolRatioMin())) {
+			return false;
+		}
+		if (strategyProperties.enableShortS2BbPercentGate()) {
+			return isFiniteAtMost(i.bbPercentB_5m(), strategyProperties.shortS2BbPercentMax());
+		}
+		return true;
+	}
+
+	// Tier-B idea: optionally relax macdDeltaMaxInclusive; keep strict by default.
+	private boolean matchesLongSetup7(Indicators i) {
+		LongSetupProperties.Setup7 config = strategyProperties.longSetups().setup7();
+		if (config == null) {
+			return false;
+		}
+		if (i.macdHistColor() != MacdHistColor.AQUA) {
+			return false;
+		}
+		return isFiniteGreaterThan(i.macdDelta(), config.macdDeltaMinExclusive())
+				&& isFiniteAtMost(i.macdDelta(), config.macdDeltaMaxInclusive())
+				&& isFiniteAtMost(i.bbPercentB_5m(), config.bbPercentBMax())
+				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
+				&& isFiniteAtMost(i.volRatio(), config.volRatioMax())
 				&& isFiniteAtLeast(i.adx5m(), config.adxMin());
 	}
 
@@ -3304,6 +3382,12 @@ public class CtiLbStrategy {
 		}
 		line.putNull("matchedSetup");
 		Indicators setupSnapshot = entryDecision == null ? null : entryDecision.setupSnapshot();
+		if (!longSetupMatched && !shortSetupMatched) {
+			line.putNull("setupSnapshot");
+			line.putNull("longSetupSnapshot");
+			line.putNull("shortSetupSnapshot");
+			return;
+		}
 		ObjectNode setupSnapshotNode = objectMapper.createObjectNode();
 		if (setupSnapshot == null) {
 			setupSnapshotNode.putNull("bbWidth_5m");
@@ -4128,6 +4212,10 @@ public class CtiLbStrategy {
 
 	static boolean isFiniteAtLeast(double value, double min) {
 		return Double.isFinite(value) && Double.isFinite(min) && value >= min;
+	}
+
+	static boolean isFiniteAtMost(double value, double max) {
+		return Double.isFinite(value) && Double.isFinite(max) && value <= max;
 	}
 
 	static boolean isFiniteGreaterThan(double value, double minExclusive) {
