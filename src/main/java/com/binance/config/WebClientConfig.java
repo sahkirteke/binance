@@ -11,6 +11,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 
 import io.netty.channel.ChannelOption;
+import io.netty.handler.ssl.SslHandler;
 import reactor.netty.http.client.HttpClient;
 import java.time.Duration;
 
@@ -68,7 +69,13 @@ public class WebClientConfig {
 		return HttpClient.create()
 				.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeout)
 				.responseTimeout(Duration.ofMillis(responseTimeout))
-				.secure(ssl -> ssl.handshakeTimeout(Duration.ofMillis(handshakeTimeout)));
+				.secure()
+				.doOnConnected(connection -> {
+					SslHandler sslHandler = connection.channel().pipeline().get(SslHandler.class);
+					if (sslHandler != null) {
+						sslHandler.setHandshakeTimeoutMillis(Math.toIntExact(handshakeTimeout));
+					}
+				});
 	}
 
 	@Bean
