@@ -70,8 +70,7 @@ public class CtiLbStrategy {
 		SETUP_S3,
 		SETUP_S4,
 		SETUP_S5,
-		SETUP_S6,
-		SETUP_S7
+		SETUP_S6
 	}
 	private static final int EMA_20_PERIOD = 20;
 	private static final int EMA_200_PERIOD = 200;
@@ -1559,7 +1558,7 @@ public class CtiLbStrategy {
 		if (entryState == null || entryState.entryTimeMs() <= 0) {
 			return 0;
 		}
-		return (int) ((nowMs - entryState.entryTimeMs()) / 60_000L) + 1;
+		return (int) ((nowMs - entryState.entryTimeMs()) / (5 * 60_000L)) + 1;
 	}
 
 	static boolean shouldHoldPosition(PositionState posSide,
@@ -1891,54 +1890,30 @@ public class CtiLbStrategy {
 		}
 		if (recommendationUsed == CtiDirection.LONG) {
 			if (strategyProperties.enableLongQualityGate()) {
-				if (!isFiniteAtLeast(snapshot.bbWidth_5m(), strategyProperties.longMinBbWidth())) {
-					return EntryDecision.block("LONG_QUALITY_BBWIDTH_FAIL", snapshot);
-				}
+				// Quality gates are informational only; do not block entry.
 			}
 			if (strategyProperties.enableLongRsiQuality()) {
-				if (!isFiniteBetween(snapshot.rsi9_5m(), strategyProperties.longRsiMin(), strategyProperties.longRsiMax())) {
-					return EntryDecision.block("LONG_QUALITY_RSI_FAIL", snapshot);
-				}
+				// Quality gates are informational only; do not block entry.
 			}
 			if (Double.isFinite(snapshot.bbPercentB_5m())
 					&& snapshot.bbPercentB_5m() >= strategyProperties.longBbChasePbMin()) {
 				return EntryDecision.block("LONG_BB_CHASE_VETO", snapshot);
 			}
-			String longGlobalGateFail = resolveLongGlobalGateFailure(snapshot);
-			if (longGlobalGateFail != null) {
-				return EntryDecision.block(longGlobalGateFail, snapshot);
+			if (snapshot.macdHistColor() != MacdHistColor.AQUA) {
+				return EntryDecision.block("LONG_MACD_COLOR_NOT_AQUA", snapshot);
 			}
 			Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
 			if (matched.isPresent()) {
-				if (!matchesLongSetup7(snapshot)) {
-					return EntryDecision.block("LONG_SETUP7_GATE_FAIL", snapshot);
-				}
 				return EntryDecision.longMatch(matched.get(), snapshot);
 			}
 			return EntryDecision.block("NO_LONG_SETUP_MATCHED", snapshot);
 		} else if (recommendationUsed == CtiDirection.SHORT) {
-			if (strategyProperties.enableShortMacdDeltaNegativeGate()) {
-				boolean macdOk = snapshot.macdDelta() < 0.0 || snapshot.macdHistColor() == MacdHistColor.RED;
-				if (!macdOk) {
-					return EntryDecision.block("SHORT_MACD_NEGATIVE_REQUIRED", snapshot);
-				}
+			if (snapshot.macdHistColor() != MacdHistColor.RED) {
+				return EntryDecision.block("SHORT_MACD_COLOR_NOT_RED", snapshot);
 			}
 			return evaluateShortEntryDecision(snapshot);
 		}
 		return EntryDecision.block("REC_NEUTRAL", snapshot);
-	}
-
-	private String resolveLongGlobalGateFailure(Indicators snapshot) {
-		if (!isFiniteAtLeast(snapshot.bbWidth_5m(), strategyProperties.longMinBbWidth())) {
-			return "LONG_GLOBAL_BBWIDTH_FAIL";
-		}
-		if (!isFiniteAtMost(snapshot.bbPercentB_5m(), strategyProperties.longMaxBbPercentB())) {
-			return "LONG_GLOBAL_PB_FAIL";
-		}
-		if (snapshot.macdHistColor() != MacdHistColor.AQUA) {
-			return "LONG_GLOBAL_MACD_COLOR_FAIL";
-		}
-		return null;
 	}
 
 	private EntryDecision evaluateShortEntryDecision(Indicators snapshot) {
@@ -1949,19 +1924,17 @@ public class CtiLbStrategy {
 		if (shortSetups == null) {
 			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
 		}
-		if (matchesShortS7(snapshot)) {
-			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S7, snapshot)
-					.withDecisionActionReason("SHORT_SETUP7_MATCH");
-		}
 		if (strategyProperties.enableShortS6() && matchesShortS6(snapshot)) {
-			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S6, snapshot);
+			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S6, snapshot)
+					.withDecisionActionReason("SHORT_S6_MATCH");
 		}
 		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(snapshot)) {
 			String s2FilterFail = resolveShortS2FilterFailure(snapshot);
 			if (s2FilterFail != null) {
 				return EntryDecision.block(s2FilterFail, snapshot);
 			}
-			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S2, snapshot);
+			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S2, snapshot)
+					.withDecisionActionReason("SHORT_S2_MATCH");
 		}
 		return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
 	}
@@ -1993,13 +1966,10 @@ public class CtiLbStrategy {
 		if (matchesSetup2(indicators)) {
 			return Optional.of(LongEntrySetup.SETUP_2);
 		}
-		if (matchesSetup3(indicators)) {
-			return Optional.of(LongEntrySetup.SETUP_3);
-		}
 		if (strategyProperties.enableLongSetup4() && matchesSetup4(indicators)) {
 			return Optional.of(LongEntrySetup.SETUP_4);
 		}
-		if (matchesSetup5(indicators)) {
+		if (strategyProperties.enableLongSetup5() && matchesSetup5(indicators)) {
 			return Optional.of(LongEntrySetup.SETUP_5);
 		}
 		return Optional.empty();
@@ -2012,9 +1982,6 @@ public class CtiLbStrategy {
 		ShortSetupProperties shortSetups = strategyProperties.shortSetups();
 		if (shortSetups == null) {
 			return Optional.empty();
-		}
-		if (matchesShortS7(indicators)) {
-			return Optional.of(ShortEntrySetup.SETUP_S7);
 		}
 		if (strategyProperties.enableShortS6() && matchesShortS6(indicators)) {
 			return Optional.of(ShortEntrySetup.SETUP_S6);
@@ -2030,23 +1997,21 @@ public class CtiLbStrategy {
 		LongSetupProperties.Setup1 config = strategyProperties.longSetups().setup1();
 		return config != null
 				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
-				&& isFiniteBetween(i.volRatio(), config.volMin(), config.volMax());
+				&& isFiniteBetween(i.volRatio(), config.volMin(), config.volMax())
+				&& isFiniteAtMost(i.bbPercentB_5m(), 0.62)
+				&& isFiniteGreaterThan(i.macdDelta(), 0.0);
 	}
 
 	private boolean matchesSetup2(Indicators i) {
 		LongSetupProperties.Setup2 config = strategyProperties.longSetups().setup2();
 		return config != null
 				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
-				&& isFiniteBetween(i.volRatio(), config.volMin(), config.volMax());
+				&& isFiniteBetween(i.volRatio(), config.volMin(), config.volMax())
+				&& isFiniteBetween(i.volRatio(), 0.9, 1.2);
 	}
 
 	private boolean matchesSetup3(Indicators i) {
-		LongSetupProperties.Setup3 config = strategyProperties.longSetups().setup3();
-		return config != null
-				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
-				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax())
-				&& isFiniteAtMost(i.volRatio(), 0.8)
-				&& isFiniteAtMost(i.bbPercentB_5m(), 0.60);
+		return false;
 	}
 
 	private boolean matchesSetup4(Indicators i) {
@@ -2110,32 +2075,18 @@ public class CtiLbStrategy {
 		if (config == null) {
 			return false;
 		}
-		boolean macdOk = i.macdDelta() < 0.0 || i.macdHistColor() == MacdHistColor.RED;
-		return macdOk
-				&& isFiniteAtLeast(i.volRatio(), config.volRatioMin())
+		return isFiniteAtLeast(i.volRatio(), config.volRatioMin())
 				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
 				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin())
 				&& isFiniteAtLeast(i.adx5m(), config.adxMin());
 	}
 
-	private boolean matchesShortS7(Indicators i) {
-		ShortSetupProperties.S7 config = strategyProperties.shortSetups().s7();
-		if (config == null) {
-			return false;
-		}
-		return i.macdHistColor() == MacdHistColor.RED
-				&& Double.isFinite(i.macdDelta())
-				&& i.macdDelta() < 0.0
-				&& isFiniteAtLeast(i.volRatio(), config.volRatioMin())
-				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
-				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin())
-				&& isFiniteAtLeast(i.adx5m(), config.adxMin())
-				&& isFiniteAtMost(i.bbPercentB_5m(), config.bbPercentBMax());
-	}
-
 	private String resolveShortS2FilterFailure(Indicators i) {
 		if (!isFiniteAtLeast(i.volRatio(), strategyProperties.shortS2VolRatioMin())) {
 			return "SHORT_S2_FILTER_FAIL_VOL";
+		}
+		if (!Double.isFinite(i.macdDelta()) || i.macdDelta() > -1e-5) {
+			return "SHORT_S2_FILTER_FAIL_MACD";
 		}
 		if (strategyProperties.enableShortS2BbPercentGate()) {
 			if (!isFiniteAtMost(i.bbPercentB_5m(), strategyProperties.shortS2BbPercentMax())) {
@@ -2144,23 +2095,6 @@ public class CtiLbStrategy {
 			return null;
 		}
 		return null;
-	}
-
-	// Tier-B idea: optionally relax macdDeltaMaxInclusive; keep strict by default.
-	private boolean matchesLongSetup7(Indicators i) {
-		LongSetupProperties.Setup7 config = strategyProperties.longSetups().setup7();
-		if (config == null) {
-			return false;
-		}
-		if (i.macdHistColor() != MacdHistColor.AQUA) {
-			return false;
-		}
-		return isFiniteGreaterThan(i.macdDelta(), config.macdDeltaMinExclusive())
-				&& isFiniteAtMost(i.macdDelta(), config.macdDeltaMaxInclusive())
-				&& isFiniteAtMost(i.bbPercentB_5m(), config.bbPercentBMax())
-				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
-				&& isFiniteAtMost(i.volRatio(), config.volRatioMax())
-				&& isFiniteAtLeast(i.adx5m(), config.adxMin());
 	}
 
 	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection candidateSide, ScoreSignal signal) {

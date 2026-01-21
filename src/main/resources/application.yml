@@ -128,21 +128,21 @@ strategy:
   tp-trailing-enabled: true
   tp-start-pct: 0.25
   tp-trail-pct: 0.15
-  enable-long-quality-gate: true
+  enable-long-quality-gate: false
   long-min-bb-width: 0.010
-  long-max-bb-percent-b: 0.62
   enable-long-rsi-quality: true
   long-rsi-min: 45
   long-rsi-max: 60
   long-bb-chase-pb-min: 0.80
-  enable-long-setup4: false
+  enable-long-setup4: true
+  enable-long-setup5: true
   enable-long-time-stop-exit: true
   long-time-stop-bars: 2
   enable-short-macd-delta-negative-gate: true
   enable-short-s2-only: true
   short-s2-vol-ratio-min: 1.0
   enable-short-s2-bb-percent-gate: false
-  short-s2-bb-percent-max: 0.20
+  short-s2-bb-percent-max: 0.30
   enable-short-s6: true
   short-s6-vol-ratio-min: 2.2
   short-s6-bb-width-min: 0.020
@@ -175,13 +175,6 @@ strategy:
       rsiMin: 35
       rsiMax: 45
       ema20DistMin: 0.004
-    setup7:
-      macdDeltaMinExclusive: 0.0
-      macdDeltaMaxInclusive: 0.05
-      bbPercentBMax: 0.61
-      bbWidthMin: 0.0108
-      volRatioMax: 1.03
-      adxMin: 21.5
   short-setups:
     s1:
       bbWidthMin: 0.0130
@@ -212,12 +205,6 @@ strategy:
       bbWidthMin: 0.020
       ema20DistMin: 0.010
       adxMin: 25
-    s7:
-      volRatioMin: 1.0
-      bbWidthMin: 0.014
-      ema20DistMin: 0.004
-      adxMin: 15
-      bbPercentBMax: 0.20
 
 warmup:
   enabled: true

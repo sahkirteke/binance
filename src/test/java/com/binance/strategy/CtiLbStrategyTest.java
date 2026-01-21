@@ -37,39 +37,39 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
-	void resolveEntryDecisionBlocksWhenLongGlobalGateFails() throws Exception {
+	void resolveEntryDecisionBlocksWhenLongMacdNotAqua() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
-				0.0090,
-				0.65,
+				0.0120,
+				0.50,
 				1.0,
-				0.0002,
-				58.0,
-				13.0,
-				0.00002,
-				null);
+				0.0009,
+				40.0,
+				18.0,
+				0.01,
+				MacdHistColor.BLUE);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("LONG_GLOBAL_BBWIDTH_FAIL");
+		assertThat(decision.blockReason()).isEqualTo("LONG_MACD_COLOR_NOT_AQUA");
 	}
 
 	@Test
-	void resolveEntryDecisionBlocksWhenLongSetup7Fails() throws Exception {
+	void resolveEntryDecisionDoesNotAllowSetup3() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
-				0.0114,
-				0.50,
-				0.9,
+				0.0105,
+				0.40,
+				0.8,
 				0.0008,
-				50.0,
-				10.0,
-				0.02,
+				40.0,
+				14.0,
+				0.01,
 				MacdHistColor.AQUA);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("LONG_SETUP7_GATE_FAIL");
+		assertThat(decision.blockReason()).isEqualTo("NO_LONG_SETUP_MATCHED");
 	}
 
 	@Test
@@ -91,6 +91,24 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
+	void resolveEntryDecisionAllowsLongSetup1WhenAqua() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.0120,
+				0.55,
+				0.95,
+				0.0009,
+				50.0,
+				18.0,
+				0.01,
+				MacdHistColor.AQUA);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.LONG, indicators);
+		assertThat(decision.confirmedRec()).isEqualTo(CtiDirection.LONG);
+		assertThat(decision.matchedSetupName()).isEqualTo("SETUP_1");
+	}
+
+	@Test
 	void resolveEntryDecisionAllowsS6WhenS2OnlyEnabled() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
@@ -109,7 +127,7 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
-	void resolveEntryDecisionRequiresShortSetup7MacdDeltaNegative() throws Exception {
+	void resolveEntryDecisionBlocksShortWhenMacdNotRed() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
 				0.015,
@@ -119,29 +137,77 @@ class CtiLbStrategyTest {
 				50.0,
 				20.0,
 				0.01,
-				MacdHistColor.RED);
-		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
-				CtiDirection.SHORT, indicators);
-		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("NO_SHORT_SETUP_MATCHED");
-	}
-
-	@Test
-	void resolveEntryDecisionRequiresShortSetup7MacdColorRed() throws Exception {
-		CtiLbStrategy strategy = newStrategy();
-		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
-				0.015,
-				0.18,
-				1.2,
-				0.006,
-				50.0,
-				20.0,
-				-0.01,
 				MacdHistColor.AQUA);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.SHORT, indicators);
 		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("NO_SHORT_SETUP_MATCHED");
+		assertThat(decision.blockReason()).isEqualTo("SHORT_MACD_COLOR_NOT_RED");
+	}
+
+	@Test
+	void resolveEntryDecisionShortS2FilterFailVol() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.012,
+				0.25,
+				0.8,
+				0.0045,
+				42.0,
+				18.0,
+				-0.02,
+				MacdHistColor.RED);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isNull();
+		assertThat(decision.blockReason()).isEqualTo("SHORT_S2_FILTER_FAIL_VOL");
+	}
+
+	@Test
+	void resolveEntryDecisionShortS2FilterFailMacd() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.012,
+				0.25,
+				1.1,
+				0.0045,
+				42.0,
+				18.0,
+				0.0,
+				MacdHistColor.RED);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isNull();
+		assertThat(decision.blockReason()).isEqualTo("SHORT_S2_FILTER_FAIL_MACD");
+	}
+
+	@Test
+	void resolveEntryDecisionShortS2FilterFailPercentB() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.012,
+				0.40,
+				1.1,
+				0.0045,
+				42.0,
+				18.0,
+				-0.02,
+				MacdHistColor.RED);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isNull();
+		assertThat(decision.blockReason()).isEqualTo("SHORT_S2_FILTER_FAIL_PB");
+	}
+
+	@Test
+	void resolveBarsInPositionCountsFiveMinuteBars() throws Exception {
+		long entryTime = 1_000_000L;
+		CtiLbStrategy.EntryState entryState = new CtiLbStrategy.EntryState(
+				CtiDirection.LONG,
+				BigDecimal.ONE,
+				entryTime,
+				BigDecimal.ONE);
+		int bars = invokeResolveBarsInPosition(entryState, entryTime + (10 * 60_000L));
+		assertThat(bars).isEqualTo(3);
 	}
 
 	@Test
@@ -183,6 +249,13 @@ class CtiLbStrategyTest {
 		return (CtiLbStrategy.EntryDecision) method.invoke(strategy, current, recommendationUsed, indicators);
 	}
 
+	private static int invokeResolveBarsInPosition(CtiLbStrategy.EntryState entryState, long nowMs) throws Exception {
+		Method method = CtiLbStrategy.class.getDeclaredMethod("resolveBarsInPosition", CtiLbStrategy.EntryState.class,
+				long.class);
+		method.setAccessible(true);
+		return (int) method.invoke(null, entryState, nowMs);
+	}
+
 	private static CtiLbStrategy newStrategy() {
 		BinanceFuturesOrderClient orderClient = Mockito.mock(BinanceFuturesOrderClient.class);
 		SymbolFilterService symbolFilterService = Mockito.mock(SymbolFilterService.class);
@@ -199,16 +272,14 @@ class CtiLbStrategyTest {
 				new LongSetupProperties.Setup2(0.0100, 0.0114, 1.0, 1.2),
 				new LongSetupProperties.Setup3(0.0100, 0.0114, 0.0005, 0.0010),
 				new LongSetupProperties.Setup4(0.0080, 0.0100, 0.0010, 0.0015),
-				new LongSetupProperties.Setup5(35, 45, 0.004),
-				new LongSetupProperties.Setup7(0.0, 0.05, 0.61, 0.0108, 1.03, 21.5));
+				new LongSetupProperties.Setup5(35, 45, 0.004));
 		ShortSetupProperties shortSetups = new ShortSetupProperties(
 				new ShortSetupProperties.S1(0.0130, 0.0160, 0.0005, 0.0010),
 				new ShortSetupProperties.S2(40, 45, 0.0040, 0.0060),
 				new ShortSetupProperties.S3(0.0080, 0.0100, 55, 60),
 				new ShortSetupProperties.S4(0.60, 0.75, 0.00001, 0.00005),
 				new ShortSetupProperties.S5(12.5, 15.0, 0.00005),
-				new ShortSetupProperties.S6(2.2, 0.020, 0.010, 25),
-				new ShortSetupProperties.S7(1.0, 0.014, 0.004, 15.0, 0.20));
+				new ShortSetupProperties.S6(2.2, 0.020, 0.010, 25));
 		return new StrategyProperties(
 				StrategyType.CTI_LB,
 				"REF",
@@ -218,7 +289,7 @@ class CtiLbStrategyTest {
 				BigDecimal.ONE,
 				1,
 				"LONG",
-				true,
+				false,
 				false,
 				1,
 				1,
@@ -314,19 +385,19 @@ class CtiLbStrategyTest {
 				20.0,
 				true,
 				0.010,
-				0.62,
 				true,
 				45.0,
 				60.0,
 				0.80,
-				false,
+				true,
+				true,
 				true,
 				2,
 				true,
 				true,
 				1.0,
-				false,
-				0.20,
+				true,
+				0.30,
 				true,
 				2.2,
 				0.020,
