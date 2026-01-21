@@ -1904,8 +1904,9 @@ public class CtiLbStrategy {
 					&& snapshot.bbPercentB_5m() >= strategyProperties.longBbChasePbMin()) {
 				return EntryDecision.block("LONG_BB_CHASE_VETO", snapshot);
 			}
-			if (!passesLongGlobalGate(snapshot)) {
-				return EntryDecision.block("LONG_GLOBAL_GATE_FAIL", snapshot);
+			String longGlobalGateFail = resolveLongGlobalGateFailure(snapshot);
+			if (longGlobalGateFail != null) {
+				return EntryDecision.block(longGlobalGateFail, snapshot);
 			}
 			Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
 			if (matched.isPresent()) {
@@ -1927,14 +1928,17 @@ public class CtiLbStrategy {
 		return EntryDecision.block("REC_NEUTRAL", snapshot);
 	}
 
-	private boolean passesLongGlobalGate(Indicators snapshot) {
+	private String resolveLongGlobalGateFailure(Indicators snapshot) {
 		if (!isFiniteAtLeast(snapshot.bbWidth_5m(), strategyProperties.longMinBbWidth())) {
-			return false;
+			return "LONG_GLOBAL_BBWIDTH_FAIL";
 		}
 		if (!isFiniteAtMost(snapshot.bbPercentB_5m(), strategyProperties.longMaxBbPercentB())) {
-			return false;
+			return "LONG_GLOBAL_PB_FAIL";
 		}
-		return snapshot.macdHistColor() == MacdHistColor.AQUA;
+		if (snapshot.macdHistColor() != MacdHistColor.AQUA) {
+			return "LONG_GLOBAL_MACD_COLOR_FAIL";
+		}
+		return null;
 	}
 
 	private EntryDecision evaluateShortEntryDecision(Indicators snapshot) {
@@ -1953,8 +1957,9 @@ public class CtiLbStrategy {
 			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S6, snapshot);
 		}
 		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(snapshot)) {
-			if (!passesShortS2Filter(snapshot)) {
-				return EntryDecision.block("SHORT_S2_FILTER_FAIL", snapshot);
+			String s2FilterFail = resolveShortS2FilterFailure(snapshot);
+			if (s2FilterFail != null) {
+				return EntryDecision.block(s2FilterFail, snapshot);
 			}
 			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S2, snapshot);
 		}
@@ -2014,7 +2019,8 @@ public class CtiLbStrategy {
 		if (strategyProperties.enableShortS6() && matchesShortS6(indicators)) {
 			return Optional.of(ShortEntrySetup.SETUP_S6);
 		}
-		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(indicators) && passesShortS2Filter(indicators)) {
+		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(indicators)
+				&& resolveShortS2FilterFailure(indicators) == null) {
 			return Optional.of(ShortEntrySetup.SETUP_S2);
 		}
 		return Optional.empty();
@@ -2127,14 +2133,17 @@ public class CtiLbStrategy {
 				&& isFiniteAtMost(i.bbPercentB_5m(), config.bbPercentBMax());
 	}
 
-	private boolean passesShortS2Filter(Indicators i) {
+	private String resolveShortS2FilterFailure(Indicators i) {
 		if (!isFiniteAtLeast(i.volRatio(), strategyProperties.shortS2VolRatioMin())) {
-			return false;
+			return "SHORT_S2_FILTER_FAIL_VOL";
 		}
 		if (strategyProperties.enableShortS2BbPercentGate()) {
-			return isFiniteAtMost(i.bbPercentB_5m(), strategyProperties.shortS2BbPercentMax());
+			if (!isFiniteAtMost(i.bbPercentB_5m(), strategyProperties.shortS2BbPercentMax())) {
+				return "SHORT_S2_FILTER_FAIL_PB";
+			}
+			return null;
 		}
-		return true;
+		return null;
 	}
 
 	// Tier-B idea: optionally relax macdDeltaMaxInclusive; keep strict by default.

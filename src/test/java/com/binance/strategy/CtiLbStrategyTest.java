@@ -51,7 +51,7 @@ class CtiLbStrategyTest {
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("LONG_GLOBAL_GATE_FAIL");
+		assertThat(decision.blockReason()).isEqualTo("LONG_GLOBAL_BBWIDTH_FAIL");
 	}
 
 	@Test
@@ -88,6 +88,60 @@ class CtiLbStrategyTest {
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
 		assertThat(decision.blockReason()).isEqualTo("IN_POSITION_NO_ENTRY");
+	}
+
+	@Test
+	void resolveEntryDecisionAllowsS6WhenS2OnlyEnabled() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.025,
+				0.30,
+				2.5,
+				0.012,
+				55.0,
+				30.0,
+				-0.01,
+				MacdHistColor.RED);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isEqualTo(CtiDirection.SHORT);
+		assertThat(decision.matchedSetupName()).isEqualTo("SETUP_S6");
+	}
+
+	@Test
+	void resolveEntryDecisionRequiresShortSetup7MacdDeltaNegative() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.015,
+				0.18,
+				1.2,
+				0.006,
+				50.0,
+				20.0,
+				0.01,
+				MacdHistColor.RED);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isNull();
+		assertThat(decision.blockReason()).isEqualTo("NO_SHORT_SETUP_MATCHED");
+	}
+
+	@Test
+	void resolveEntryDecisionRequiresShortSetup7MacdColorRed() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.015,
+				0.18,
+				1.2,
+				0.006,
+				50.0,
+				20.0,
+				-0.01,
+				MacdHistColor.AQUA);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isNull();
+		assertThat(decision.blockReason()).isEqualTo("NO_SHORT_SETUP_MATCHED");
 	}
 
 	@Test
