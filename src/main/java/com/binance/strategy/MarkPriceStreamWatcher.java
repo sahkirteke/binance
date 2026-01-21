@@ -125,7 +125,7 @@ public class MarkPriceStreamWatcher {
 				.doOnNext(payload -> handleMarkPriceMessage(payload, null))
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=MARK_PRICE_STREAM_ERROR reason={}", error.getMessage()));
 		subscriptionRef.set(subscription);
 		LOGGER.info("Mark price combined stream started for {}", streams);
 	}
@@ -145,7 +145,7 @@ public class MarkPriceStreamWatcher {
 				.doOnNext(payload -> handleMarkPriceMessage(payload, symbol.toUpperCase()))
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=MARK_PRICE_STREAM_ERROR reason={}", error.getMessage()));
 		LOGGER.info("Mark price stream started for {}", symbol);
 		return subscription;
 	}

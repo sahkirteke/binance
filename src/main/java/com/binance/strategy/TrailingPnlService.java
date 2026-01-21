@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import reactor.core.publisher.Flux;
+import reactor.util.retry.Retry;
 
 @Component
 public class TrailingPnlService {
@@ -34,6 +35,7 @@ public class TrailingPnlService {
 	private final Map<String, TrailingState> trailingMap = new ConcurrentHashMap<>();
 	private final Map<String, Object> fileLocks = new ConcurrentHashMap<>();
 	private final int exitConfirmTicksDefault = 2;
+	private static final int POSITION_SYNC_CONCURRENCY = 10;
 
 	public TrailingPnlService(StrategyProperties strategyProperties,
 			BinanceFuturesOrderClient orderClient,
@@ -263,8 +265,14 @@ public class TrailingPnlService {
 								.onErrorResume(error -> {
 									LOGGER.warn("EVENT=TRAIL_SYNC_FAIL symbol={} reason={}", symbol, error.getMessage());
 									return reactor.core.publisher.Mono.empty();
-								})))
-				.subscribe();
+								}), POSITION_SYNC_CONCURRENCY)
+						.onErrorResume(error -> {
+							LOGGER.warn("EVENT=TRAIL_SYNC_LOOP_FAIL reason={}", error.getMessage());
+							return reactor.core.publisher.Mono.empty();
+						}))
+				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(2)))
+				.subscribe(null, error -> LOGGER.warn("EVENT=TRAIL_SYNC_SUBSCRIBE_FAIL reason={}",
+						error.getMessage()));
 	}
 
 	private void updateDebounce(TrailingState state, boolean profitExit, boolean lossHardExit,

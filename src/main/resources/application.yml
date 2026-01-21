@@ -15,6 +15,9 @@ binance:
   api-key: ${BINANCE_API_KEY:}
   secret-key: ${BINANCE_SECRET_KEY:}
   recv-window-millis: 5000
+  connect-timeout-ms: 5000
+  response-timeout-ms: 10000
+  handshake-timeout-ms: 30000
 
 strategy:
   active: CTI_LB

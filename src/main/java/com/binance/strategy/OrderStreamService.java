@@ -27,6 +27,7 @@ public class OrderStreamService {
 	private static final Logger LOGGER = LoggerFactory.getLogger(OrderStreamService.class);
 	private static final Duration OPEN_ORDERS_POLL_INTERVAL = Duration.ofSeconds(10);
 	private static final Duration LISTEN_KEY_KEEPALIVE = Duration.ofMinutes(30);
+	private static final int ORDER_POLL_CONCURRENCY = 10;
 
 	private final BinanceFuturesOrderClient orderClient;
 	private final BinanceProperties properties;
@@ -73,7 +74,8 @@ public class OrderStreamService {
 				})
 				.doOnError(error -> LOGGER.warn("EVENT=ORDER_STREAM_FAIL reason={}", error.getMessage()))
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(2)))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=ORDER_STREAM_SUBSCRIBE_FAIL reason={}",
+						error.getMessage()));
 
 		Flux.interval(LISTEN_KEY_KEEPALIVE)
 				.flatMap(ignored -> {
@@ -86,7 +88,9 @@ public class OrderStreamService {
 									error.getMessage()))
 							.onErrorResume(error -> Mono.empty());
 				})
-				.subscribe();
+				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(2)))
+				.subscribe(null, error -> LOGGER.warn("EVENT=ORDER_STREAM_KEEPALIVE_SUBSCRIBE_FAIL reason={}",
+						error.getMessage()));
 	}
 
 	private Disposable connectUserStream(String listenKey) {
@@ -96,7 +100,7 @@ public class OrderStreamService {
 				.doOnNext(this::handleUserEvent)
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=ORDER_STREAM_SOCKET_FAIL reason={}", error.getMessage()));
 	}
 
 	private void handleUserEvent(String payload) {
@@ -178,12 +182,17 @@ public class OrderStreamService {
 				.flatMap(ignored -> Flux.fromIterable(symbols)
 						.flatMap(symbol -> orderClient.fetchOpenOrders(symbol)
 								.doOnNext(openOrders -> orderTracker.refreshOpenOrders(symbol, openOrders))
-								.doOnNext(openOrders -> ctiLbStrategy.syncPositionNow(symbol, System.currentTimeMillis())))
+								.doOnNext(openOrders -> ctiLbStrategy.syncPositionNow(symbol, System.currentTimeMillis()))
+								.onErrorResume(error -> {
+									LOGGER.warn("EVENT=ORDER_POLL_FAIL symbol={} reason={}", symbol, error.getMessage());
+									return Mono.empty();
+								}), ORDER_POLL_CONCURRENCY)
 						.onErrorResume(error -> {
-							LOGGER.warn("EVENT=ORDER_POLL_FAIL reason={}", error.getMessage());
+							LOGGER.warn("EVENT=ORDER_POLL_LOOP_FAIL reason={}", error.getMessage());
 							return Mono.empty();
 						}))
-				.subscribe();
+				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(2)))
+				.subscribe(null, error -> LOGGER.warn("EVENT=ORDER_POLL_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 	}
 
 	private String resolveUserStreamUrl(String listenKey) {
