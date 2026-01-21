@@ -68,7 +68,7 @@ public class WebClientConfig {
 		return HttpClient.create()
 				.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeout)
 				.responseTimeout(Duration.ofMillis(responseTimeout))
-				.secure(ssl -> ssl.handlerConfigurator(handler -> handler.setHandshakeTimeoutMillis(handshakeTimeout)));
+				.secure(ssl -> ssl.handshakeTimeout(Duration.ofMillis(handshakeTimeout)));
 	}
 
 	@Bean
