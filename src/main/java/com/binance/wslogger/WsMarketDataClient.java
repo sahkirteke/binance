@@ -106,7 +106,8 @@ public class WsMarketDataClient {
         return webSocketClient.execute(uri, session -> {
             log.info("EVENT=WS_CONNECTED symbol={}", symbol);
             Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
-            Mono<Void> receive = session.receive()
+            Flux<WebSocketMessage> inbound = session.receive().publish().refCount(1);
+            Mono<Void> receiveDone = inbound
                     .publishOn(messageScheduler)
                     .doOnNext(message -> handleMessage(symbol, store, session, outbound, message, lastPong, lastPingSeen, lastTraffic))
                     .doOnError(ex -> log.error("EVENT=WS_DISCONNECTED symbol={} message={}", symbol, ex.getMessage(), ex))
@@ -114,7 +115,7 @@ public class WsMarketDataClient {
 
             Flux<WebSocketMessage> pingFlux = properties.isClientPingEnabled()
                     ? Flux.interval(properties.getPingInterval())
-                    .takeUntilOther(receive)
+                    .takeUntilOther(receiveDone)
                     .map(tick -> {
                         log.debug("EVENT=WS_PING_SENT symbol={}", symbol);
                         return session.pingMessage(dataBufferFactory -> dataBufferFactory.wrap(new byte[] { 1 }));
@@ -125,7 +126,7 @@ public class WsMarketDataClient {
             Mono<Void> sendOutbound = session.send(outbound.asFlux()).then();
 
             Mono<Void> monitorPong = Flux.interval(properties.getPongTimeout())
-                    .takeUntilOther(receive)
+                    .takeUntilOther(receiveDone)
                     .concatMap(tick -> {
                         long now = System.currentTimeMillis();
                         long lastTrafficDelta = now - lastTraffic.get();
@@ -143,7 +144,7 @@ public class WsMarketDataClient {
                     })
                     .then();
 
-            return Mono.when(sendOutbound, pingFlux.then(), monitorPong, receive)
+            return Mono.when(sendOutbound, pingFlux.then(), monitorPong, receiveDone)
                     .doFinally(signalType -> log.info("EVENT=WS_DISCONNECTED symbol={} signal={}", symbol, signalType));
         }).then(Mono.error(new IllegalStateException("WebSocket session ended")))
                 .doOnError(ex -> updateDisconnectStats(symbol, connectStart, ex));
