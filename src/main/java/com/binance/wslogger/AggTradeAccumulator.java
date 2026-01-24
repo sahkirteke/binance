@@ -1,26 +1,28 @@
 package com.binance.wslogger;
 
+import java.util.concurrent.atomic.DoubleAdder;
+import java.util.concurrent.atomic.LongAdder;
+
 public class AggTradeAccumulator {
 
-    private long tradeCount;
-    private double takerBuyQty;
-    private double takerSellQty;
+    private final LongAdder tradeCount = new LongAdder();
+    private final DoubleAdder takerBuyQty = new DoubleAdder();
+    private final DoubleAdder takerSellQty = new DoubleAdder();
 
-    public synchronized void add(double quantity, boolean buyerIsMaker) {
-        tradeCount++;
+    public void add(double quantity, boolean buyerIsMaker) {
+        tradeCount.increment();
         if (buyerIsMaker) {
-            takerSellQty += quantity;
+            takerSellQty.add(quantity);
         } else {
-            takerBuyQty += quantity;
+            takerBuyQty.add(quantity);
         }
     }
 
-    public synchronized AggTradeSnapshot snapshotAndReset() {
-        AggTradeSnapshot snapshot = new AggTradeSnapshot(tradeCount, takerBuyQty, takerSellQty);
-        tradeCount = 0L;
-        takerBuyQty = 0.0;
-        takerSellQty = 0.0;
-        return snapshot;
+    public AggTradeSnapshot snapshotAndReset() {
+        long trades = tradeCount.sumThenReset();
+        double buys = takerBuyQty.sumThenReset();
+        double sells = takerSellQty.sumThenReset();
+        return new AggTradeSnapshot(trades, buys, sells);
     }
 
     public record AggTradeSnapshot(long tradeCount, double takerBuyQty, double takerSellQty) {

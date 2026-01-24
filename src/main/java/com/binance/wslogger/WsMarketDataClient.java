@@ -37,15 +37,18 @@ public class WsMarketDataClient {
     private final ObjectMapper objectMapper;
     private final ReactorNettyWebSocketClient webSocketClient;
     private final Scheduler reconnectScheduler;
+    private final Scheduler messageScheduler;
     private final Map<String, Disposable> connections = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> reconnectAttempts = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> shortDisconnects = new ConcurrentHashMap<>();
+    private final AtomicLong globalNextReconnectAtMs = new AtomicLong();
 
     public WsMarketDataClient(WsSnapshotLoggerProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.webSocketClient = buildClient();
         this.reconnectScheduler = Schedulers.newBoundedElastic(4, 1000, "ws-snapshot-reconnect");
+        this.messageScheduler = Schedulers.newParallel("ws-snapshot-msg", 4);
     }
 
     public void start(Map<String, PerSymbolStateStore> stores) {
@@ -81,7 +84,6 @@ public class WsMarketDataClient {
         log.info("EVENT=WS_CONNECT symbol={} uri={}", symbol, uri);
         return webSocketClient.execute(uri, session -> {
             log.info("EVENT=WS_CONNECTED symbol={}", symbol);
-            reconnectAttempts.computeIfAbsent(symbol, key -> new AtomicInteger()).set(0);
             Flux<WebSocketMessage> pingFlux = Flux.interval(properties.getPingInterval())
                     .map(tick -> {
                         log.debug("EVENT=WS_PING_SENT symbol={}", symbol);
@@ -89,7 +91,8 @@ public class WsMarketDataClient {
                     });
 
             Mono<Void> receive = session.receive()
-                    .doOnNext(message -> handleMessage(symbol, store, message, lastPong))
+                    .publishOn(messageScheduler)
+                    .doOnNext(message -> handleMessage(symbol, store, session, message, lastPong))
                     .doOnError(ex -> log.error("EVENT=WS_DISCONNECTED symbol={} message={}", symbol, ex.getMessage(), ex))
                     .then();
 
@@ -112,7 +115,20 @@ public class WsMarketDataClient {
                 .doOnError(ex -> updateDisconnectStats(symbol, connectStart, ex));
     }
 
-    private void handleMessage(String symbol, PerSymbolStateStore store, WebSocketMessage message, AtomicLong lastPong) {
+    private void handleMessage(
+            String symbol,
+            PerSymbolStateStore store,
+            WebSocketSession session,
+            WebSocketMessage message,
+            AtomicLong lastPong) {
+        if (message.getType() == WebSocketMessage.Type.PING) {
+            byte[] payload = new byte[message.getPayload().readableByteCount()];
+            message.getPayload().read(payload);
+            session.send(Mono.just(session.pongMessage(factory -> factory.wrap(payload)))).subscribe();
+            lastPong.set(System.currentTimeMillis());
+            log.debug("EVENT=WS_PONG_SENT symbol={}", symbol);
+            return;
+        }
         if (message.getType() == WebSocketMessage.Type.PONG) {
             lastPong.set(System.currentTimeMillis());
             log.debug("EVENT=WS_PONG_RCVD symbol={}", symbol);
@@ -122,6 +138,7 @@ public class WsMarketDataClient {
             return;
         }
         try {
+            lastPong.set(System.currentTimeMillis());
             JsonNode root = objectMapper.readTree(message.getPayloadAsText());
             JsonNode dataNode = root.has("data") ? root.get("data") : root;
             String eventType = dataNode.path("e").asText();
@@ -172,7 +189,14 @@ public class WsMarketDataClient {
         long base = Math.min(
                 properties.getReconnectBackoffMin().toMillis() * (1L << Math.min(attempt, 10)),
                 properties.getReconnectBackoffMax().toMillis());
-        return Duration.ofMillis((long) (base * jitter));
+        long delayMs = (long) (base * jitter);
+        long now = System.currentTimeMillis();
+        long globalGate = Math.max(0L, globalNextReconnectAtMs.get() - now);
+        delayMs = Math.max(delayMs, globalGate);
+        long spacing = properties.getReconnectGlobalSpacing().toMillis();
+        long scheduledAt = now + delayMs;
+        globalNextReconnectAtMs.updateAndGet(prev -> Math.max(prev, scheduledAt + spacing));
+        return Duration.ofMillis(delayMs);
     }
 
     private void updateDisconnectStats(String symbol, long connectStart, Throwable ex) {
@@ -182,6 +206,7 @@ public class WsMarketDataClient {
             shortCount.incrementAndGet();
         } else {
             shortCount.set(0);
+            reconnectAttempts.computeIfAbsent(symbol, key -> new AtomicInteger()).set(0);
         }
         if (isRateLimit(ex)) {
             log.warn("EVENT=WS_RATE_LIMIT message={}", ex.getMessage());

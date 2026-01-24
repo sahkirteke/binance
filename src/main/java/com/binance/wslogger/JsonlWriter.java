@@ -69,8 +69,12 @@ public class JsonlWriter {
         running = false;
         if (writerThread != null) {
             writerThread.interrupt();
+            try {
+                writerThread.join(2000);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
         }
-        closeAll();
     }
 
     private void runLoop() {

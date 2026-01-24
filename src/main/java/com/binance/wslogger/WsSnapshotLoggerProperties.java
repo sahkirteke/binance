@@ -27,6 +27,7 @@ public class WsSnapshotLoggerProperties {
     private Duration readTimeout = Duration.ofSeconds(60);
     private Duration reconnectBackoffMin = Duration.ofSeconds(2);
     private Duration reconnectBackoffMax = Duration.ofSeconds(60);
+    private Duration reconnectGlobalSpacing = Duration.ofMillis(500);
     private int maxReconnectAttempts = 1000;
     private Duration banCooldown = Duration.ofMinutes(5);
     private int banDisconnectThreshold = 3;
@@ -152,6 +153,14 @@ public class WsSnapshotLoggerProperties {
 
     public void setReconnectBackoffMax(Duration reconnectBackoffMax) {
         this.reconnectBackoffMax = reconnectBackoffMax;
+    }
+
+    public Duration getReconnectGlobalSpacing() {
+        return reconnectGlobalSpacing;
+    }
+
+    public void setReconnectGlobalSpacing(Duration reconnectGlobalSpacing) {
+        this.reconnectGlobalSpacing = reconnectGlobalSpacing;
     }
 
     public int getMaxReconnectAttempts() {
