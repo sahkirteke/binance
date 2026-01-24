@@ -8,7 +8,7 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 @EnableConfigurationProperties(WsSnapshotLoggerProperties.class)
-@ConditionalOnProperty(prefix = "wsSnapshotLogger", name = "enabled", havingValue = "true")
+@ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
 public class WsSnapshotLoggerConfiguration {
 
     @Bean

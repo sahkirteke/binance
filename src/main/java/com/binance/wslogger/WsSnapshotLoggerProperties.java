@@ -9,7 +9,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 @Validated
-@ConfigurationProperties(prefix = "wsSnapshotLogger")
+@ConfigurationProperties(prefix = "ws-snapshot-logger")
 public class WsSnapshotLoggerProperties {
 
     private boolean enabled = false;
