@@ -6,6 +6,7 @@ import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.List;
 
+import com.binance.exchange.BinanceFuturesOrderClient;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 

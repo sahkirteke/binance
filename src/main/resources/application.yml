@@ -1,10 +1,6 @@
 spring:
   application:
     name: binance-trader
-  autoconfigure:
-    exclude:
-      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
   codec:
     max-in-memory-size: 5MB
 
@@ -222,3 +218,8 @@ management:
     web:
       exposure:
         include: health,info
+
+logging:
+  level:
+    com.binance.exchange.TimeSyncServices: WARN
+
