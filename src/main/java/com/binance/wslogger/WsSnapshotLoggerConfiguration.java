@@ -23,6 +23,26 @@ public class WsSnapshotLoggerConfiguration {
 
     @Bean
     @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "mode", havingValue = "existing")
+    public BookTickerStreamWatcher bookTickerStreamWatcher(
+            WsSnapshotLoggerProperties properties,
+            ObjectMapper objectMapper,
+            MarketDataHub marketDataHub) {
+        return new BookTickerStreamWatcher(properties, objectMapper, marketDataHub);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "mode", havingValue = "existing")
+    public AggTradeStreamWatcher aggTradeStreamWatcher(
+            WsSnapshotLoggerProperties properties,
+            ObjectMapper objectMapper,
+            MarketDataHub marketDataHub) {
+        return new AggTradeStreamWatcher(properties, objectMapper, marketDataHub);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
     @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "mode", havingValue = "standalone")
     public WsMarketDataClient wsMarketDataClient(WsSnapshotLoggerProperties properties, ObjectMapper objectMapper) {
         return new WsMarketDataClient(properties, objectMapper);

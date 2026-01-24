@@ -129,9 +129,13 @@ public class JsonlWriter {
                     StandardOpenOption.WRITE,
                     StandardOpenOption.APPEND);
             state.currentDate = date;
-            log.info("EVENT=SNAPSHOT_FILE_OPEN symbol={} path={}", symbol, filePath.toAbsolutePath());
+            log.info("EVENT=SNAPSHOT_FILE_OPEN symbol={} file={}", symbol, filePath.toAbsolutePath());
         } catch (IOException ex) {
-            log.error("EVENT=SNAPSHOT_FILE_OPEN_FAIL path={} message={}", filePath.toAbsolutePath(), ex.getMessage(), ex);
+            log.error("EVENT=SNAPSHOT_FILE_OPEN_FAIL symbol={} file={} err={}",
+                    symbol,
+                    filePath.toAbsolutePath(),
+                    ex.getMessage(),
+                    ex);
             throw ex;
         }
     }

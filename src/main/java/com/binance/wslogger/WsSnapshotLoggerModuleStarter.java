@@ -3,6 +3,8 @@ package com.binance.wslogger;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +23,8 @@ public class WsSnapshotLoggerModuleStarter implements ApplicationListener<Applic
     private final ObjectProvider<WsMarketDataClient> wsMarketDataClient;
     private final SnapshotScheduler snapshotScheduler;
     private final JsonlWriter writer;
+    private final Set<String> bookTickerFirstLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> aggTradeFirstLogged = ConcurrentHashMap.newKeySet();
     private Disposable marketDataSubscription;
 
     public WsSnapshotLoggerModuleStarter(
@@ -96,11 +100,25 @@ public class WsSnapshotLoggerModuleStarter implements ApplicationListener<Applic
                         bookTickerEvent.bidQty(),
                         bookTickerEvent.askQty(),
                         bookTickerEvent.eventTimeMs());
+                if (bookTickerFirstLogged.add(store.getSymbol())) {
+                    log.info("EVENT=BOOK_TICKER_FIRST symbol={} bid={} ask={} bidQty={} askQty={}",
+                            store.getSymbol(),
+                            bookTickerEvent.bid(),
+                            bookTickerEvent.ask(),
+                            bookTickerEvent.bidQty(),
+                            bookTickerEvent.askQty());
+                }
             } else if (event instanceof AggTradeEvent aggTradeEvent) {
                 store.updateAggTrade(
                         aggTradeEvent.quantity(),
                         aggTradeEvent.buyerIsMaker(),
                         aggTradeEvent.eventTimeMs());
+                if (aggTradeFirstLogged.add(store.getSymbol())) {
+                    log.info("EVENT=AGG_TRADE_FIRST symbol={} qty={} buyerIsMaker={}",
+                            store.getSymbol(),
+                            aggTradeEvent.quantity(),
+                            aggTradeEvent.buyerIsMaker());
+                }
             }
         } catch (Exception ex) {
             log.error("EVENT=WS_SNAPSHOT_LOGGER_EVENT_ERROR message={}", ex.getMessage(), ex);
