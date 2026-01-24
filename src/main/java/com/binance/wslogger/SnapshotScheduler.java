@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import jakarta.annotation.PreDestroy;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Scheduler;
@@ -38,6 +39,15 @@ public class SnapshotScheduler {
                     .subscribe();
             tasks.put(symbol, task);
         }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        for (Disposable task : tasks.values()) {
+            task.dispose();
+        }
+        tasks.clear();
+        scheduler.dispose();
     }
 
     private void emitSnapshot(PerSymbolStateStore store) {

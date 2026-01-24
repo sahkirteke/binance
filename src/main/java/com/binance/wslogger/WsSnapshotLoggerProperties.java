@@ -20,6 +20,7 @@ public class WsSnapshotLoggerProperties {
     private int rollingLong = 60;
     private Path baseDir = Path.of("/opt/binance-bot/signals/ws");
     private String wsBaseUrl = "wss://fstream.binance.com/stream";
+    private boolean clientPingEnabled = false;
     private Duration pingInterval = Duration.ofSeconds(30);
     private Duration pongTimeout = Duration.ofSeconds(45);
     private Duration connectTimeout = Duration.ofSeconds(10);
@@ -97,6 +98,14 @@ public class WsSnapshotLoggerProperties {
 
     public void setWsBaseUrl(String wsBaseUrl) {
         this.wsBaseUrl = wsBaseUrl;
+    }
+
+    public boolean isClientPingEnabled() {
+        return clientPingEnabled;
+    }
+
+    public void setClientPingEnabled(boolean clientPingEnabled) {
+        this.clientPingEnabled = clientPingEnabled;
     }
 
     public Duration getPingInterval() {

@@ -75,29 +75,33 @@ public class JsonlWriter {
                 Thread.currentThread().interrupt();
             }
         }
+        closeAll();
     }
 
     private void runLoop() {
         long lastFlush = System.currentTimeMillis();
-        while (running || !queue.isEmpty()) {
-            try {
-                SnapshotRecord snapshot = queue.poll(500, TimeUnit.MILLISECONDS);
-                if (snapshot != null) {
-                    writeSnapshot(snapshot);
+        try {
+            while (running || !queue.isEmpty()) {
+                try {
+                    SnapshotRecord snapshot = queue.poll(500, TimeUnit.MILLISECONDS);
+                    if (snapshot != null) {
+                        writeSnapshot(snapshot);
+                    }
+                    long now = System.currentTimeMillis();
+                    if (now - lastFlush >= properties.getWriterFlushInterval().toMillis()) {
+                        flushAll();
+                        lastFlush = now;
+                    }
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                } catch (Exception ex) {
+                    log.error("EVENT=SNAPSHOT_WRITE_ERROR message={}", ex.getMessage(), ex);
                 }
-                long now = System.currentTimeMillis();
-                if (now - lastFlush >= properties.getWriterFlushInterval().toMillis()) {
-                    flushAll();
-                    lastFlush = now;
-                }
-            } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-            } catch (Exception ex) {
-                log.error("EVENT=SNAPSHOT_WRITE_ERROR message={}", ex.getMessage(), ex);
             }
+            flushAll();
+        } finally {
+            closeAll();
         }
-        flushAll();
-        closeAll();
     }
 
     private void writeSnapshot(SnapshotRecord snapshot) throws IOException {

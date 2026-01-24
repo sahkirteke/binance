@@ -22,9 +22,11 @@ import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClien
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import reactor.netty.http.client.HttpClient;
+import jakarta.annotation.PreDestroy;
 
 public class WsMarketDataClient {
 
@@ -32,6 +34,7 @@ public class WsMarketDataClient {
     private static final String EVENT_MARK_PRICE = "markPriceUpdate";
     private static final String EVENT_BOOK_TICKER = "bookTicker";
     private static final String EVENT_AGG_TRADE = "aggTrade";
+    private static final long RECONNECT_WARN_INTERVAL_MS = 30000L;
 
     private final WsSnapshotLoggerProperties properties;
     private final ObjectMapper objectMapper;
@@ -41,6 +44,7 @@ public class WsMarketDataClient {
     private final Map<String, Disposable> connections = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> reconnectAttempts = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> shortDisconnects = new ConcurrentHashMap<>();
+    private final Map<String, AtomicLong> lastReconnectWarn = new ConcurrentHashMap<>();
     private final AtomicLong globalNextReconnectAtMs = new AtomicLong();
 
     public WsMarketDataClient(WsSnapshotLoggerProperties properties, ObjectMapper objectMapper) {
@@ -60,6 +64,16 @@ public class WsMarketDataClient {
         }
     }
 
+    @PreDestroy
+    public void shutdown() {
+        for (Disposable disposable : connections.values()) {
+            disposable.dispose();
+        }
+        connections.clear();
+        reconnectScheduler.dispose();
+        messageScheduler.dispose();
+    }
+
     private ReactorNettyWebSocketClient buildClient() {
         HttpClient httpClient = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, Math.toIntExact(properties.getConnectTimeout().toMillis()))
@@ -72,7 +86,9 @@ public class WsMarketDataClient {
         return Mono.defer(() -> connectOnce(symbol, store))
                 .onErrorResume(ex -> {
                     Duration delay = nextDelay(symbol, ex);
-                    log.warn("EVENT=WS_RECONNECT_SCHEDULED symbol={} delayMs={} message={}", symbol, delay.toMillis(), ex.getMessage());
+                    if (shouldWarnReconnect(symbol)) {
+                        log.warn("EVENT=WS_RECONNECT_SCHEDULED symbol={} delayMs={} message={}", symbol, delay.toMillis(), ex.getMessage());
+                    }
                     return Mono.delay(delay, reconnectScheduler).then(connectLoop(symbol, store));
                 });
     }
@@ -80,36 +96,48 @@ public class WsMarketDataClient {
     private Mono<Void> connectOnce(String symbol, PerSymbolStateStore store) {
         URI uri = URI.create(buildUrl(symbol));
         AtomicLong lastPong = new AtomicLong(System.currentTimeMillis());
+        AtomicLong lastPingSeen = new AtomicLong(System.currentTimeMillis());
+        AtomicLong lastTraffic = new AtomicLong(System.currentTimeMillis());
         long connectStart = System.currentTimeMillis();
         log.info("EVENT=WS_CONNECT symbol={} uri={}", symbol, uri);
         return webSocketClient.execute(uri, session -> {
             log.info("EVENT=WS_CONNECTED symbol={}", symbol);
-            Flux<WebSocketMessage> pingFlux = Flux.interval(properties.getPingInterval())
-                    .map(tick -> {
-                        log.debug("EVENT=WS_PING_SENT symbol={}", symbol);
-                        return session.pingMessage(dataBufferFactory -> dataBufferFactory.wrap(new byte[] { 1 }));
-                    });
-
+            Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
             Mono<Void> receive = session.receive()
                     .publishOn(messageScheduler)
-                    .doOnNext(message -> handleMessage(symbol, store, session, message, lastPong))
+                    .doOnNext(message -> handleMessage(symbol, store, session, outbound, message, lastPong, lastPingSeen, lastTraffic))
                     .doOnError(ex -> log.error("EVENT=WS_DISCONNECTED symbol={} message={}", symbol, ex.getMessage(), ex))
                     .then();
 
-            Mono<Void> sendPings = session.send(pingFlux.takeUntilOther(receive)).then();
+            Flux<WebSocketMessage> pingFlux = properties.isClientPingEnabled()
+                    ? Flux.interval(properties.getPingInterval())
+                    .takeUntilOther(receive)
+                    .map(tick -> {
+                        log.debug("EVENT=WS_PING_SENT symbol={}", symbol);
+                        return session.pingMessage(dataBufferFactory -> dataBufferFactory.wrap(new byte[] { 1 }));
+                    })
+                    .doOnNext(message -> outbound.tryEmitNext(message))
+                    : Flux.empty();
+
+            Mono<Void> sendOutbound = session.send(outbound.asFlux()).then();
 
             Mono<Void> monitorPong = Flux.interval(properties.getPongTimeout())
                     .takeUntilOther(receive)
                     .doOnNext(tick -> {
                         long now = System.currentTimeMillis();
-                        if (now - lastPong.get() > properties.getPongTimeout().toMillis()) {
+                        long lastTrafficDelta = now - lastTraffic.get();
+                        long lastPongDelta = now - lastPong.get();
+                        boolean trafficStale = lastTrafficDelta > properties.getReadTimeout().toMillis();
+                        boolean pongStale = properties.isClientPingEnabled()
+                                && lastPongDelta > properties.getPongTimeout().toMillis();
+                        if (trafficStale || pongStale) {
                             log.warn("EVENT=WS_PONG_TIMEOUT symbol={}", symbol);
                             session.close().subscribe();
                         }
                     })
                     .then();
 
-            return Mono.when(sendPings, monitorPong, receive)
+            return Mono.when(sendOutbound, pingFlux.then(), monitorPong, receive)
                     .doFinally(signalType -> log.info("EVENT=WS_DISCONNECTED symbol={} signal={}", symbol, signalType));
         }).then(Mono.error(new IllegalStateException("WebSocket session ended")))
                 .doOnError(ex -> updateDisconnectStats(symbol, connectStart, ex));
@@ -119,13 +147,16 @@ public class WsMarketDataClient {
             String symbol,
             PerSymbolStateStore store,
             WebSocketSession session,
+            Sinks.Many<WebSocketMessage> outbound,
             WebSocketMessage message,
-            AtomicLong lastPong) {
+            AtomicLong lastPong,
+            AtomicLong lastPingSeen,
+            AtomicLong lastTraffic) {
         if (message.getType() == WebSocketMessage.Type.PING) {
             byte[] payload = new byte[message.getPayload().readableByteCount()];
             message.getPayload().read(payload);
-            session.send(Mono.just(session.pongMessage(factory -> factory.wrap(payload)))).subscribe();
-            lastPong.set(System.currentTimeMillis());
+            outbound.tryEmitNext(session.pongMessage(factory -> factory.wrap(payload)));
+            lastPingSeen.set(System.currentTimeMillis());
             log.debug("EVENT=WS_PONG_SENT symbol={}", symbol);
             return;
         }
@@ -138,7 +169,7 @@ public class WsMarketDataClient {
             return;
         }
         try {
-            lastPong.set(System.currentTimeMillis());
+            lastTraffic.set(System.currentTimeMillis());
             JsonNode root = objectMapper.readTree(message.getPayloadAsText());
             JsonNode dataNode = root.has("data") ? root.get("data") : root;
             String eventType = dataNode.path("e").asText();
@@ -220,5 +251,15 @@ public class WsMarketDataClient {
 
     private boolean isBanSuspected(Throwable ex) {
         return isRateLimit(ex);
+    }
+
+    private boolean shouldWarnReconnect(String symbol) {
+        long now = System.currentTimeMillis();
+        AtomicLong lastWarn = lastReconnectWarn.computeIfAbsent(symbol, key -> new AtomicLong(0L));
+        long previous = lastWarn.get();
+        if (now - previous >= RECONNECT_WARN_INTERVAL_MS && lastWarn.compareAndSet(previous, now)) {
+            return true;
+        }
+        return false;
     }
 }
