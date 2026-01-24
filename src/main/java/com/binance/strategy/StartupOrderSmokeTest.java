@@ -61,7 +61,7 @@ public class StartupOrderSmokeTest {
 						})
 						.doOnError(error -> LOGGER.warn("Startup test order failed: {}", error.getMessage()))
 						.onErrorResume(error -> Mono.empty()))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=STARTUP_ORDER_SMOKE_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 	}
 
 	private Mono<Void> openAndClose(String symbol, BigDecimal quantity, boolean hedgeMode) {

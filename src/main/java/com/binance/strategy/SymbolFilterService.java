@@ -47,7 +47,7 @@ public class SymbolFilterService {
 	public void init() {
 		if (strategyProperties.active() == StrategyType.CTI_LB) {
 			preloadFilters(strategyProperties.resolvedTradeSymbols())
-					.subscribe();
+					.subscribe(null, error -> LOGGER.warn("EVENT=FILTERS_PRELOAD_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 		}
 	}
 
@@ -70,7 +70,8 @@ public class SymbolFilterService {
 	}
 
 	public void requestRefresh() {
-		refreshAllFilters().subscribe();
+		refreshAllFilters()
+				.subscribe(null, error -> LOGGER.warn("EVENT=FILTERS_REFRESH_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 	}
 
 	private Mono<Void> refreshAllFilters() {

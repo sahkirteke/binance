@@ -64,7 +64,8 @@ public class WsMarketDataClient {
         if (stores.isEmpty()) {
             return;
         }
-        Disposable disposable = connectLoop(stores).subscribe();
+        Disposable disposable = connectLoop(stores)
+                .subscribe(null, error -> log.warn("EVENT=WS_CLIENT_SUBSCRIBE_FAIL reason={}", error.getMessage()));
         connections.put("combined", disposable);
     }
 
@@ -220,8 +221,7 @@ public class WsMarketDataClient {
 
     private String buildUrl(Map<String, PerSymbolStateStore> stores) {
         String streams = stores.keySet().stream()
-                .map(symbol -> symbol.toLowerCase(Locale.ROOT) + "@markPrice@1s/"
-                        + symbol.toLowerCase(Locale.ROOT) + "@bookTicker/"
+                .map(symbol -> symbol.toLowerCase(Locale.ROOT) + "@bookTicker/"
                         + symbol.toLowerCase(Locale.ROOT) + "@aggTrade")
                 .reduce((left, right) -> left + "/" + right)
                 .orElse("");

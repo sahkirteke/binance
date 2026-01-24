@@ -64,7 +64,7 @@ public class HistoricalWarmupService {
 		List<String> symbols = strategyProperties.resolvedTradeSymbols();
 		symbolFilterService.preloadFilters(symbols)
 				.then(warmupAllSymbols(symbols))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=WARMUP_START_FAIL reason={}", error.getMessage()));
 	}
 
 	public Mono<Void> warmupAllSymbols(List<String> symbols) {
@@ -166,7 +166,7 @@ public class HistoricalWarmupService {
 //					LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} retryError={}", symbol, error.getMessage());
 					return Mono.empty();
 				})
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=WARMUP_RETRY_SUBSCRIBE_FAIL symbol={} reason={}", symbol, error.getMessage()));
 	}
 
 	private int resolveCandles1m() {

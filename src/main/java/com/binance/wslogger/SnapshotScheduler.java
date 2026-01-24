@@ -37,7 +37,7 @@ public class SnapshotScheduler {
                     .onBackpressureDrop()
                     .doOnNext(tick -> emitSnapshot(store))
                     .doOnError(ex -> log.error("EVENT=SNAPSHOT_SCHEDULER_ERROR symbol={} message={}", symbol, ex.getMessage(), ex))
-                    .subscribe();
+                    .subscribe(null, ex -> log.error("EVENT=SNAPSHOT_SCHEDULER_SUBSCRIBE_ERROR symbol={} message={}", symbol, ex.getMessage(), ex));
             tasks.put(symbol, task);
         }
     }

@@ -351,7 +351,7 @@ public class CtiLbStrategy {
 					trailingPnlService.resetClosingFlag(symbol);
 				})
 				.onErrorResume(error -> Mono.empty())
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=TRAIL_EXIT_SUBSCRIBE_FAIL symbol={} reason={}", symbol, error.getMessage()));
 	}
 	private void cleanupPositionState(String symbol) {
 		positionStates.put(symbol, PositionState.NONE);
@@ -364,7 +364,7 @@ public class CtiLbStrategy {
 		orderClient.fetchPosition(symbol)
 				.doOnNext(position -> applyExchangePosition(symbol, position, eventTime))
 				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=POSITION_SYNC_SUBSCRIBE_FAIL symbol={} error={}", symbol, error.getMessage()));
 	}
 
 	public Mono<Void> refreshAfterWarmup(String symbol) {
@@ -883,7 +883,7 @@ public class CtiLbStrategy {
 					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}", decisionActionReasonFinal,
 							error.getMessage()))
 					.onErrorResume(error -> Mono.empty())
-					.subscribe();
+					.subscribe(null, error -> LOGGER.warn("EVENT=CTI_EXIT_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 			return;
 		}
 
@@ -1253,7 +1253,7 @@ public class CtiLbStrategy {
 							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitBlockedByTrendAlignedActionFinal);
 				})
 				.onErrorResume(error -> Mono.empty())
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=CTI_ACTION_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 	}
 
 	public void onClosedOneMinuteCandle(String symbol, Candle candle) {
@@ -3807,7 +3807,7 @@ public class CtiLbStrategy {
 					applyExchangePosition(symbol, position, closeTime);
 				})
 				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=POSITION_SYNC_SUBSCRIBE_FAIL symbol={} error={}", symbol, error.getMessage()));
 	}
 
 	private void applyExchangePosition(String symbol, BinanceFuturesOrderClient.ExchangePosition position, long closeTime) {

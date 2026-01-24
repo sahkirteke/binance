@@ -228,6 +228,16 @@ ws-snapshot-logger:
   mode: existing
   base-dir: signals/ws
   ws-base-url: wss://fstream.binance.com/stream
-  symbols: ["ETHUSDT","XRPUSDT","DOGEUSDT","LTCUSDT","ADAUSDT","AVAXUSDT","ARBUSDT","MANAUSDT","XLMUSDT","CHZUSDT","ALGOUSDT","BANDUSDT","BATUSDT","CHRUSDT","POLUSDT"]
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "XRPUSDT"
+    - "BNBUSDT"
+    - "ADAUSDT"
+    - "DOGEUSDT"
+    - "SOLUSDT"
+    - "DOTUSDT"
+    - "AVAXUSDT"
+    - "LINKUSDT"
   log-every-sec: 3
   warmup-samples: 3
