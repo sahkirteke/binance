@@ -106,12 +106,22 @@ public class WsMarketDataClient {
         return webSocketClient.execute(uri, session -> {
             log.info("EVENT=WS_CONNECTED symbol={}", symbol);
             Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
-            Flux<WebSocketMessage> inbound = session.receive().publish().refCount(1);
+            Flux<WebSocketMessage> inbound = session.receive()
+                    .doOnNext(message -> DataBufferUtils.retain(message.getPayload()))
+                    .publish()
+                    .refCount(1);
             Mono<Void> receiveDone = inbound
                     .publishOn(messageScheduler)
-                    .doOnNext(message -> handleMessage(symbol, store, session, outbound, message, lastPong, lastPingSeen, lastTraffic))
+                    .doOnNext(message -> {
+                        try {
+                            handleMessage(symbol, store, session, outbound, message, lastPong, lastPingSeen, lastTraffic);
+                        } finally {
+                            DataBufferUtils.release(message.getPayload());
+                        }
+                    })
                     .doOnError(ex -> log.error("EVENT=WS_DISCONNECTED symbol={} message={}", symbol, ex.getMessage(), ex))
-                    .then();
+                    .then()
+                    .cache();
 
             Flux<WebSocketMessage> pingFlux = properties.isClientPingEnabled()
                     ? Flux.interval(properties.getPingInterval())
@@ -162,7 +172,6 @@ public class WsMarketDataClient {
         if (message.getType() == WebSocketMessage.Type.PING) {
             byte[] payload = new byte[message.getPayload().readableByteCount()];
             message.getPayload().read(payload);
-            DataBufferUtils.release(message.getPayload());
             outbound.tryEmitNext(session.pongMessage(factory -> factory.wrap(payload)));
             lastPingSeen.set(System.currentTimeMillis());
             log.debug("EVENT=WS_PONG_SENT symbol={}", symbol);
