@@ -18,7 +18,8 @@ public class WsSnapshotLoggerProperties {
     private int warmupSamples = 20;
     private int rollingShort = 20;
     private int rollingLong = 60;
-    private Path baseDir = Path.of("/opt/binance-bot/signals/ws");
+    private Path baseDir = Path.of("signals/ws");
+    private String mode = "existing";
     private String wsBaseUrl = "wss://fstream.binance.com/stream";
     private boolean clientPingEnabled = false;
     private Duration pingInterval = Duration.ofSeconds(30);
@@ -90,6 +91,14 @@ public class WsSnapshotLoggerProperties {
 
     public void setBaseDir(Path baseDir) {
         this.baseDir = baseDir;
+    }
+
+    public String getMode() {
+        return mode;
+    }
+
+    public void setMode(String mode) {
+        this.mode = mode;
     }
 
     public String getWsBaseUrl() {

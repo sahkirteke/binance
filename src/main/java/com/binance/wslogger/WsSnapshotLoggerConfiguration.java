@@ -8,30 +8,40 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 @EnableConfigurationProperties(WsSnapshotLoggerProperties.class)
-@ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
 public class WsSnapshotLoggerConfiguration {
 
     @Bean
+    public MarketDataHub marketDataHub() {
+        return new MarketDataHub();
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
     public JsonlWriter jsonlWriter(WsSnapshotLoggerProperties properties, ObjectMapper objectMapper) {
         return new JsonlWriter(properties, objectMapper);
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "mode", havingValue = "standalone")
     public WsMarketDataClient wsMarketDataClient(WsSnapshotLoggerProperties properties, ObjectMapper objectMapper) {
         return new WsMarketDataClient(properties, objectMapper);
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
     public SnapshotScheduler snapshotScheduler(WsSnapshotLoggerProperties properties, JsonlWriter writer) {
         return new SnapshotScheduler(properties, writer);
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "ws-snapshot-logger", name = "enabled", havingValue = "true")
     public WsSnapshotLoggerModuleStarter wsSnapshotLoggerModuleStarter(
             WsSnapshotLoggerProperties properties,
-            WsMarketDataClient wsMarketDataClient,
+            MarketDataHub marketDataHub,
+            org.springframework.beans.factory.ObjectProvider<WsMarketDataClient> wsMarketDataClient,
             SnapshotScheduler snapshotScheduler,
             JsonlWriter writer) {
-        return new WsSnapshotLoggerModuleStarter(properties, wsMarketDataClient, snapshotScheduler, writer);
+        return new WsSnapshotLoggerModuleStarter(properties, marketDataHub, wsMarketDataClient, snapshotScheduler, writer);
     }
 }

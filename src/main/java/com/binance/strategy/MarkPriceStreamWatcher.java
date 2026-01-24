@@ -12,6 +12,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
 
 import com.binance.config.BinanceProperties;
+import com.binance.wslogger.MarketDataHub;
+import com.binance.wslogger.MarkPriceEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -30,6 +32,7 @@ public class MarkPriceStreamWatcher {
 	private final WarmupProperties warmupProperties;
 	private final TrailingPnlService trailingPnlService;
 	private final ObjectMapper objectMapper;
+	private final MarketDataHub marketDataHub;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
 	private final AtomicReference<List<Disposable>> testnetSubscriptionsRef = new AtomicReference<>();
@@ -40,12 +43,14 @@ public class MarkPriceStreamWatcher {
 			StrategyProperties strategyProperties,
 			WarmupProperties warmupProperties,
 			TrailingPnlService trailingPnlService,
-			ObjectMapper objectMapper) {
+			ObjectMapper objectMapper,
+			MarketDataHub marketDataHub) {
 		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
 		this.trailingPnlService = trailingPnlService;
 		this.objectMapper = objectMapper;
+		this.marketDataHub = marketDataHub;
 	}
 
 	@PostConstruct
@@ -104,10 +109,12 @@ public class MarkPriceStreamWatcher {
 			JsonNode eventNode = dataNode != null && !dataNode.isNull() ? dataNode : node;
 			String symbol = symbolHint != null ? symbolHint : eventNode.path("s").asText();
 			double markPrice = eventNode.path("p").asDouble(Double.NaN);
+			long eventTime = eventNode.path("E").asLong(System.currentTimeMillis());
 			if (symbol == null || symbol.isBlank() || Double.isNaN(markPrice)) {
 				return;
 			}
 			trailingPnlService.onMarkPrice(symbol, markPrice);
+			marketDataHub.publish(new MarkPriceEvent(symbol, markPrice, eventTime));
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse mark price message", ex);
 		}

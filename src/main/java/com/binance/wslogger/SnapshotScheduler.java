@@ -32,6 +32,7 @@ public class SnapshotScheduler {
         for (Map.Entry<String, PerSymbolStateStore> entry : stores.entrySet()) {
             String symbol = entry.getKey();
             PerSymbolStateStore store = entry.getValue();
+            emitSnapshot(store);
             Disposable task = Flux.interval(interval, interval, scheduler)
                     .onBackpressureDrop()
                     .doOnNext(tick -> emitSnapshot(store))

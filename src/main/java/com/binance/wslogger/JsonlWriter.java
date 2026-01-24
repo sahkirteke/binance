@@ -7,6 +7,7 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -118,11 +119,21 @@ public class JsonlWriter {
     private void rotateWriter(String symbol, LocalDate date, WriterState state) throws IOException {
         closeWriter(state);
         Path baseDir = properties.getBaseDir();
-        Files.createDirectories(baseDir);
         String fileName = symbol + "-" + DATE_FORMAT.format(date) + ".jsonl";
         Path filePath = baseDir.resolve(fileName);
-        state.writer = Files.newBufferedWriter(filePath);
-        state.currentDate = date;
+        try {
+            Files.createDirectories(baseDir);
+            state.writer = Files.newBufferedWriter(
+                    filePath,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.APPEND);
+            state.currentDate = date;
+            log.info("EVENT=SNAPSHOT_FILE_OPEN symbol={} path={}", symbol, filePath.toAbsolutePath());
+        } catch (IOException ex) {
+            log.error("EVENT=SNAPSHOT_FILE_OPEN_FAIL path={} message={}", filePath.toAbsolutePath(), ex.getMessage(), ex);
+            throw ex;
+        }
     }
 
     private void flushAll() {

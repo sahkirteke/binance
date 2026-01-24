@@ -223,3 +223,23 @@ logging:
   level:
     com.binance.exchange.TimeSyncServices: WARN
 
+ws-snapshot-logger:
+  enabled: false
+  mode: existing
+  base-dir: signals/ws
+  symbols:
+    - ETHUSDT
+    - XRPUSDT
+    - DOGEUSDT
+    - LTCUSDT
+    - ADAUSDT
+    - AVAXUSDT
+    - ARBUSDT
+    - MANAUSDT
+    - XLMUSDT
+    - CHZUSDT
+    - ALGOUSDT
+    - BANDUSDT
+    - BATUSDT
+    - CHRUSDT
+    - POLUSDT
