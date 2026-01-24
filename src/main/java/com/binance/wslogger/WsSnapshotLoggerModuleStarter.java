@@ -64,7 +64,7 @@ public class WsSnapshotLoggerModuleStarter implements ApplicationListener<Applic
                 }
             } else {
                 marketDataSubscription = marketDataHub.flux()
-                        .subscribe(event -> applyEvent(stores, event), ex -> log.error(
+                        .subscribe(marketEvent -> applyEvent(stores, marketEvent), ex -> log.error(
                                 "EVENT=WS_SNAPSHOT_LOGGER_HUB_ERROR message={}",
                                 ex.getMessage(),
                                 ex));
