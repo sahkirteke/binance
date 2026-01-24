@@ -7,6 +7,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -17,7 +18,6 @@ import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
@@ -48,6 +48,9 @@ public class WsMarketDataClient {
     private final Map<String, AtomicLong> shortDisconnects = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> lastReconnectWarn = new ConcurrentHashMap<>();
     private final AtomicLong globalNextReconnectAtMs = new AtomicLong();
+    private final Set<String> markPriceLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> bookTickerLogged = ConcurrentHashMap.newKeySet();
+    private final Set<String> aggTradeLogged = ConcurrentHashMap.newKeySet();
 
     public WsMarketDataClient(WsSnapshotLoggerProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
@@ -58,12 +61,11 @@ public class WsMarketDataClient {
     }
 
     public void start(Map<String, PerSymbolStateStore> stores) {
-        for (Map.Entry<String, PerSymbolStateStore> entry : stores.entrySet()) {
-            String symbol = entry.getKey();
-            PerSymbolStateStore store = entry.getValue();
-            Disposable disposable = connectLoop(symbol, store).subscribe();
-            connections.put(symbol, disposable);
+        if (stores.isEmpty()) {
+            return;
         }
+        Disposable disposable = connectLoop(stores).subscribe();
+        connections.put("combined", disposable);
     }
 
     @PreDestroy
@@ -84,42 +86,36 @@ public class WsMarketDataClient {
         return new ReactorNettyWebSocketClient(httpClient);
     }
 
-    private Mono<Void> connectLoop(String symbol, PerSymbolStateStore store) {
-        return Mono.defer(() -> connectOnce(symbol, store))
+    private Mono<Void> connectLoop(Map<String, PerSymbolStateStore> stores) {
+        return Mono.defer(() -> connectOnce(stores))
                 .onErrorResume(ex -> {
-                    Duration delay = nextDelay(symbol, ex);
-                    if (shouldWarnReconnect(symbol)) {
-                        log.warn("EVENT=WS_RECONNECT_SCHEDULED symbol={} delayMs={} message={}", symbol, delay.toMillis(), ex.getMessage());
+                    Duration delay = nextDelay("combined", ex);
+                    if (shouldWarnReconnect("combined")) {
+                        log.warn("EVENT=WS_RECONNECT_SCHEDULED symbol=combined delayMs={} message={}", delay.toMillis(), ex.getMessage());
                     }
-                    return Mono.delay(delay, reconnectScheduler).then(connectLoop(symbol, store));
+                    return Mono.delay(delay, reconnectScheduler).then(connectLoop(stores));
                 });
     }
 
-    private Mono<Void> connectOnce(String symbol, PerSymbolStateStore store) {
-        URI uri = URI.create(buildUrl(symbol));
+    private Mono<Void> connectOnce(Map<String, PerSymbolStateStore> stores) {
+        URI uri = URI.create(buildUrl(stores));
         AtomicLong lastPong = new AtomicLong(System.currentTimeMillis());
         AtomicLong lastPingSeen = new AtomicLong(System.currentTimeMillis());
         AtomicLong lastTraffic = new AtomicLong(System.currentTimeMillis());
         AtomicBoolean closeRequested = new AtomicBoolean(false);
         long connectStart = System.currentTimeMillis();
-        log.info("EVENT=WS_CONNECT symbol={} uri={}", symbol, uri);
+        log.info("EVENT=WS_CONNECT symbol=combined uri={}", uri);
         return webSocketClient.execute(uri, session -> {
-            log.info("EVENT=WS_CONNECTED symbol={}", symbol);
+            log.info("EVENT=WS_CONNECTED symbol=combined");
             Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
-            Flux<WebSocketMessage> inbound = session.receive()
-                    .doOnNext(message -> DataBufferUtils.retain(message.getPayload()))
-                    .publish()
-                    .refCount(1);
+            Flux<WebSocketMessage> inbound = session.receive().publish().refCount(1);
             Mono<Void> receiveDone = inbound
+                    .doOnNext(message -> handleControlMessage(session, outbound, message, lastPong, lastPingSeen))
+                    .filter(message -> message.getType() == WebSocketMessage.Type.TEXT)
+                    .map(WebSocketMessage::getPayloadAsText)
                     .publishOn(messageScheduler)
-                    .doOnNext(message -> {
-                        try {
-                            handleMessage(symbol, store, session, outbound, message, lastPong, lastPingSeen, lastTraffic);
-                        } finally {
-                            DataBufferUtils.release(message.getPayload());
-                        }
-                    })
-                    .doOnError(ex -> log.error("EVENT=WS_DISCONNECTED symbol={} message={}", symbol, ex.getMessage(), ex))
+                    .doOnNext(payload -> handleTextPayload(stores, payload, lastTraffic))
+                    .doOnError(ex -> log.error("EVENT=WS_DISCONNECTED symbol=combined message={}", ex.getMessage(), ex))
                     .then()
                     .cache();
 
@@ -127,7 +123,7 @@ public class WsMarketDataClient {
                     ? Flux.interval(properties.getPingInterval())
                     .takeUntilOther(receiveDone)
                     .map(tick -> {
-                        log.debug("EVENT=WS_PING_SENT symbol={}", symbol);
+                        log.debug("EVENT=WS_PING_SENT symbol=combined");
                         return session.pingMessage(dataBufferFactory -> dataBufferFactory.wrap(new byte[] { 1 }));
                     })
                     .doOnNext(message -> outbound.tryEmitNext(message))
@@ -145,7 +141,7 @@ public class WsMarketDataClient {
                         boolean pongStale = properties.isClientPingEnabled()
                                 && lastPongDelta > properties.getPongTimeout().toMillis();
                         if (trafficStale || pongStale) {
-                            log.warn("EVENT=WS_PONG_TIMEOUT symbol={}", symbol);
+                            log.warn("EVENT=WS_PONG_TIMEOUT symbol=combined");
                             if (closeRequested.compareAndSet(false, true)) {
                                 return session.close();
                             }
@@ -155,69 +151,86 @@ public class WsMarketDataClient {
                     .then();
 
             return Mono.when(sendOutbound, pingFlux.then(), monitorPong, receiveDone)
-                    .doFinally(signalType -> log.info("EVENT=WS_DISCONNECTED symbol={} signal={}", symbol, signalType));
+                    .doFinally(signalType -> log.info("EVENT=WS_DISCONNECTED symbol=combined signal={}", signalType));
         }).then(Mono.error(new IllegalStateException("WebSocket session ended")))
-                .doOnError(ex -> updateDisconnectStats(symbol, connectStart, ex));
+                .doOnError(ex -> updateDisconnectStats("combined", connectStart, ex));
     }
 
-    private void handleMessage(
-            String symbol,
-            PerSymbolStateStore store,
+    private void handleControlMessage(
             WebSocketSession session,
             Sinks.Many<WebSocketMessage> outbound,
             WebSocketMessage message,
             AtomicLong lastPong,
-            AtomicLong lastPingSeen,
-            AtomicLong lastTraffic) {
+            AtomicLong lastPingSeen) {
         if (message.getType() == WebSocketMessage.Type.PING) {
             byte[] payload = new byte[message.getPayload().readableByteCount()];
             message.getPayload().read(payload);
             outbound.tryEmitNext(session.pongMessage(factory -> factory.wrap(payload)));
             lastPingSeen.set(System.currentTimeMillis());
-            log.debug("EVENT=WS_PONG_SENT symbol={}", symbol);
+            log.debug("EVENT=WS_PONG_SENT symbol=combined");
             return;
         }
         if (message.getType() == WebSocketMessage.Type.PONG) {
             lastPong.set(System.currentTimeMillis());
-            log.debug("EVENT=WS_PONG_RCVD symbol={}", symbol);
+            log.debug("EVENT=WS_PONG_RCVD symbol=combined");
             return;
         }
-        if (message.getType() != WebSocketMessage.Type.TEXT) {
-            return;
-        }
+    }
+
+    private void handleTextPayload(
+            Map<String, PerSymbolStateStore> stores,
+            String payload,
+            AtomicLong lastTraffic) {
         try {
             lastTraffic.set(System.currentTimeMillis());
-            JsonNode root = objectMapper.readTree(message.getPayloadAsText());
+            JsonNode root = objectMapper.readTree(payload);
             JsonNode dataNode = root.has("data") ? root.get("data") : root;
+            String symbol = dataNode.path("s").asText();
+            if (symbol == null || symbol.isBlank()) {
+                return;
+            }
+            PerSymbolStateStore store = stores.get(symbol.toUpperCase(Locale.ROOT));
+            if (store == null) {
+                return;
+            }
             String eventType = dataNode.path("e").asText();
             long eventTime = dataNode.path("E").asLong(System.currentTimeMillis());
             if (EVENT_MARK_PRICE.equals(eventType)) {
                 double price = dataNode.path("p").asDouble();
                 store.updateMarkPrice(price, eventTime);
+                logFirstData(markPriceLogged, symbol, "markPrice");
             } else if (EVENT_BOOK_TICKER.equals(eventType)) {
                 double bid = dataNode.path("b").asDouble();
                 double ask = dataNode.path("a").asDouble();
                 double bidQty = dataNode.path("B").asDouble();
                 double askQty = dataNode.path("A").asDouble();
                 store.updateBookTicker(bid, ask, bidQty, askQty, eventTime);
+                logFirstData(bookTickerLogged, symbol, "bookTicker");
             } else if (EVENT_AGG_TRADE.equals(eventType)) {
                 double qty = dataNode.path("q").asDouble();
                 boolean buyerIsMaker = dataNode.path("m").asBoolean();
                 store.updateAggTrade(qty, buyerIsMaker, eventTime);
+                logFirstData(aggTradeLogged, symbol, "aggTrade");
             }
         } catch (Exception ex) {
-            log.error("EVENT=WS_PARSE_ERROR symbol={} message={}", symbol, ex.getMessage(), ex);
+            log.error("EVENT=WS_PARSE_ERROR symbol=combined message={}", ex.getMessage(), ex);
         }
     }
 
-    private String buildUrl(String symbol) {
-        String lowerSymbol = symbol.toLowerCase(Locale.ROOT);
-        String markPrice = lowerSymbol + "@markPrice@1s";
-        // Using per-symbol bookTicker reduces traffic versus !bookTicker for the full market.
-        // This keeps the logger isolated and lighter for ~15 symbols.
-        String bookTicker = lowerSymbol + "@bookTicker";
-        String aggTrade = lowerSymbol + "@aggTrade";
-        return properties.getWsBaseUrl() + "?streams=" + markPrice + "/" + bookTicker + "/" + aggTrade;
+    private String buildUrl(Map<String, PerSymbolStateStore> stores) {
+        String streams = stores.keySet().stream()
+                .map(symbol -> symbol.toLowerCase(Locale.ROOT) + "@markPrice@1s/"
+                        + symbol.toLowerCase(Locale.ROOT) + "@bookTicker/"
+                        + symbol.toLowerCase(Locale.ROOT) + "@aggTrade")
+                .reduce((left, right) -> left + "/" + right)
+                .orElse("");
+        return properties.getWsBaseUrl() + "?streams=" + streams;
+    }
+
+    private void logFirstData(Set<String> tracker, String symbol, String type) {
+        if (tracker.add(symbol)) {
+            log.info("EVENT=WS_DATA_OK symbol={} type={}", symbol, type);
+        }
     }
 
     private Duration nextDelay(String symbol, Throwable ex) {

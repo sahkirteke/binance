@@ -224,22 +224,10 @@ logging:
     com.binance.exchange.TimeSyncServices: WARN
 
 ws-snapshot-logger:
-  enabled: false
+  enabled: true
   mode: existing
   base-dir: signals/ws
-  symbols:
-    - ETHUSDT
-    - XRPUSDT
-    - DOGEUSDT
-    - LTCUSDT
-    - ADAUSDT
-    - AVAXUSDT
-    - ARBUSDT
-    - MANAUSDT
-    - XLMUSDT
-    - CHZUSDT
-    - ALGOUSDT
-    - BANDUSDT
-    - BATUSDT
-    - CHRUSDT
-    - POLUSDT
+  ws-base-url: wss://fstream.binance.com/stream
+  symbols: ["ETHUSDT","XRPUSDT","DOGEUSDT","LTCUSDT","ADAUSDT","AVAXUSDT","ARBUSDT","MANAUSDT","XLMUSDT","CHZUSDT","ALGOUSDT","BANDUSDT","BATUSDT","CHRUSDT","POLUSDT"]
+  log-every-sec: 3
+  warmup-samples: 3
