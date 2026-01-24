@@ -82,7 +82,8 @@ public class WsMarketDataClient {
         HttpClient httpClient = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, Math.toIntExact(properties.getConnectTimeout().toMillis()))
                 .responseTimeout(properties.getResponseTimeout())
-                .doOnConnected(conn -> conn.addHandlerLast(new ReadTimeoutHandler(properties.getReadTimeout().toSeconds())));
+                .doOnConnected(conn -> conn.addHandlerLast(new ReadTimeoutHandler(
+                        Math.toIntExact(properties.getReadTimeout().getSeconds()))));
         return new ReactorNettyWebSocketClient(httpClient);
     }
 
@@ -146,7 +147,7 @@ public class WsMarketDataClient {
                                 return session.close();
                             }
                         }
-                        return Mono.empty();
+                        return Mono.<Void>empty();
                     })
                     .then();
 
