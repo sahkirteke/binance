@@ -153,7 +153,7 @@ public class WsMarketDataClient {
 
             return Mono.when(sendOutbound, pingFlux.then(), monitorPong, receiveDone)
                     .doFinally(signalType -> log.info("EVENT=WS_DISCONNECTED symbol=combined signal={}", signalType));
-        }).then(Mono.error(new IllegalStateException("WebSocket session ended")))
+        }).then(Mono.<Void>error(new IllegalStateException("WebSocket session ended")))
                 .doOnError(ex -> updateDisconnectStats("combined", connectStart, ex));
     }
 
