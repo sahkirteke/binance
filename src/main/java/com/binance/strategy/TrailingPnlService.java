@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +35,7 @@ public class TrailingPnlService {
 	private final Map<String, PositionSnapshot> positionMap = new ConcurrentHashMap<>();
 	private final Map<String, TrailingState> trailingMap = new ConcurrentHashMap<>();
 	private final Map<String, Object> fileLocks = new ConcurrentHashMap<>();
+	private final AtomicLong lastMarkPriceTs = new AtomicLong();
 	private final int exitConfirmTicksDefault = 2;
 	private static final int POSITION_SYNC_CONCURRENCY = 10;
 
@@ -51,6 +53,7 @@ public class TrailingPnlService {
 	// TrailingPnlService.java içinde onMarkPrice metodunu güncelleyin
 
 	public void onMarkPrice(String symbol, double markPrice) {
+		lastMarkPriceTs.set(System.currentTimeMillis());
 		boolean roiEnabled = strategyProperties.roiExitEnabled()
 				&& strategyProperties.roiTakeProfitPct() > 0
 				&& strategyProperties.roiStopLossPct() > 0;
@@ -197,6 +200,10 @@ public class TrailingPnlService {
 								state.lossRecoveryExitCount));
 			}
 		}
+	}
+
+	public long lastMarkPriceTs() {
+		return lastMarkPriceTs.get();
 	}
 	public void resetState(String symbol) {
 		TrailingState state = trailingMap.remove(symbol);

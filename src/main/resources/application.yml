@@ -19,6 +19,7 @@ strategy:
   active: CTI_LB
   reference-symbol: MANAUSDT
   trade-symbol: MANAUSDT
+  paper-trade: true
   trade-symbols:
     - ETHUSDT
     - XRPUSDT
@@ -212,6 +213,11 @@ warmup:
   concurrency: 3
   log-decisions: false
   decision-log-every: 0
+  paper-grace-seconds: 600
+
+filters:
+  paper-fallback: true
+  paper-qty-step: 0.001
 
 management:
   endpoints:

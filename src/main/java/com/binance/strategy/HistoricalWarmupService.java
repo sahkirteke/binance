@@ -65,6 +65,7 @@ public class HistoricalWarmupService {
 		symbolFilterService.preloadFilters(symbols)
 				.then(warmupAllSymbols(symbols))
 				.subscribe(null, error -> LOGGER.warn("EVENT=WARMUP_START_FAIL reason={}", error.getMessage()));
+		schedulePaperGraceFallback(symbols);
 	}
 
 	public Mono<Void> warmupAllSymbols(List<String> symbols) {
@@ -105,6 +106,10 @@ public class HistoricalWarmupService {
 					LOGGER.info("EVENT=WARMUP_DONE totalDurationMs={} readySymbols={} failedSymbols={}", durationMs,
 							readySymbols.get(),
 							failedSymbols.get());
+					boolean warmupOk = failedSymbols.get() == 0;
+					String reason = warmupOk ? "OK" : "FAILED_SYMBOLS";
+					LOGGER.info("EVENT=WARMUP_STATUS done={} reason={}", warmupOk, reason);
+					ctiLbStrategy.updateWarmupStatus(warmupOk, reason);
 				});
 	}
 
@@ -167,6 +172,34 @@ public class HistoricalWarmupService {
 					return Mono.empty();
 				})
 				.subscribe(null, error -> LOGGER.warn("EVENT=WARMUP_RETRY_SUBSCRIBE_FAIL symbol={} reason={}", symbol, error.getMessage()));
+	}
+
+	private void schedulePaperGraceFallback(List<String> symbols) {
+		if (!isPaperTrade()) {
+			return;
+		}
+		long graceSeconds = warmupProperties.paperGraceSeconds();
+		if (graceSeconds <= 0) {
+			return;
+		}
+		Mono.delay(Duration.ofSeconds(graceSeconds))
+				.doOnNext(tick -> {
+					ctiLbStrategy.setWarmupMode(false);
+					klineStreamWatcher.markWarmupComplete();
+					klineStreamWatcher.startStreams();
+					markPriceStreamWatcher.markWarmupComplete();
+					markPriceStreamWatcher.startStreams();
+					for (String symbol : symbols) {
+						strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
+					}
+					LOGGER.info("EVENT=WARMUP_STATUS done=false reason=GRACE_TIMEOUT");
+					ctiLbStrategy.updateWarmupStatus(false, "GRACE_TIMEOUT");
+				})
+				.subscribe(null, error -> LOGGER.warn("EVENT=WARMUP_GRACE_SUBSCRIBE_FAIL reason={}", error.getMessage()));
+	}
+
+	private boolean isPaperTrade() {
+		return strategyProperties.paperTrade() || !strategyProperties.enableOrders();
 	}
 
 	private int resolveCandles1m() {

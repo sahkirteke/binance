@@ -11,5 +11,6 @@ public record WarmupProperties(
 		int candles5m,
 		int concurrency,
 		boolean logDecisions,
-		int decisionLogEvery) {
+		int decisionLogEvery,
+		long paperGraceSeconds) {
 }
