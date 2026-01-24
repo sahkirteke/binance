@@ -9,6 +9,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -16,6 +17,7 @@ import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
@@ -98,6 +100,7 @@ public class WsMarketDataClient {
         AtomicLong lastPong = new AtomicLong(System.currentTimeMillis());
         AtomicLong lastPingSeen = new AtomicLong(System.currentTimeMillis());
         AtomicLong lastTraffic = new AtomicLong(System.currentTimeMillis());
+        AtomicBoolean closeRequested = new AtomicBoolean(false);
         long connectStart = System.currentTimeMillis();
         log.info("EVENT=WS_CONNECT symbol={} uri={}", symbol, uri);
         return webSocketClient.execute(uri, session -> {
@@ -123,7 +126,7 @@ public class WsMarketDataClient {
 
             Mono<Void> monitorPong = Flux.interval(properties.getPongTimeout())
                     .takeUntilOther(receive)
-                    .doOnNext(tick -> {
+                    .concatMap(tick -> {
                         long now = System.currentTimeMillis();
                         long lastTrafficDelta = now - lastTraffic.get();
                         long lastPongDelta = now - lastPong.get();
@@ -132,8 +135,11 @@ public class WsMarketDataClient {
                                 && lastPongDelta > properties.getPongTimeout().toMillis();
                         if (trafficStale || pongStale) {
                             log.warn("EVENT=WS_PONG_TIMEOUT symbol={}", symbol);
-                            session.close().subscribe();
+                            if (closeRequested.compareAndSet(false, true)) {
+                                return session.close();
+                            }
                         }
+                        return Mono.empty();
                     })
                     .then();
 
@@ -155,6 +161,7 @@ public class WsMarketDataClient {
         if (message.getType() == WebSocketMessage.Type.PING) {
             byte[] payload = new byte[message.getPayload().readableByteCount()];
             message.getPayload().read(payload);
+            DataBufferUtils.release(message.getPayload());
             outbound.tryEmitNext(session.pongMessage(factory -> factory.wrap(payload)));
             lastPingSeen.set(System.currentTimeMillis());
             log.debug("EVENT=WS_PONG_SENT symbol={}", symbol);
