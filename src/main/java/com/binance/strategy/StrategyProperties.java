@@ -114,7 +114,31 @@ public record StrategyProperties(
 		int pnlTrailExitConfirmTicks,
 		boolean roiExitEnabled,
 		double roiTakeProfitPct,
-		double roiStopLossPct) {
+		double roiStopLossPct,
+		boolean enableLongQualityGate,
+		double longMinBbWidth,
+		boolean enableLongRsiQuality,
+		double longRsiMin,
+		double longRsiMax,
+		double longBbChasePbMin,
+		boolean enableLongSetup4,
+		boolean enableLongSetup5,
+		boolean enableLongTimeStopExit,
+		int longTimeStopBars,
+		boolean enableShortMacdDeltaNegativeGate,
+		boolean enableShortS2Only,
+		double shortS2VolRatioMin,
+		boolean enableShortS2BbPercentGate,
+		double shortS2BbPercentMax,
+		boolean enableShortS6,
+		double shortS6VolRatioMin,
+		double shortS6BbWidthMin,
+		double shortS6Ema20DistMin,
+		double shortS6AdxMin,
+		boolean enableReversalExitOnlyWhenProfitable,
+		int closeInFlightCooldownBars,
+		LongSetupProperties longSetups,
+		ShortSetupProperties shortSetups) {
 
 
 	public List<String> resolvedTradeSymbols() {

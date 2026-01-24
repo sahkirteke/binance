@@ -13,5 +13,8 @@ public record BinanceProperties(
 		boolean useTestnet,
 		String apiKey,
 		String secretKey,
-		long recvWindowMillis) {
+		long recvWindowMillis,
+		int connectTimeoutMs,
+		long responseTimeoutMs,
+		long handshakeTimeoutMs) {
 }

@@ -8,6 +8,12 @@ import org.springframework.http.MediaType;
 import org.springframework.util.unit.DataSize;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+
+import io.netty.channel.ChannelOption;
+import io.netty.handler.ssl.SslHandler;
+import reactor.netty.http.client.HttpClient;
+import java.time.Duration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -23,9 +29,11 @@ public class WebClientConfig {
 	public WebClient binanceWebClient(BinanceProperties properties, WebClient.Builder builder, DataSize maxInMemorySize) {
 		String baseUrl = properties.useTestnet() ? properties.testnetBaseUrl() : properties.baseUrl();
 		ExchangeStrategies strategies = exchangeStrategies(maxInMemorySize);
+		ReactorClientHttpConnector connector = new ReactorClientHttpConnector(configureHttpClient(properties));
 		return builder
 				.baseUrl(baseUrl)
 				.defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+				.clientConnector(connector)
 				.exchangeStrategies(strategies)
 				.build();
 	}
@@ -33,9 +41,11 @@ public class WebClientConfig {
 	@Bean
 	public WebClient spotWebClient(BinanceProperties properties, WebClient.Builder builder, DataSize maxInMemorySize) {
 		ExchangeStrategies strategies = exchangeStrategies(maxInMemorySize);
+		ReactorClientHttpConnector connector = new ReactorClientHttpConnector(configureHttpClient(properties));
 		return builder
 				.baseUrl(properties.baseUrl())
 				.defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+				.clientConnector(connector)
 				.exchangeStrategies(strategies)
 				.build();
 	}
@@ -50,6 +60,22 @@ public class WebClientConfig {
 	@Bean
 	public DataSize maxInMemorySize(@Value("${spring.codec.max-in-memory-size:5MB}") DataSize maxInMemorySize) {
 		return maxInMemorySize;
+	}
+
+	private HttpClient configureHttpClient(BinanceProperties properties) {
+		int connectTimeout = properties.connectTimeoutMs() > 0 ? properties.connectTimeoutMs() : 5000;
+		long responseTimeout = properties.responseTimeoutMs() > 0 ? properties.responseTimeoutMs() : 10000;
+		long handshakeTimeout = properties.handshakeTimeoutMs() > 0 ? properties.handshakeTimeoutMs() : 10000;
+		return HttpClient.create()
+				.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeout)
+				.responseTimeout(Duration.ofMillis(responseTimeout))
+				.secure()
+				.doOnConnected(connection -> {
+					SslHandler sslHandler = connection.channel().pipeline().get(SslHandler.class);
+					if (sslHandler != null) {
+						sslHandler.setHandshakeTimeoutMillis(Math.toIntExact(handshakeTimeout));
+					}
+				});
 	}
 
 	@Bean

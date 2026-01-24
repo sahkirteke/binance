@@ -1,10 +1,6 @@
 spring:
   application:
     name: binance-trader
-  autoconfigure:
-    exclude:
-      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
   codec:
     max-in-memory-size: 5MB
 
@@ -15,6 +11,9 @@ binance:
   api-key: ${BINANCE_API_KEY:}
   secret-key: ${BINANCE_SECRET_KEY:}
   recv-window-millis: 5000
+  connect-timeout-ms: 5000
+  response-timeout-ms: 10000
+  handshake-timeout-ms: 30000
 
 strategy:
   active: CTI_LB
@@ -128,6 +127,83 @@ strategy:
   tp-trailing-enabled: true
   tp-start-pct: 0.25
   tp-trail-pct: 0.15
+  enable-long-quality-gate: false
+  long-min-bb-width: 0.010
+  enable-long-rsi-quality: true
+  long-rsi-min: 45
+  long-rsi-max: 60
+  long-bb-chase-pb-min: 0.80
+  enable-long-setup4: true
+  enable-long-setup5: true
+  enable-long-time-stop-exit: true
+  long-time-stop-bars: 2
+  enable-short-macd-delta-negative-gate: true
+  enable-short-s2-only: true
+  short-s2-vol-ratio-min: 1.0
+  enable-short-s2-bb-percent-gate: false
+  short-s2-bb-percent-max: 0.30
+  enable-short-s6: true
+  short-s6-vol-ratio-min: 2.2
+  short-s6-bb-width-min: 0.020
+  short-s6-ema20-dist-min: 0.010
+  short-s6-adx-min: 25
+  enable-reversal-exit-only-when-profitable: true
+  close-in-flight-cooldown-bars: 1
+  long-setups:
+    setup1:
+      bbWidthMin: 0.0114
+      bbWidthMax: 0.0130
+      volMin: 0.8
+      volMax: 1.0
+    setup2:
+      bbWidthMin: 0.0100
+      bbWidthMax: 0.0114
+      volMin: 1.0
+      volMax: 1.2
+    setup3:
+      bbWidthMin: 0.0100
+      bbWidthMax: 0.0114
+      ema20DistMin: 0.0005
+      ema20DistMax: 0.0010
+    setup4:
+      bbWidthMin: 0.0080
+      bbWidthMax: 0.0100
+      ema20DistMin: 0.0010
+      ema20DistMax: 0.0015
+    setup5:
+      rsiMin: 35
+      rsiMax: 45
+      ema20DistMin: 0.004
+  short-setups:
+    s1:
+      bbWidthMin: 0.0130
+      bbWidthMax: 0.0160
+      ema20DistMin: 0.0005
+      ema20DistMax: 0.0010
+    s2:
+      rsiMin: 40
+      rsiMax: 45
+      ema20DistMin: 0.0040
+      ema20DistMax: 0.0060
+    s3:
+      bbWidthMin: 0.0080
+      bbWidthMax: 0.0100
+      rsiMin: 55
+      rsiMax: 60
+    s4:
+      bbPercentBMin: 0.60
+      bbPercentBMax: 0.75
+      macdDeltaMin: 0.00001
+      macdDeltaMax: 0.00005
+    s5:
+      adxMin: 12.5
+      adxMax: 15.0
+      macdDeltaMinExclusive: 0.00005
+    s6:
+      volRatioMin: 2.2
+      bbWidthMin: 0.020
+      ema20DistMin: 0.010
+      adxMin: 25
 
 warmup:
   enabled: true
@@ -142,4 +218,8 @@ management:
     web:
       exposure:
         include: health,info
+
+logging:
+  level:
+    com.binance.exchange.TimeSyncServices: WARN
 

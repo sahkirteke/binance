@@ -96,7 +96,8 @@ public class TimeSyncService {
 				.doOnError(error -> LOGGER.warn("EVENT=TIME_SYNC_REST_FAILED symbol={} error={}", symbol,
 						error.getMessage()))
 				.onErrorResume(error -> Mono.empty())
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=TIME_SYNC_REST_SUBSCRIBE_FAIL symbol={} error={}", symbol,
+						error.getMessage()));
 	}
 
 	private Optional<Candle> parseLastClosedFiveMinute(String json, String symbol) {
