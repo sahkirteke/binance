@@ -22,6 +22,7 @@ public record StrategyProperties(
 		int leverage,
 		String positionSide,
 		boolean enableOrders,
+		boolean paperTrade,
 		boolean startupTestOrderEnabled,
 		@Positive int pollIntervalMs,
 		int tickIntervalMs,

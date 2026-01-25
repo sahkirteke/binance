@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +34,7 @@ public class SymbolFilterService {
 	private final AtomicBoolean filtersReady = new AtomicBoolean(false);
 	private final AtomicBoolean refreshInFlight = new AtomicBoolean(false);
 	private final AtomicLong lastRefreshMs = new AtomicLong(0L);
+	private final AtomicReference<String> lastRefreshError = new AtomicReference<>();
 	private final StrategyProperties strategyProperties;
 	private final Duration refreshTtl;
 
@@ -47,7 +49,7 @@ public class SymbolFilterService {
 	public void init() {
 		if (strategyProperties.active() == StrategyType.CTI_LB) {
 			preloadFilters(strategyProperties.resolvedTradeSymbols())
-					.subscribe();
+					.subscribe(null, error -> LOGGER.warn("EVENT=FILTERS_PRELOAD_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 		}
 	}
 
@@ -70,7 +72,8 @@ public class SymbolFilterService {
 	}
 
 	public void requestRefresh() {
-		refreshAllFilters().subscribe();
+		refreshAllFilters()
+				.subscribe(null, error -> LOGGER.warn("EVENT=FILTERS_REFRESH_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 	}
 
 	private Mono<Void> refreshAllFilters() {
@@ -88,6 +91,7 @@ public class SymbolFilterService {
 					cache.putAll(parsed);
 					boolean readyNow = !trackedSymbols.isEmpty() && areFiltersReady(List.copyOf(trackedSymbols));
 					filtersReady.set(readyNow);
+					lastRefreshError.set(null);
 					parsed.forEach((symbol, filters) -> LOGGER.info(
 							"EVENT=FILTERS_READY_FOR_SYMBOL symbol={} stepSize={} minQty={} minNotional={} tickSize={}",
 							symbol,
@@ -98,13 +102,22 @@ public class SymbolFilterService {
 					logMissingSymbols(parsed.keySet());
 					lastRefreshMs.set(System.currentTimeMillis());
 					LOGGER.info("EVENT=FILTERS_GLOBAL_OK symbolsReady={}", parsed.size());
+					LOGGER.info("EVENT=FILTERS_STATUS ready=true reason=OK");
 				})
 				.retryWhen(Retry.backoff(4, RETRY_MIN_BACKOFF)
 						.maxBackoff(RETRY_MAX_BACKOFF)
 						.jitter(0.2))
-				.doOnError(error -> LOGGER.warn("EVENT=FILTERS_GLOBAL_FAIL reason={}", error.getMessage()))
+				.doOnError(error -> {
+					lastRefreshError.set(error.getMessage());
+					LOGGER.warn("EVENT=FILTERS_GLOBAL_FAIL reason={}", error.getMessage());
+					LOGGER.info("EVENT=FILTERS_STATUS ready=false reason={}", error.getMessage());
+				})
 				.doFinally(signal -> refreshInFlight.set(false))
 				.then();
+	}
+
+	public String lastRefreshError() {
+		return lastRefreshError.get();
 	}
 
 	static Map<String, BinanceFuturesOrderClient.SymbolFilters> parseExchangeInfo(

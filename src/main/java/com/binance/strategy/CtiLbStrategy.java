@@ -38,6 +38,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.ta4j.core.BarSeries;
+import reactor.core.publisher.Flux;
 import org.ta4j.core.BaseBar;
 import org.ta4j.core.BaseBarSeriesBuilder;
 import org.ta4j.core.indicators.EMAIndicator;
@@ -107,6 +108,7 @@ public class CtiLbStrategy {
 	private final BinanceFuturesOrderClient orderClient;
 	private final StrategyProperties strategyProperties;
 	private final WarmupProperties warmupProperties;
+	private final FiltersProperties filtersProperties;
 	private final SymbolFilterService symbolFilterService;
 	private final OrderTracker orderTracker;
 	private final ObjectMapper objectMapper;
@@ -136,15 +138,18 @@ public class CtiLbStrategy {
 	private final Map<String, Object> signalFileLocks = new ConcurrentHashMap<>();
 	private volatile boolean warmupMode;
 	private volatile boolean ordersEnabledOverride = true;
+	private volatile String warmupStatusReason = "INIT";
+	private volatile boolean warmupCompleted;
 	@Autowired
 	@Lazy
 	private TrailingPnlService trailingPnlService;
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties,
-			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService, OrderTracker orderTracker,
-			ObjectMapper objectMapper) {
+			WarmupProperties warmupProperties, FiltersProperties filtersProperties,
+			SymbolFilterService symbolFilterService, OrderTracker orderTracker, ObjectMapper objectMapper) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
+		this.filtersProperties = filtersProperties;
 		this.symbolFilterService = symbolFilterService;
 		this.orderTracker = orderTracker;
 		this.objectMapper = objectMapper;
@@ -154,6 +159,7 @@ public class CtiLbStrategy {
 	@PostConstruct
 	void logLongSetupMode() {
 		LOGGER.info("ENTRY SETUPS ENABLED: LONG(5) + SHORT(5), OR LOGIC");
+		startReadinessLogging();
 	}
 
 	public void setWarmupMode(boolean warmupMode) {
@@ -161,6 +167,21 @@ public class CtiLbStrategy {
 		if (warmupMode) {
 			ordersEnabledOverride = false;
 		}
+	}
+
+	public void updateWarmupStatus(boolean done, String reason) {
+		if (done) {
+			warmupCompleted = true;
+		} else if (warmupCompleted) {
+			return;
+		}
+		if (reason != null) {
+			this.warmupStatusReason = reason;
+		}
+	}
+
+	public boolean isWarmupCompleted() {
+		return warmupCompleted;
 	}
 
 	public void enableOrdersAfterWarmup() {
@@ -351,7 +372,7 @@ public class CtiLbStrategy {
 					trailingPnlService.resetClosingFlag(symbol);
 				})
 				.onErrorResume(error -> Mono.empty())
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=TRAIL_EXIT_SUBSCRIBE_FAIL symbol={} reason={}", symbol, error.getMessage()));
 	}
 	private void cleanupPositionState(String symbol) {
 		positionStates.put(symbol, PositionState.NONE);
@@ -364,7 +385,7 @@ public class CtiLbStrategy {
 		orderClient.fetchPosition(symbol)
 				.doOnNext(position -> applyExchangePosition(symbol, position, eventTime))
 				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=POSITION_SYNC_SUBSCRIBE_FAIL symbol={} error={}", symbol, error.getMessage()));
 	}
 
 	public Mono<Void> refreshAfterWarmup(String symbol) {
@@ -883,7 +904,7 @@ public class CtiLbStrategy {
 					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}", decisionActionReasonFinal,
 							error.getMessage()))
 					.onErrorResume(error -> Mono.empty())
-					.subscribe();
+					.subscribe(null, error -> LOGGER.warn("EVENT=CTI_EXIT_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 			return;
 		}
 
@@ -1253,7 +1274,7 @@ public class CtiLbStrategy {
 							tpTrailingStateForLog, trendAlignedWithPositionFinal, exitBlockedByTrendAlignedActionFinal);
 				})
 				.onErrorResume(error -> Mono.empty())
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=CTI_ACTION_SUBSCRIBE_FAIL reason={}", error.getMessage()));
 	}
 
 	public void onClosedOneMinuteCandle(String symbol, Candle candle) {
@@ -2713,6 +2734,10 @@ public class CtiLbStrategy {
 		BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
 		if (filters == null) {
 			triggerFilterRefresh();
+			if (isPaperTrade() && filtersProperties.paperFallback()) {
+				BigDecimal stepSize = resolvePaperQtyStep();
+				return CtiLbDecisionEngine.resolveQuantity(resolveTargetNotionalUsdt(), close, stepSize);
+			}
 			return null;
 		}
 		BigDecimal targetNotional = resolveTargetNotionalUsdt();
@@ -2874,12 +2899,18 @@ public class CtiLbStrategy {
 	private String validateMinTrade(String symbol, BigDecimal quantity, double price) {
 		if (!symbolFilterService.filtersReady()) {
 			triggerFilterRefresh();
+			if (isPaperTrade() && filtersProperties.paperFallback()) {
+				return null;
+			}
 			return "WAIT_FILTERS";
 		}
 		if (quantity == null || quantity.signum() <= 0) {
 			BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
 			if (filters == null) {
 				triggerFilterRefresh();
+				if (isPaperTrade() && filtersProperties.paperFallback()) {
+					return null;
+				}
 				return "WAIT_FILTERS";
 			}
 			return "QTY_ZERO_AFTER_STEP";
@@ -2887,12 +2918,15 @@ public class CtiLbStrategy {
 		BinanceFuturesOrderClient.SymbolFilters filters = symbolFilterService.getFilters(symbol);
 		if (filters == null) {
 			triggerFilterRefresh();
+			if (isPaperTrade() && filtersProperties.paperFallback()) {
+				return null;
+			}
 			return "WAIT_FILTERS";
 		}
 		if (filters.minQty() != null && quantity.compareTo(filters.minQty()) < 0) {
 			return "QTY_TOO_SMALL";
 		}
-		if (filters.minNotional() != null) {
+		if (filters.minNotional() != null && !isPaperTrade()) {
 			BigDecimal notional = quantity.multiply(BigDecimal.valueOf(price), MathContext.DECIMAL64);
 			if (notional.compareTo(filters.minNotional()) < 0) {
 				return "NOTIONAL_TOO_SMALL";
@@ -3199,6 +3233,12 @@ public class CtiLbStrategy {
 				payload.set("signal", objectMapper.valueToTree(signal));
 				arrayNode.add(payload);
 				objectMapper.writerWithDefaultPrettyPrinter().writeValue(outputFile.toFile(), arrayNode);
+				if (isPaperTrade()) {
+					LOGGER.info("EVENT=PAPER_ORDER_LOG_WRITTEN symbol={} file={} action={}",
+							symbol,
+							outputFile.toAbsolutePath(),
+							actionValue);
+				}
 			}
 		} catch (IOException error) {
 			LOGGER.warn("EVENT=SIGNAL_SNAPSHOT_FAILED symbol={} type={} error={}", symbol, signalType,
@@ -3807,7 +3847,7 @@ public class CtiLbStrategy {
 					applyExchangePosition(symbol, position, closeTime);
 				})
 				.doOnError(error -> LOGGER.warn("EVENT=POSITION_SYNC symbol={} error={}", symbol, error.getMessage()))
-				.subscribe();
+				.subscribe(null, error -> LOGGER.warn("EVENT=POSITION_SYNC_SUBSCRIBE_FAIL symbol={} error={}", symbol, error.getMessage()));
 	}
 
 	private void applyExchangePosition(String symbol, BinanceFuturesOrderClient.ExchangePosition position, long closeTime) {
@@ -3888,6 +3928,53 @@ public class CtiLbStrategy {
 
 	private boolean effectiveEnableOrders() {
 		return strategyProperties.enableOrders() && ordersEnabledOverride && !warmupMode;
+	}
+
+	private boolean isPaperTrade() {
+		return strategyProperties.paperTrade() || !strategyProperties.enableOrders();
+	}
+
+	private BigDecimal resolvePaperQtyStep() {
+		if (filtersProperties.paperQtyStep() != null && filtersProperties.paperQtyStep().signum() > 0) {
+			return filtersProperties.paperQtyStep();
+		}
+		return BigDecimal.valueOf(0.001);
+	}
+
+	private void startReadinessLogging() {
+		Flux.interval(Duration.ofSeconds(60))
+				.onErrorResume(error -> {
+					LOGGER.warn("EVENT=TRADING_ARMED_TICK_FAIL reason={}", error.getMessage());
+					return Flux.empty();
+				})
+				.subscribe(tick -> logTradingArmedStatus(),
+						error -> LOGGER.warn("EVENT=TRADING_ARMED_SUBSCRIBE_FAIL reason={}", error.getMessage()));
+	}
+
+	private void logTradingArmedStatus() {
+		long now = System.currentTimeMillis();
+		long lastKlineTs = resolveLastKlineTime();
+		long lastMarkTs = trailingPnlService.lastMarkPriceTs();
+		long lastKlineAgeMs = lastKlineTs > 0 ? Math.max(0L, now - lastKlineTs) : -1L;
+		long lastMarkAgeMs = lastMarkTs > 0 ? Math.max(0L, now - lastMarkTs) : -1L;
+		String warmupStatus = warmupMode ? "WARMUP" : warmupStatusReason;
+		String filtersStatus = symbolFilterService.filtersReady()
+				? "READY"
+				: (isPaperTrade() && filtersProperties.paperFallback() ? "FALLBACK" : "MISSING");
+		boolean armed = !warmupMode && (symbolFilterService.filtersReady()
+				|| (isPaperTrade() && filtersProperties.paperFallback()));
+		LOGGER.info("EVENT=TRADING_ARMED armed={} warmup={} filters={} lastKlineAgeMs={} lastMarkAgeMs={}",
+				armed, warmupStatus, filtersStatus, lastKlineAgeMs, lastMarkAgeMs);
+	}
+
+	private long resolveLastKlineTime() {
+		long last = 0L;
+		for (SymbolState state : symbolStates.values()) {
+			if (state.last1mCloseTime > last) {
+				last = state.last1mCloseTime;
+			}
+		}
+		return last;
 	}
 
 	private boolean shouldLogWarmupDecision(String symbol) {
