@@ -139,6 +139,7 @@ public class CtiLbStrategy {
 	private volatile boolean warmupMode;
 	private volatile boolean ordersEnabledOverride = true;
 	private volatile String warmupStatusReason = "INIT";
+	private volatile boolean warmupCompleted;
 	@Autowired
 	@Lazy
 	private TrailingPnlService trailingPnlService;
@@ -169,9 +170,18 @@ public class CtiLbStrategy {
 	}
 
 	public void updateWarmupStatus(boolean done, String reason) {
+		if (done) {
+			warmupCompleted = true;
+		} else if (warmupCompleted) {
+			return;
+		}
 		if (reason != null) {
 			this.warmupStatusReason = reason;
 		}
+	}
+
+	public boolean isWarmupCompleted() {
+		return warmupCompleted;
 	}
 
 	public void enableOrdersAfterWarmup() {

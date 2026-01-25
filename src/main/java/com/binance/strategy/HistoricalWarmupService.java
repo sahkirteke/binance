@@ -184,6 +184,9 @@ public class HistoricalWarmupService {
 		}
 		Mono.delay(Duration.ofSeconds(graceSeconds))
 				.doOnNext(tick -> {
+					if (ctiLbStrategy.isWarmupCompleted()) {
+						return;
+					}
 					ctiLbStrategy.setWarmupMode(false);
 					klineStreamWatcher.markWarmupComplete();
 					klineStreamWatcher.startStreams();
