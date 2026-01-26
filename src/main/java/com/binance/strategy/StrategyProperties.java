@@ -121,6 +121,7 @@ public record StrategyProperties(
 		double longRsiMin,
 		double longRsiMax,
 		double longBbChasePbMin,
+		boolean enableLongBaseSetups,
 		boolean enableLongSetup4,
 		boolean enableLongSetup5,
 		boolean enableLongTimeStopExit,
