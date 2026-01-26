@@ -38,35 +38,45 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
-	void resolveEntryDecisionBlocksWhenLongMacdNotAqua() throws Exception {
+	void resolveEntryDecisionAllowsLongEliteA() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
-				0.0120,
+				0.021,
 				0.50,
-				1.0,
-				0.0009,
+				0.9,
+				0.0020,
 				40.0,
 				18.0,
 				0.01,
-				MacdHistColor.BLUE);
+				MacdHistColor.BLUE,
+				-0.01,
+				0.01,
+				1,
+				0.0002,
+				false);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
-		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("LONG_MACD_COLOR_NOT_AQUA");
+		assertThat(decision.confirmedRec()).isEqualTo(CtiDirection.LONG);
+		assertThat(decision.matchedSetupName()).isEqualTo("LONG_ELITE_A");
 	}
 
 	@Test
-	void resolveEntryDecisionDoesNotAllowSetup3() throws Exception {
+	void resolveEntryDecisionBlocksWhenNoLongSetupMatched() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
 				0.0105,
 				0.40,
-				0.8,
-				0.0008,
-				40.0,
-				14.0,
+				1.2,
+				0.0100,
+				60.0,
+				10.0,
 				0.01,
-				MacdHistColor.AQUA);
+				MacdHistColor.AQUA,
+				0.02,
+				-0.01,
+				0,
+				-0.0001,
+				false);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
@@ -84,7 +94,12 @@ class CtiLbStrategyTest {
 				40.0,
 				14.0,
 				0.00001,
-				null);
+				null,
+				-0.01,
+				0.01,
+				2,
+				-0.0002,
+				false);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.LONG,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isNull();
@@ -92,21 +107,26 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
-	void resolveEntryDecisionAllowsLongSetup1WhenAqua() throws Exception {
+	void resolveEntryDecisionAllowsLongSetupLA() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
 				0.0120,
 				0.55,
 				0.95,
 				0.0009,
-				50.0,
+				40.0,
 				18.0,
 				0.01,
-				MacdHistColor.AQUA);
+				MacdHistColor.AQUA,
+				-0.02,
+				0.01,
+				1,
+				-0.0001,
+				false);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.LONG, indicators);
 		assertThat(decision.confirmedRec()).isEqualTo(CtiDirection.LONG);
-		assertThat(decision.matchedSetupName()).isEqualTo("SETUP_1");
+		assertThat(decision.matchedSetupName()).isEqualTo("SETUP_LA");
 	}
 
 	@Test
@@ -120,7 +140,12 @@ class CtiLbStrategyTest {
 				55.0,
 				30.0,
 				-0.01,
-				MacdHistColor.RED);
+				MacdHistColor.RED,
+				0.01,
+				-0.02,
+				2,
+				-0.0003,
+				false);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.SHORT, indicators);
 		assertThat(decision.confirmedRec()).isEqualTo(CtiDirection.SHORT);
@@ -128,7 +153,53 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
-	void resolveEntryDecisionBlocksShortWhenMacdNotRed() throws Exception {
+	void resolveEntryDecisionAllowsShortEliteS1() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.007,
+				0.45,
+				0.9,
+				0.0020,
+				50.0,
+				18.0,
+				0.00001,
+				MacdHistColor.RED,
+				0.01,
+				0.02,
+				1,
+				-0.0003,
+				false);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isEqualTo(CtiDirection.SHORT);
+		assertThat(decision.matchedSetupName()).isEqualTo("SETUP_S1_ELITE");
+	}
+
+	@Test
+	void resolveEntryDecisionAllowsShortS2Plus() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
+				0.007,
+				0.40,
+				0.9,
+				0.0020,
+				50.0,
+				18.0,
+				0.00002,
+				MacdHistColor.RED,
+				0.01,
+				-0.01,
+				0,
+				-0.0001,
+				false);
+		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
+				CtiDirection.SHORT, indicators);
+		assertThat(decision.confirmedRec()).isEqualTo(CtiDirection.SHORT);
+		assertThat(decision.matchedSetupName()).isEqualTo("SETUP_S2_PLUS");
+	}
+
+	@Test
+	void resolveEntryDecisionBlocksWhenNoShortSetupMatched() throws Exception {
 		CtiLbStrategy strategy = newStrategy();
 		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
 				0.015,
@@ -138,65 +209,16 @@ class CtiLbStrategyTest {
 				50.0,
 				20.0,
 				0.01,
-				MacdHistColor.AQUA);
+				MacdHistColor.AQUA,
+				0.01,
+				-0.01,
+				1,
+				0.0001,
+				false);
 		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
 				CtiDirection.SHORT, indicators);
 		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("SHORT_MACD_COLOR_NOT_RED");
-	}
-
-	@Test
-	void resolveEntryDecisionShortS2FilterFailVol() throws Exception {
-		CtiLbStrategy strategy = newStrategy();
-		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
-				0.012,
-				0.25,
-				0.8,
-				0.0045,
-				42.0,
-				18.0,
-				-0.02,
-				MacdHistColor.RED);
-		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
-				CtiDirection.SHORT, indicators);
-		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("SHORT_S2_FILTER_FAIL_VOL");
-	}
-
-	@Test
-	void resolveEntryDecisionShortS2FilterFailMacd() throws Exception {
-		CtiLbStrategy strategy = newStrategy();
-		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
-				0.012,
-				0.25,
-				1.1,
-				0.0045,
-				42.0,
-				18.0,
-				0.0,
-				MacdHistColor.RED);
-		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
-				CtiDirection.SHORT, indicators);
-		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("SHORT_S2_FILTER_FAIL_MACD");
-	}
-
-	@Test
-	void resolveEntryDecisionShortS2FilterFailPercentB() throws Exception {
-		CtiLbStrategy strategy = newStrategy();
-		CtiLbStrategy.Indicators indicators = new CtiLbStrategy.Indicators(
-				0.012,
-				0.40,
-				1.1,
-				0.0045,
-				42.0,
-				18.0,
-				-0.02,
-				MacdHistColor.RED);
-		CtiLbStrategy.EntryDecision decision = invokeResolveEntryDecision(strategy, CtiLbStrategy.PositionState.NONE,
-				CtiDirection.SHORT, indicators);
-		assertThat(decision.confirmedRec()).isNull();
-		assertThat(decision.blockReason()).isEqualTo("SHORT_S2_FILTER_FAIL_PB");
+		assertThat(decision.blockReason()).isEqualTo("NO_SHORT_SETUP_MATCHED");
 	}
 
 	@Test
@@ -212,6 +234,45 @@ class CtiLbStrategyTest {
 	}
 
 	@Test
+	void eliteExitDecisionTriggersTpForLong() throws Exception {
+		CtiLbStrategy.EntryState entryState = new CtiLbStrategy.EntryState(
+				CtiDirection.LONG,
+				BigDecimal.valueOf(100.0),
+				1_000_000L,
+				BigDecimal.ONE);
+		CtiLbDecisionEngine.ExitDecision decision = invokeEvaluateEliteExitDecision(
+				CtiLbStrategy.PositionState.LONG, entryState, 100.4);
+		assertThat(decision.exit()).isTrue();
+		assertThat(decision.reason()).isEqualTo("EXIT_TP_LONG");
+	}
+
+	@Test
+	void eliteExitDecisionTriggersSlForLong() throws Exception {
+		CtiLbStrategy.EntryState entryState = new CtiLbStrategy.EntryState(
+				CtiDirection.LONG,
+				BigDecimal.valueOf(100.0),
+				1_000_000L,
+				BigDecimal.ONE);
+		CtiLbDecisionEngine.ExitDecision decision = invokeEvaluateEliteExitDecision(
+				CtiLbStrategy.PositionState.LONG, entryState, 99.6);
+		assertThat(decision.exit()).isTrue();
+		assertThat(decision.reason()).isEqualTo("EXIT_SL_LONG");
+	}
+
+	@Test
+	void eliteExitDecisionDoesNotTriggerWhenInsideBands() throws Exception {
+		CtiLbStrategy.EntryState entryState = new CtiLbStrategy.EntryState(
+				CtiDirection.LONG,
+				BigDecimal.valueOf(100.0),
+				1_000_000L,
+				BigDecimal.ONE);
+		CtiLbDecisionEngine.ExitDecision decision = invokeEvaluateEliteExitDecision(
+				CtiLbStrategy.PositionState.LONG, entryState, 100.1);
+		assertThat(decision.exit()).isFalse();
+		assertThat(decision.reason()).isNull();
+	}
+
+	@Test
 	void jsonlFieldsRespectMatchedSetupSide() {
 		ObjectMapper mapper = new ObjectMapper();
 		ObjectNode line = mapper.createObjectNode();
@@ -223,13 +284,18 @@ class CtiLbStrategyTest {
 				42.0,
 				13.2,
 				0.00004,
-				null);
+				null,
+				-0.02,
+				0.01,
+				1,
+				-0.0002,
+				false);
 		CtiLbStrategy.EntryDecision longDecision = CtiLbStrategy.EntryDecision
-				.longMatch(CtiLbStrategy.LongEntrySetup.SETUP_1, indicators);
+				.longMatch(CtiLbStrategy.LongEntrySetup.SETUP_LA, indicators);
 		CtiLbStrategy.addSetupMatchFields(mapper, line, longDecision);
 		assertThat(line.path("longSetupMatched").asBoolean()).isTrue();
 		assertThat(line.path("shortSetupMatched").asBoolean()).isFalse();
-		assertThat(line.path("matchedSetupLong").asText()).isEqualTo("SETUP_1");
+		assertThat(line.path("matchedSetupLong").asText()).isEqualTo("SETUP_LA");
 		assertThat(line.path("matchedSetupShort").isNull()).isTrue();
 		ObjectNode lineShort = mapper.createObjectNode();
 		CtiLbStrategy.EntryDecision shortDecision = CtiLbStrategy.EntryDecision
@@ -255,6 +321,16 @@ class CtiLbStrategyTest {
 				long.class);
 		method.setAccessible(true);
 		return (int) method.invoke(null, entryState, nowMs);
+	}
+
+	private static CtiLbDecisionEngine.ExitDecision invokeEvaluateEliteExitDecision(
+			CtiLbStrategy.PositionState current,
+			CtiLbStrategy.EntryState entryState,
+			double close) throws Exception {
+		Method method = CtiLbStrategy.class.getDeclaredMethod("evaluateEliteExitDecision",
+				CtiLbStrategy.PositionState.class, CtiLbStrategy.EntryState.class, double.class);
+		method.setAccessible(true);
+		return (CtiLbDecisionEngine.ExitDecision) method.invoke(null, current, entryState, close);
 	}
 
 	private static CtiLbStrategy newStrategy() {
