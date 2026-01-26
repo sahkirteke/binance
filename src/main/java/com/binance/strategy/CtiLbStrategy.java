@@ -485,6 +485,7 @@ public class CtiLbStrategy {
 		double totalScoreForExit = current == PositionState.NONE
 				? totalScore
 				: totalScore - (posSign * (adxExitPressure + rsiVolExitPressure));
+		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
 		CtiLbDecisionEngine.ExitDecision eliteExitDecision = evaluateEliteExitDecision(current, entryState, close);
 		boolean normalExitConfirmed = eliteExitDecision.exit();
 		boolean scoreExitConfirmed = false;
@@ -537,7 +538,6 @@ public class CtiLbStrategy {
 		}
 
 		syncPositionIfNeeded(symbol, closeTime);
-		EntryState entryState = resolveEntryState(symbol, current, close, closeTime);
 		TrailState trailState = resolveTrailState(symbolState, current, entryState, fiveMinDir, close);
 		TrailState decisionTrailState = trailState;
 		boolean trendStillStrong = resolveTrendStillStrong(entryState == null ? null : entryState.side(),
