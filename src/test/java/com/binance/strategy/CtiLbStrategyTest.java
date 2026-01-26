@@ -469,6 +469,7 @@ class CtiLbStrategyTest {
 				true,
 				true,
 				true,
+				true,
 				2,
 				true,
 				true,

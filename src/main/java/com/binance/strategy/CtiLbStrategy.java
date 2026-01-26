@@ -1888,9 +1888,11 @@ public class CtiLbStrategy {
 			if (eliteMatch.isPresent()) {
 				return EntryDecision.match(CtiDirection.LONG, eliteMatch.get(), snapshot);
 			}
-			Optional<String> baseMatch = evaluateLongBase(snapshot);
-			if (baseMatch.isPresent()) {
-				return EntryDecision.match(CtiDirection.LONG, baseMatch.get(), snapshot);
+			if (strategyProperties.enableLongBaseSetups()) {
+				Optional<String> baseMatch = evaluateLongBase(snapshot);
+				if (baseMatch.isPresent()) {
+					return EntryDecision.match(CtiDirection.LONG, baseMatch.get(), snapshot);
+				}
 			}
 			return EntryDecision.block("NO_LONG_SETUP_MATCHED", snapshot);
 		} else if (recommendationUsed == CtiDirection.SHORT) {
@@ -1966,18 +1968,26 @@ public class CtiLbStrategy {
 	}
 
 	private boolean matchesLongEliteA(Indicators i) {
-		return i.macdHistColor() == MacdHistColor.BLUE
+		return (i.macdHistColor() == MacdHistColor.AQUA || i.macdHistColor() == MacdHistColor.MAROON)
+				&& isFiniteGreaterThan(i.macdDelta(), 0.0)
 				&& isFiniteGreaterThan(i.outHistPrev(), 0.0001)
 				&& isFiniteGreaterThan(i.bbWidth_5m(), 0.02)
-				&& isFiniteAtMost(i.ema20DistPct(), 0.0025);
+				&& isFiniteAtMost(i.ema20DistPct(), 0.0025)
+				&& isFiniteAtMost(i.bbPercentB_5m(), 0.62)
+				&& isFiniteAtLeast(i.adx5m(), 15.0);
 	}
 
 	private boolean matchesLongEliteB(Indicators i) {
-		return i.macdHistColor() == MacdHistColor.BLUE
+		boolean pullbackCondition = (i.downCount3() != null && i.downCount3() >= 2)
+				|| isFiniteLessThan(i.ret3(), 0.0);
+		return (i.macdHistColor() == MacdHistColor.AQUA || i.macdHistColor() == MacdHistColor.MAROON)
+				&& isFiniteGreaterThan(i.macdDelta(), 0.0)
 				&& isFiniteGreaterThan(i.bbWidth_5m(), 0.02)
 				&& isFiniteAtMost(i.ema20DistPct(), 0.0025)
-				&& i.downCount3() != null
-				&& i.downCount3() >= 2;
+				&& isFiniteAtMost(i.bbPercentB_5m(), 0.62)
+				&& isFiniteAtLeast(i.adx5m(), 15.0)
+				&& pullbackCondition
+				&& isFiniteLessThan(i.pbChg3(), 0.0);
 	}
 
 	private boolean matchesLongBaseLA(Indicators i) {

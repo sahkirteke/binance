@@ -133,6 +133,7 @@ strategy:
   long-rsi-min: 45
   long-rsi-max: 60
   long-bb-chase-pb-min: 0.80
+  enable-long-base-setups: true
   enable-long-setup4: true
   enable-long-setup5: true
   enable-long-time-stop-exit: true
@@ -222,4 +223,3 @@ management:
 logging:
   level:
     com.binance.exchange.TimeSyncServices: WARN
-
