@@ -93,7 +93,7 @@ public class CtiLbStrategy {
 	private static final double ELITE_EXIT_PCT = 0.004;
 	private static final Indicators EMPTY_SETUP_INDICATORS =
 			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, null,
-					Double.NaN, Double.NaN, null, Double.NaN, Double.NaN);
+					Double.NaN, Double.NaN, null, Double.NaN, false);
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
 	private static final Pattern BINANCE_STATUS_PATTERN = Pattern.compile("status=(\\d+)");
 	private static final Set<Integer> NON_RETRYABLE_BINANCE_CODES = Set.of(
