@@ -587,6 +587,11 @@ public class CtiLbStrategy {
 		int flipQualityScore = 0;
 		boolean exitBlockedByTrendAlignedAction = false;
 		int barsInPosition = resolveBarsInPosition(entryState, closeTime);
+		boolean timeStopEnabled = strategyProperties.timeStopEnabled();
+		int timeStopBars = strategyProperties.timeStopBars();
+		symbolState.lastTimeStopEnabled = timeStopEnabled;
+		symbolState.lastTimeStopBars = timeStopBars;
+		symbolState.lastTimeStopBarsUsed = barsInPosition;
 		IndicatorsSnapshot indicatorsSnapshot = new IndicatorsSnapshot(
 				symbolState.ema200_5mValue,
 				symbolState.isEma200Ready(),
@@ -644,17 +649,11 @@ public class CtiLbStrategy {
 				current,
 				closingInFlight,
 				exitReasonForLog);
-		RegimeRiskPreset riskPreset = resolveRiskPreset(regimeDecision.effectiveTag());
 		BigDecimal stopLossBps = resolveStopLossBps();
 		BigDecimal takeProfitBps = resolveTakeProfitBps();
-		int timeStopBars = strategyProperties.longTimeStopBars();
-		if (strategyProperties.enableRegimeRiskPresets()) {
-			stopLossBps = BigDecimal.valueOf(riskPreset.stopLossBps());
-			takeProfitBps = BigDecimal.valueOf(riskPreset.takeProfitBps());
-			if (riskPreset.timeStopBars() > 0) {
-				timeStopBars = riskPreset.timeStopBars();
-			}
-		}
+		boolean timeStopEnabled = strategyProperties.timeStopEnabled();
+		int timeStopBars = strategyProperties.timeStopBars();
+		boolean timeStopRequireNonPositive = strategyProperties.timeStopRequireNonPositivePnl();
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
 				entryState == null ? null : entryState.entryPrice(),
@@ -692,12 +691,12 @@ public class CtiLbStrategy {
 					exitDecision.pnlBps());
 		}
 		if (!exitDecision.exit()
-				&& strategyProperties.enableLongTimeStopExit()
+				&& timeStopEnabled
 				&& current == PositionState.LONG
 				&& entryState != null
 				&& timeStopBars > 0
 				&& barsInPosition >= timeStopBars
-				&& exitDecision.pnlBps() <= 0.0) {
+				&& (!timeStopRequireNonPositive || exitDecision.pnlBps() <= 0.0)) {
 			exitDecision = new CtiLbDecisionEngine.ExitDecision(true, "EXIT_TIME_STOP_LONG", exitDecision.pnlBps());
 		}
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
@@ -1958,30 +1957,30 @@ public class CtiLbStrategy {
 		if (snapshot == null) {
 			return EntryDecision.block("NO_LONG_SETUP_MATCHED", EMPTY_SETUP_INDICATORS);
 		}
-		if (matchesSetup1(snapshot)) {
-			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_1)) {
-				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_1", snapshot);
+			if (matchesSetup1(snapshot)) {
+				if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_1)) {
+					return EntryDecision.block(setupEnablement.disableReason(LongEntrySetup.SETUP_1), snapshot);
+				}
+				return EntryDecision.longMatch(LongEntrySetup.SETUP_1, snapshot);
 			}
-			return EntryDecision.longMatch(LongEntrySetup.SETUP_1, snapshot);
-		}
-		if (matchesSetup2(snapshot)) {
-			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_2)) {
-				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_2", snapshot);
+			if (matchesSetup2(snapshot)) {
+				if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_2)) {
+					return EntryDecision.block(setupEnablement.disableReason(LongEntrySetup.SETUP_2), snapshot);
+				}
+				return EntryDecision.longMatch(LongEntrySetup.SETUP_2, snapshot);
 			}
-			return EntryDecision.longMatch(LongEntrySetup.SETUP_2, snapshot);
-		}
-		if (strategyProperties.enableLongSetup4() && matchesSetup4(snapshot)) {
-			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_4)) {
-				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_4", snapshot);
+			if (strategyProperties.enableLongSetup4() && matchesSetup4(snapshot)) {
+				if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_4)) {
+					return EntryDecision.block(setupEnablement.disableReason(LongEntrySetup.SETUP_4), snapshot);
+				}
+				return EntryDecision.longMatch(LongEntrySetup.SETUP_4, snapshot);
 			}
-			return EntryDecision.longMatch(LongEntrySetup.SETUP_4, snapshot);
-		}
-		if (strategyProperties.enableLongSetup5() && matchesSetup5(snapshot)) {
-			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_5)) {
-				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_5", snapshot);
+			if (strategyProperties.enableLongSetup5() && matchesSetup5(snapshot)) {
+				if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_5)) {
+					return EntryDecision.block(setupEnablement.disableReason(LongEntrySetup.SETUP_5), snapshot);
+				}
+				return EntryDecision.longMatch(LongEntrySetup.SETUP_5, snapshot);
 			}
-			return EntryDecision.longMatch(LongEntrySetup.SETUP_5, snapshot);
-		}
 		return null;
 	}
 
@@ -1995,14 +1994,14 @@ public class CtiLbStrategy {
 		}
 		if (strategyProperties.enableShortS6() && matchesShortS6(snapshot)) {
 			if (setupEnablement != null && !setupEnablement.isEnabled(ShortEntrySetup.SETUP_S6)) {
-				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_S6", snapshot);
+				return EntryDecision.block(setupEnablement.disableReason(ShortEntrySetup.SETUP_S6), snapshot);
 			}
 			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S6, snapshot)
 					.withDecisionActionReason("SHORT_S6_MATCH");
 		}
 		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(snapshot)) {
 			if (setupEnablement != null && !setupEnablement.isEnabled(ShortEntrySetup.SETUP_S2)) {
-				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_S2", snapshot);
+				return EntryDecision.block(setupEnablement.disableReason(ShortEntrySetup.SETUP_S2), snapshot);
 			}
 			String s2FilterFail = resolveShortS2FilterFailure(snapshot);
 			if (s2FilterFail != null) {
@@ -2607,6 +2606,9 @@ public class CtiLbStrategy {
 		private String lastRegimeDir;
 		private int protectionBarsRemaining;
 		private Map<String, Boolean> lastSetupEnabledByRegime = new LinkedHashMap<>();
+		private boolean lastTimeStopEnabled;
+		private int lastTimeStopBars;
+		private int lastTimeStopBarsUsed;
 
 		private void updateOneMinuteIndicators(Candle candle) {
 			if (candle.closeTime() <= last1mCloseTime) {
@@ -2796,7 +2798,8 @@ public class CtiLbStrategy {
 			boolean inputsReady) {
 	}
 
-	private record SetupEnablement(Map<String, Boolean> setupEnabledByRegime) {
+	private record SetupEnablement(Map<String, Boolean> setupEnabledByRegime,
+			Map<String, String> setupDisableReasons) {
 		boolean isEnabled(LongEntrySetup setup) {
 			return Boolean.TRUE.equals(setupEnabledByRegime.get(setup.name()));
 		}
@@ -2804,13 +2807,14 @@ public class CtiLbStrategy {
 		boolean isEnabled(ShortEntrySetup setup) {
 			return Boolean.TRUE.equals(setupEnabledByRegime.get(setup.name()));
 		}
-	}
 
-	private record RegimeRiskPreset(
-			RegimeTag tag,
-			double takeProfitBps,
-			double stopLossBps,
-			int timeStopBars) {
+		String disableReason(LongEntrySetup setup) {
+			return setupDisableReasons.getOrDefault(setup.name(), "REGIME_SETUP_DISABLED");
+		}
+
+		String disableReason(ShortEntrySetup setup) {
+			return setupDisableReasons.getOrDefault(setup.name(), "REGIME_SETUP_DISABLED");
+		}
 	}
 
 	private enum RegimeTag {
@@ -3587,11 +3591,11 @@ public class CtiLbStrategy {
 		}
 		boolean protectionModeActive = false;
 		if (symbolState != null) {
-			if (strategyProperties.enableRegimeProtectionMode() && regimeShift) {
-				int protectionBars = strategyProperties.regimeProtectionBars();
+			if (strategyProperties.enableRegimeShiftProtectionMode() && regimeShift) {
+				int protectionBars = strategyProperties.regimeShiftProtectionBars();
 				symbolState.protectionBarsRemaining = protectionBars > 0 ? protectionBars : 0;
 			}
-			if (!strategyProperties.enableRegimeProtectionMode()) {
+			if (!strategyProperties.enableRegimeShiftProtectionMode()) {
 				symbolState.protectionBarsRemaining = 0;
 			}
 			if (symbolState.protectionBarsRemaining > 0) {
@@ -3623,6 +3627,7 @@ public class CtiLbStrategy {
 	private SetupEnablement resolveSetupEnablement(RegimeDecisionSnapshot regimeDecision, Indicators indicators,
 			Double volRatio, Double macdRatio) {
 		Map<String, Boolean> setupEnabledByRegime = new LinkedHashMap<>();
+		Map<String, String> setupDisableReasons = new LinkedHashMap<>();
 		boolean enableRegimeMatrix = strategyProperties.enableRegimeSetupMatrix();
 		RegimeTag effectiveTag = regimeDecision == null || regimeDecision.effectiveTag() == null
 				? RegimeTag.CHOP
@@ -3637,17 +3642,28 @@ public class CtiLbStrategy {
 		boolean setup4Enabled = strategyProperties.enableLongSetup4() && strategyProperties.longSetups() != null;
 		boolean setup5Enabled = strategyProperties.enableLongSetup5() && strategyProperties.longSetups() != null;
 		boolean setupS6Enabled = strategyProperties.enableShortS6() && strategyProperties.shortSetups() != null;
-		boolean setupS2Enabled = strategyProperties.enableShortS2Only() && strategyProperties.shortSetups() != null;
+		boolean setupS2Enabled = false;
+		if (strategyProperties.shortSetups() != null) {
+			setupDisableReasons.put(ShortEntrySetup.SETUP_S2.name(), "REGIME_SETUP_DISABLED");
+		}
 
-		if (protectionModeActive || fallbackOnlySetup5) {
+		if (protectionModeActive) {
 			setup1Enabled = false;
 			setup2Enabled = false;
 			setup4Enabled = false;
 			setup5Enabled = strategyProperties.enableLongSetup5();
 			setupS6Enabled = false;
-			setupS2Enabled = false;
+			setupDisableReasons.put(LongEntrySetup.SETUP_1.name(), "REGIME_SHIFT_PROTECTION_ACTIVE");
+			setupDisableReasons.put(LongEntrySetup.SETUP_2.name(), "REGIME_SHIFT_PROTECTION_ACTIVE");
+			setupDisableReasons.put(LongEntrySetup.SETUP_4.name(), "REGIME_SHIFT_PROTECTION_ACTIVE");
+			setupDisableReasons.put(ShortEntrySetup.SETUP_S6.name(), "REGIME_SHIFT_PROTECTION_ACTIVE");
+		} else if (fallbackOnlySetup5) {
+			setup1Enabled = false;
+			setup2Enabled = false;
+			setup4Enabled = false;
+			setup5Enabled = strategyProperties.enableLongSetup5();
+			setupS6Enabled = false;
 		} else if (enableRegimeMatrix) {
-			setupS2Enabled = false;
 			switch (effectiveTag) {
 				case CHOP, MEAN_REV -> {
 					setup1Enabled = false;
@@ -3655,6 +3671,10 @@ public class CtiLbStrategy {
 					setup4Enabled = false;
 					setup5Enabled = strategyProperties.enableLongSetup5();
 					setupS6Enabled = false;
+					setupDisableReasons.put(LongEntrySetup.SETUP_1.name(), "REGIME_SETUP_DISABLED");
+					setupDisableReasons.put(LongEntrySetup.SETUP_2.name(), "REGIME_SETUP_DISABLED");
+					setupDisableReasons.put(LongEntrySetup.SETUP_4.name(), "REGIME_SETUP_DISABLED");
+					setupDisableReasons.put(ShortEntrySetup.SETUP_S6.name(), "REGIME_SETUP_DISABLED");
 				}
 				case BREAKOUT -> {
 					setup1Enabled = false;
@@ -3663,6 +3683,8 @@ public class CtiLbStrategy {
 					setup5Enabled = isFiniteAtLeast(volRatioValue, 2.0) && isFiniteAtLeast(macdRatioValue, 1.25)
 							&& strategyProperties.enableLongSetup5();
 					setupS6Enabled = strategyProperties.enableShortS6();
+					setupDisableReasons.put(LongEntrySetup.SETUP_1.name(), "REGIME_SETUP_DISABLED");
+					setupDisableReasons.put(LongEntrySetup.SETUP_4.name(), "REGIME_SETUP_DISABLED");
 				}
 				case TREND -> {
 					setup1Enabled = true;
@@ -3675,6 +3697,9 @@ public class CtiLbStrategy {
 							&& chaseThreshold > 0
 							&& ema20DistPct > chaseThreshold;
 					setup4Enabled = strategyProperties.enableLongSetup4() && !chaseBlocked;
+					if (chaseBlocked) {
+						setupDisableReasons.put(LongEntrySetup.SETUP_4.name(), "REGIME_SETUP_DISABLED");
+					}
 				}
 			}
 		}
@@ -3685,30 +3710,22 @@ public class CtiLbStrategy {
 		setupEnabledByRegime.put(LongEntrySetup.SETUP_5.name(), setup5Enabled);
 		setupEnabledByRegime.put(ShortEntrySetup.SETUP_S2.name(), setupS2Enabled);
 		setupEnabledByRegime.put(ShortEntrySetup.SETUP_S6.name(), setupS6Enabled);
-		return new SetupEnablement(setupEnabledByRegime);
-	}
-
-	private RegimeRiskPreset resolveRiskPreset(RegimeTag effectiveTag) {
-		RegimeTag tag = effectiveTag == null ? RegimeTag.CHOP : effectiveTag;
-		double baseTp = strategyProperties.regimeBaseTakeProfitBps();
-		double baseSl = strategyProperties.regimeBaseStopLossBps();
-		double baseTpBps = baseTp > 0 ? baseTp : resolveTakeProfitBps().doubleValue();
-		double baseSlBps = baseSl > 0 ? baseSl : resolveStopLossBps().doubleValue();
-		return switch (tag) {
-			case TREND -> new RegimeRiskPreset(tag,
-					baseTpBps * strategyProperties.regimeTrendTpMult(),
-					baseSlBps * strategyProperties.regimeTrendSlMult(),
-					strategyProperties.regimeTrendTimeStopBars());
-			case BREAKOUT -> new RegimeRiskPreset(tag,
-					baseTpBps * strategyProperties.regimeBreakoutTp2Mult(),
-					baseSlBps * strategyProperties.regimeBreakoutSlMult(),
-					strategyProperties.regimeBreakoutTimeStopBars());
-			case MEAN_REV -> new RegimeRiskPreset(tag,
-					baseTpBps * strategyProperties.regimeMeanRevTpMult(),
-					baseSlBps * strategyProperties.regimeMeanRevSlMult(),
-					strategyProperties.regimeMeanRevTimeStopBars());
-			case CHOP -> new RegimeRiskPreset(tag, baseTpBps, baseSlBps, strategyProperties.regimeChopTimeStopBars());
-		};
+		if (!setup1Enabled) {
+			setupDisableReasons.putIfAbsent(LongEntrySetup.SETUP_1.name(), "REGIME_SETUP_DISABLED");
+		}
+		if (!setup2Enabled) {
+			setupDisableReasons.putIfAbsent(LongEntrySetup.SETUP_2.name(), "REGIME_SETUP_DISABLED");
+		}
+		if (!setup4Enabled) {
+			setupDisableReasons.putIfAbsent(LongEntrySetup.SETUP_4.name(), "REGIME_SETUP_DISABLED");
+		}
+		if (!setup5Enabled) {
+			setupDisableReasons.putIfAbsent(LongEntrySetup.SETUP_5.name(), "REGIME_SETUP_DISABLED");
+		}
+		if (!setupS6Enabled) {
+			setupDisableReasons.putIfAbsent(ShortEntrySetup.SETUP_S6.name(), "REGIME_SETUP_DISABLED");
+		}
+		return new SetupEnablement(setupEnabledByRegime, setupDisableReasons);
 	}
 	private void appendRegimeFields(ObjectNode line, SymbolState symbolState) {
 		RegimeTag rawTag = symbolState == null || symbolState.lastRawRegimeTag == null
@@ -3725,12 +3742,18 @@ public class CtiLbStrategy {
 				? symbolState.lastRegimePreset
 				: RegimeTag.CHOP;
 		boolean protectionModeActive = symbolState != null && symbolState.lastProtectionModeActive;
+		boolean timeStopEnabled = symbolState != null && symbolState.lastTimeStopEnabled;
+		int timeStopBars = symbolState != null ? symbolState.lastTimeStopBars : 0;
+		int timeStopBarsUsed = symbolState != null ? symbolState.lastTimeStopBarsUsed : 0;
 		line.put("rawRegimeTag", rawTag.name());
 		line.put("activeRegimeTag", activeTag.name());
 		line.put("regimeShift", regimeShift);
 		line.put("regimeDir", regimeDir);
 		line.put("regimePreset", presetTag.name());
 		line.put("protectionModeActive", protectionModeActive);
+		line.put("timeStopEnabled", timeStopEnabled);
+		line.put("timeStopBars", timeStopBars);
+		line.put("timeStopBarsUsed", timeStopBarsUsed);
 		ObjectNode setupEnabledNode = line.putObject("setupEnabledByRegime");
 		if (symbolState != null && symbolState.lastSetupEnabledByRegime != null) {
 			for (Map.Entry<String, Boolean> entry : symbolState.lastSetupEnabledByRegime.entrySet()) {
