@@ -4,7 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
 import com.binance.exchange.BinanceFuturesOrderClient;
 import org.junit.jupiter.api.Test;
@@ -197,6 +201,96 @@ class CtiLbStrategyTest {
 				CtiDirection.SHORT, indicators);
 		assertThat(decision.confirmedRec()).isNull();
 		assertThat(decision.blockReason()).isEqualTo("SHORT_S2_FILTER_FAIL_PB");
+	}
+
+	@Test
+	void decisionJsonlIncludesAtrBaselineAfterWarmup() throws Exception {
+		CtiLbStrategy strategy = newStrategy();
+		String symbol = "TEST";
+		strategy.setWarmupMode(true);
+		long startTime = 1_700_000_000_000L;
+		double price = 100.0;
+		for (int i = 0; i < 200; i++) {
+			for (int j = 0; j < 5; j++) {
+				long closeTime = startTime + ((long) i * 5 + j + 1) * 60_000L;
+				price += 0.1;
+				Candle candle1m = new Candle(price - 0.05, price + 0.1, price - 0.1, price, 100.0, closeTime);
+				strategy.onClosedOneMinuteCandle(symbol, candle1m);
+			}
+			long closeTime5m = startTime + (long) (i + 1) * 5 * 60_000L;
+			price += 0.2;
+			Candle candle5m = new Candle(price - 0.2, price + 0.3, price - 0.4, price, 500.0, closeTime5m);
+			strategy.onWarmupFiveMinuteCandle(symbol, candle5m, buildScoreSignal(closeTime5m, price));
+		}
+		strategy.setWarmupMode(false);
+		List<String> decisionLines = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			long closeTime5m = startTime + (long) (200 + i + 1) * 5 * 60_000L;
+			price += 0.3;
+			Candle candle5m = new Candle(price - 0.2, price + 0.3, price - 0.4, price, 600.0, closeTime5m);
+			strategy.onClosedFiveMinuteCandle(symbol, candle5m);
+			strategy.onScoreSignal(symbol, buildScoreSignal(closeTime5m, price), candle5m);
+		}
+		Path decisionsDir = Path.of("signals", "decisions");
+		try (Stream<Path> files = Files.list(decisionsDir)) {
+			Path jsonl = files.filter(path -> path.getFileName().toString().startsWith(symbol + "-"))
+					.findFirst()
+					.orElseThrow();
+			List<String> lines = Files.readAllLines(jsonl);
+			assertThat(lines.size()).isGreaterThanOrEqualTo(3);
+			for (int i = lines.size() - 3; i < lines.size(); i++) {
+				String line = lines.get(i);
+				decisionLines.add(line);
+				ObjectNode node = (ObjectNode) new ObjectMapper().readTree(line);
+				assertThat(node.get("atr14").isNull()).isFalse();
+				assertThat(node.get("atrEma_5m").isNull()).isFalse();
+				assertThat(node.get("atrRatio_5m").isNull()).isFalse();
+			}
+		}
+		decisionLines.forEach(System.out::println);
+	}
+
+	private ScoreSignal buildScoreSignal(long closeTime, double price) {
+		return new ScoreSignal(
+				CtiDirection.NEUTRAL,
+				CtiDirection.LONG,
+				0,
+				0,
+				0.0,
+				0.0,
+				price * 0.0001,
+				price * 0.00005,
+				0.0,
+				0,
+				1,
+				0.0,
+				0.0,
+				0.0,
+				0.0,
+				25.0,
+				25.0,
+				false,
+				false,
+				false,
+				false,
+				0.0,
+				MacdHistColor.AQUA,
+				0.0,
+				0.0,
+				CtiDirection.LONG,
+				CtiDirection.LONG,
+				CtiScoreCalculator.RecReason.CTI5M_TREND,
+				true,
+				true,
+				"OK",
+				true,
+				20,
+				20,
+				20,
+				20,
+				closeTime,
+				closeTime,
+				false);
 	}
 
 	@Test

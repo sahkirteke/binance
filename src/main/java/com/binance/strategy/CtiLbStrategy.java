@@ -431,7 +431,10 @@ public class CtiLbStrategy {
 		updateBaselineState(symbolState, entryFilterState, macdDelta, volRatio);
 		BaselineSnapshot baselines = symbolState.baselineSnapshot();
 		Double bbWidth = entryFilterState == null ? null : finiteOrNull(entryFilterState.bbWidth_5m());
-		Double atr14 = entryFilterState == null ? null : finiteOrNull(entryFilterState.atr14());
+		Double atr14 = symbolState == null ? null : finiteOrNull(symbolState.atr14_5mValue);
+		if (atr14 == null) {
+			atr14 = entryFilterState == null ? null : finiteOrNull(entryFilterState.atr14());
+		}
 		Double macdDeltaValue = finiteOrNull(macdDelta);
 		Double volRatioValue = finiteOrNull(volRatio);
 		Double bwRatio = safeRatio(bbWidth, baselines.bwEma());
@@ -2570,6 +2573,7 @@ public class CtiLbStrategy {
 		private final EMAIndicator ema20_5m = new EMAIndicator(closePrice5m, EMA_20_PERIOD);
 		private final EMAIndicator ema200_5m = new EMAIndicator(closePrice5m, EMA_200_PERIOD);
 		private final RSIIndicator rsi9_5m = new RSIIndicator(closePrice5m, RSI_9_PERIOD);
+		private final ATRIndicator atr14_5m = new ATRIndicator(series5m, ATR_14_PERIOD);
 		private final ATRIndicator atr14_1m = new ATRIndicator(series1m, ATR_14_PERIOD);
 		private final SMAIndicator atrSma20_1m = new SMAIndicator(atr14_1m, ATR_SMA_20_PERIOD);
 		private final VolumeIndicator volume1m = new VolumeIndicator(series1m);
@@ -2585,6 +2589,7 @@ public class CtiLbStrategy {
 		private long maxPnlEntryTimeMs;
 		private double maxPnlBpsSinceEntry = Double.NaN;
 		private double atr14Value = Double.NaN;
+		private double atr14_5mValue = Double.NaN;
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
 		private double volumeSma10_5mValue = Double.NaN;
@@ -2607,6 +2612,7 @@ public class CtiLbStrategy {
 		private boolean lastTimeStopEnabled;
 		private int lastTimeStopBars;
 		private int lastTimeStopBarsUsed;
+		private int atrBaselineLogCount;
 
 		private void updateOneMinuteIndicators(Candle candle) {
 			if (candle.closeTime() <= last1mCloseTime) {
@@ -2644,6 +2650,7 @@ public class CtiLbStrategy {
 			rsi9_5mPrev = rsi9_5mValue;
 			rsi9_5mValue = rsi9_5m.getValue(index).doubleValue();
 			volumeSma10_5mValue = volumeSma10_5m.getValue(index).doubleValue();
+			atr14_5mValue = atr14_5m.getValue(index).doubleValue();
 			return true;
 		}
 
@@ -2689,13 +2696,24 @@ public class CtiLbStrategy {
 		private BaselineSnapshot baselineSnapshot() {
 			return new BaselineSnapshot(
 					bwBaseline_5m.valueIfReady(),
-					atrBaseline_5m.valueIfReady(),
+					atrBaseline_5m.valueOrNull(false),
 					macdAbsBaseline_5m.valueIfReady(),
 					volBaseline_5m.valueIfReady(),
 					bwBaseline_5m.ready()
 							&& macdAbsBaseline_5m.ready()
 							&& atrBaseline_5m.ready()
 							&& volBaseline_5m.ready());
+		}
+
+		private void seedAtrBaseline(double atr14) {
+			atrBaseline_5m.seed(atr14);
+		}
+
+		private String baselineDebugState() {
+			return "bw=" + bwBaseline_5m.debugState()
+					+ ",atr=" + atrBaseline_5m.debugState()
+					+ ",macd=" + macdAbsBaseline_5m.debugState()
+					+ ",vol=" + volBaseline_5m.debugState();
 		}
 
 		private RegimeTag updateRegimeState(RegimeTag rawTag) {
@@ -2766,12 +2784,33 @@ public class CtiLbStrategy {
 			ema += BASELINE_ALPHA_5M * (value - ema);
 		}
 
+		private void seed(double value) {
+			if (!Double.isFinite(value)) {
+				return;
+			}
+			if (samples == 0) {
+				samples = 1;
+			}
+			ema = value;
+		}
+
 		private boolean ready() {
 			return samples >= BASELINE_LEN_5M;
 		}
 
 		private Double valueIfReady() {
 			return ready() && Double.isFinite(ema) ? ema : null;
+		}
+
+		private Double valueOrNull(boolean requireReady) {
+			if (requireReady) {
+				return valueIfReady();
+			}
+			return Double.isFinite(ema) ? ema : null;
+		}
+
+		private String debugState() {
+			return "samples=" + samples + ",ema=" + ema;
 		}
 	}
 
@@ -3544,7 +3583,10 @@ public class CtiLbStrategy {
 		BaselineSnapshot baselines = symbolState == null ? BaselineSnapshot.empty() : symbolState.baselineSnapshot();
 		line.put("baselineLen_5m", BASELINE_LEN_5M);
 		Double bbWidth = entryFilterState == null ? null : finiteOrNull(entryFilterState.bbWidth_5m());
-		Double atr14 = entryFilterState == null ? null : finiteOrNull(entryFilterState.atr14());
+		Double atr14 = symbolState == null ? null : finiteOrNull(symbolState.atr14_5mValue);
+		if (atr14 == null) {
+			atr14 = entryFilterState == null ? null : finiteOrNull(entryFilterState.atr14());
+		}
 		Double macdDelta = signal == null ? null : finiteOrNull(resolveMacdDelta(signal));
 		Double volRatio = confidence == null ? null : finiteOrNull(confidence.volRatio());
 		Double bwRatio = safeRatio(bbWidth, baselines.bwEma());
@@ -3552,7 +3594,27 @@ public class CtiLbStrategy {
 		Double macdRatio = safeRatio(macdDelta == null ? null : Math.abs(macdDelta), baselines.macdAbsEma());
 		Double volRatioOfEma = safeRatio(volRatio, baselines.volEma());
 		putNullable(line, "bwEma_5m", baselines.bwEma());
-		putNullable(line, "atrEma_5m", baselines.atrEma());
+		Double atrEma = baselines.atrEma();
+		Double atrRatio = safeRatio(atr14, atrEma);
+		if (atr14 != null && (!Double.isFinite(atr14) || atr14 <= 0.0)) {
+			atr14 = null;
+		}
+		if (atr14 != null && (atrEma == null || atrRatio == null)) {
+			if (symbolState != null) {
+				LOGGER.error("EVENT=ATR_BASELINE_MISSING symbol={} decisionTime={} atr14={} atrEma={} len={} warmupDone={} baselinesState={}",
+						symbol,
+						formatTimestamp(signal.closeTime()),
+						atr14,
+						atrEma,
+						BASELINE_LEN_5M,
+						!warmupMode,
+						symbolState.baselineDebugState());
+				symbolState.seedAtrBaseline(atr14);
+				atrEma = symbolState.atrBaseline_5m.valueOrNull(false);
+				atrRatio = safeRatio(atr14, atrEma);
+			}
+		}
+		putNullable(line, "atrEma_5m", atrEma);
 		putNullable(line, "macdAbsEma_5m", baselines.macdAbsEma());
 		putNullable(line, "volEma_5m", baselines.volEma());
 		line.put("baselinesReady", baselines.ready());
@@ -3560,13 +3622,22 @@ public class CtiLbStrategy {
 		putNullable(line, "atrRatio_5m", atrRatio);
 		putNullable(line, "macdRatio_5m", macdRatio);
 		putNullable(line, "volRatioOfEma", volRatioOfEma);
+		if (symbolState != null && !warmupMode && symbolState.atrBaselineLogCount < 3 && atr14 != null) {
+			LOGGER.info("EVENT=ATR_BASELINE_OK symbol={} decisionTime={} atr14={} atrEma={} atrRatio={}",
+					symbol,
+					formatTimestamp(signal.closeTime()),
+					atr14,
+					atrEma,
+					atrRatio);
+			symbolState.atrBaselineLogCount++;
+		}
 		appendRegimeFields(line, symbolState);
 	}
 
 	private void updateBaselineState(SymbolState symbolState, EntryFilterState entryFilterState,
 			double macdDelta, double volRatio) {
 		double bbWidth = entryFilterState == null ? Double.NaN : entryFilterState.bbWidth_5m();
-		double atr14 = entryFilterState == null ? Double.NaN : entryFilterState.atr14();
+		double atr14 = symbolState == null ? Double.NaN : symbolState.atr14_5mValue;
 		symbolState.updateBaselines(bbWidth, atr14, macdDelta, volRatio);
 	}
 
@@ -3575,7 +3646,7 @@ public class CtiLbStrategy {
 		BbSnapshot bbSnapshot = computeBbFromLast(closes5m, BB_MULT);
 		double volRatio = resolveVolRatio(candle.volume(), symbolState.volumeSma10_5mValue);
 		double macdDelta = signal == null ? Double.NaN : resolveMacdDelta(signal);
-		symbolState.updateBaselines(bbSnapshot.width(), symbolState.atr14Value, macdDelta, volRatio);
+		symbolState.updateBaselines(bbSnapshot.width(), symbolState.atr14_5mValue, macdDelta, volRatio);
 	}
 
 	private RegimeDecisionSnapshot resolveRegimeDecision(SymbolState symbolState, EntryFilterState entryFilterState,
