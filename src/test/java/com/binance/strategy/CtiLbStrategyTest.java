@@ -279,7 +279,7 @@ class CtiLbStrategyTest {
 				0.0,
 				CtiDirection.LONG,
 				CtiDirection.LONG,
-				CtiScoreCalculator.RecReason.CTI5M_TREND,
+				CtiScoreCalculator.RecReason.SCORE_RULES,
 				true,
 				true,
 				"OK",
