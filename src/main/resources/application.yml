@@ -127,6 +127,24 @@ strategy:
   tp-trailing-enabled: true
   tp-start-pct: 0.25
   tp-trail-pct: 0.15
+  enable-regime-setup-matrix: true
+  enable-regime-protection-mode: true
+  regime-protection-bars: 2
+  regime-setup4-chase-ema20-dist-pct: 0.0025
+  enable-regime-risk-presets: true
+  regime-base-take-profit-bps: 22
+  regime-base-stop-loss-bps: 18
+  regime-chop-time-stop-bars: 1
+  regime-trend-time-stop-bars: 4
+  regime-breakout-time-stop-bars: 2
+  regime-mean-rev-time-stop-bars: 1
+  regime-trend-tp-mult: 1.2
+  regime-trend-sl-mult: 1.0
+  regime-breakout-tp1-mult: 0.7
+  regime-breakout-tp2-mult: 1.5
+  regime-breakout-sl-mult: 0.8
+  regime-mean-rev-tp-mult: 0.9
+  regime-mean-rev-sl-mult: 0.85
   enable-long-quality-gate: false
   long-min-bb-width: 0.010
   enable-long-rsi-quality: true
@@ -222,4 +240,3 @@ management:
 logging:
   level:
     com.binance.exchange.TimeSyncServices: WARN
-

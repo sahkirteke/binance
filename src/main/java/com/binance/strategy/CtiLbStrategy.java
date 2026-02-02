@@ -10,6 +10,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -78,6 +79,10 @@ public class CtiLbStrategy {
 	private static final int ATR_14_PERIOD = 14;
 	private static final int ATR_SMA_20_PERIOD = 20;
 	private static final int VOLUME_SMA_10_PERIOD = 10;
+	private static final int BASELINE_LEN_5M = 96;
+	private static final double BASELINE_ALPHA_5M = 2.0 / (BASELINE_LEN_5M + 1.0);
+	private static final int REGIME_CONFIRM_BARS = 2;
+	private static final int REGIME_COOLDOWN_BARS = 3;
 	private static final int BB_LENGTH = 20;
 	private static final double BB_MULT = 2.2;
 	private static final double MACD_HIST_EPS = 1e-6;
@@ -423,8 +428,21 @@ public class CtiLbStrategy {
 		double volumeSma10_5m = symbolState.volumeSma10_5mValue;
 		double volRatio = resolveVolRatio(volume5m, volumeSma10_5m);
 		double macdDelta = resolveMacdDelta(signal);
+		updateBaselineState(symbolState, entryFilterState, macdDelta, volRatio);
+		BaselineSnapshot baselines = symbolState.baselineSnapshot();
+		Double bbWidth = entryFilterState == null ? null : finiteOrNull(entryFilterState.bbWidth_5m());
+		Double atr14 = entryFilterState == null ? null : finiteOrNull(entryFilterState.atr14());
+		Double macdDeltaValue = finiteOrNull(macdDelta);
+		Double volRatioValue = finiteOrNull(volRatio);
+		Double bwRatio = safeRatio(bbWidth, baselines.bwEma());
+		Double atrRatio = safeRatio(atr14, baselines.atrEma());
+		Double macdRatio = safeRatio(macdDeltaValue == null ? null : Math.abs(macdDeltaValue), baselines.macdAbsEma());
+		RegimeDecisionSnapshot regimeDecision = resolveRegimeDecision(symbolState, entryFilterState, signal,
+				volRatioValue, bwRatio, atrRatio, macdRatio, macdDeltaValue);
 		Indicators setupIndicators = buildSetupIndicators(entryFilterState, signal, volRatio, macdDelta, close);
-		EntryDecision entryDecision = resolveEntryDecision(current, recommendationUsed, setupIndicators);
+		SetupEnablement setupEnablement = resolveSetupEnablement(regimeDecision, setupIndicators, volRatioValue, macdRatio);
+		symbolState.lastSetupEnabledByRegime = setupEnablement.setupEnabledByRegime();
+		EntryDecision entryDecision = resolveEntryDecision(current, recommendationUsed, setupIndicators, setupEnablement);
 		if (isBbFalseEntryBlock(entryDecision.blockReason())) {
 //			LOGGER.info(
 //					"EVENT=ENTRY_BLOCK_FALSE_ENTRY symbol={} side=LONG reason={} pB={} rsi={} bbOutside={}",
@@ -626,12 +644,23 @@ public class CtiLbStrategy {
 				current,
 				closingInFlight,
 				exitReasonForLog);
+		RegimeRiskPreset riskPreset = resolveRiskPreset(regimeDecision.effectiveTag());
+		BigDecimal stopLossBps = resolveStopLossBps();
+		BigDecimal takeProfitBps = resolveTakeProfitBps();
+		int timeStopBars = strategyProperties.longTimeStopBars();
+		if (strategyProperties.enableRegimeRiskPresets()) {
+			stopLossBps = BigDecimal.valueOf(riskPreset.stopLossBps());
+			takeProfitBps = BigDecimal.valueOf(riskPreset.takeProfitBps());
+			if (riskPreset.timeStopBars() > 0) {
+				timeStopBars = riskPreset.timeStopBars();
+			}
+		}
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
 				entryState == null ? null : entryState.entryPrice(),
 				close,
-				resolveStopLossBps(),
-				resolveTakeProfitBps(),
+				stopLossBps,
+				takeProfitBps,
 				resolveFeeBps(),
 				strategyProperties.maxSpreadBps(),
 				strategyProperties.flipSpreadMaxBps(),
@@ -666,7 +695,8 @@ public class CtiLbStrategy {
 				&& strategyProperties.enableLongTimeStopExit()
 				&& current == PositionState.LONG
 				&& entryState != null
-				&& barsInPosition >= strategyProperties.longTimeStopBars()
+				&& timeStopBars > 0
+				&& barsInPosition >= timeStopBars
 				&& exitDecision.pnlBps() <= 0.0) {
 			exitDecision = new CtiLbDecisionEngine.ExitDecision(true, "EXIT_TIME_STOP_LONG", exitDecision.pnlBps());
 		}
@@ -1264,9 +1294,12 @@ public class CtiLbStrategy {
 		symbolState.prevLow1m = candle.low();
 	}
 
-	public void onWarmupFiveMinuteCandle(String symbol, Candle candle) {
+	public void onWarmupFiveMinuteCandle(String symbol, Candle candle, ScoreSignal signal) {
 		SymbolState symbolState = symbolStates.computeIfAbsent(symbol, ignored -> new SymbolState());
-		symbolState.updateFiveMinuteIndicators(candle);
+		if (!symbolState.updateFiveMinuteIndicators(candle)) {
+			return;
+		}
+		updateBaselineState(symbolState, candle, signal);
 	}
 
 	public void onClosedFiveMinuteCandle(String symbol, Candle candle) {
@@ -1883,7 +1916,7 @@ public class CtiLbStrategy {
 	}
 
 	private EntryDecision resolveEntryDecision(PositionState current, CtiDirection recommendationUsed,
-			Indicators indicators) {
+			Indicators indicators, SetupEnablement setupEnablement) {
 		Indicators snapshot = indicators == null ? EMPTY_SETUP_INDICATORS : indicators;
 		if (current != null && current != PositionState.NONE) {
 			return EntryDecision.block("IN_POSITION_NO_ENTRY", snapshot);
@@ -1902,21 +1935,57 @@ public class CtiLbStrategy {
 			if (snapshot.macdHistColor() != MacdHistColor.AQUA) {
 				return EntryDecision.block("LONG_MACD_COLOR_NOT_AQUA", snapshot);
 			}
-			Optional<LongEntrySetup> matched = evaluateLongSetup(snapshot);
-			if (matched.isPresent()) {
-				return EntryDecision.longMatch(matched.get(), snapshot);
+			EntryDecision longDecision = evaluateLongEntryDecision(snapshot, setupEnablement);
+			if (longDecision != null) {
+				return longDecision;
 			}
 			return EntryDecision.block("NO_LONG_SETUP_MATCHED", snapshot);
 		} else if (recommendationUsed == CtiDirection.SHORT) {
 			if (snapshot.macdHistColor() != MacdHistColor.RED) {
 				return EntryDecision.block("SHORT_MACD_COLOR_NOT_RED", snapshot);
 			}
-			return evaluateShortEntryDecision(snapshot);
+			return evaluateShortEntryDecision(snapshot, setupEnablement);
 		}
 		return EntryDecision.block("REC_NEUTRAL", snapshot);
 	}
 
-	private EntryDecision evaluateShortEntryDecision(Indicators snapshot) {
+	private EntryDecision resolveEntryDecision(PositionState current, CtiDirection recommendationUsed,
+			Indicators indicators) {
+		return resolveEntryDecision(current, recommendationUsed, indicators, null);
+	}
+
+	private EntryDecision evaluateLongEntryDecision(Indicators snapshot, SetupEnablement setupEnablement) {
+		if (snapshot == null) {
+			return EntryDecision.block("NO_LONG_SETUP_MATCHED", EMPTY_SETUP_INDICATORS);
+		}
+		if (matchesSetup1(snapshot)) {
+			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_1)) {
+				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_1", snapshot);
+			}
+			return EntryDecision.longMatch(LongEntrySetup.SETUP_1, snapshot);
+		}
+		if (matchesSetup2(snapshot)) {
+			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_2)) {
+				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_2", snapshot);
+			}
+			return EntryDecision.longMatch(LongEntrySetup.SETUP_2, snapshot);
+		}
+		if (strategyProperties.enableLongSetup4() && matchesSetup4(snapshot)) {
+			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_4)) {
+				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_4", snapshot);
+			}
+			return EntryDecision.longMatch(LongEntrySetup.SETUP_4, snapshot);
+		}
+		if (strategyProperties.enableLongSetup5() && matchesSetup5(snapshot)) {
+			if (setupEnablement != null && !setupEnablement.isEnabled(LongEntrySetup.SETUP_5)) {
+				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_5", snapshot);
+			}
+			return EntryDecision.longMatch(LongEntrySetup.SETUP_5, snapshot);
+		}
+		return null;
+	}
+
+	private EntryDecision evaluateShortEntryDecision(Indicators snapshot, SetupEnablement setupEnablement) {
 		if (snapshot == null) {
 			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", EMPTY_SETUP_INDICATORS);
 		}
@@ -1925,10 +1994,16 @@ public class CtiLbStrategy {
 			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
 		}
 		if (strategyProperties.enableShortS6() && matchesShortS6(snapshot)) {
+			if (setupEnablement != null && !setupEnablement.isEnabled(ShortEntrySetup.SETUP_S6)) {
+				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_S6", snapshot);
+			}
 			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S6, snapshot)
 					.withDecisionActionReason("SHORT_S6_MATCH");
 		}
 		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(snapshot)) {
+			if (setupEnablement != null && !setupEnablement.isEnabled(ShortEntrySetup.SETUP_S2)) {
+				return EntryDecision.block("REGIME_SETUP_DISABLED_SETUP_S2", snapshot);
+			}
 			String s2FilterFail = resolveShortS2FilterFailure(snapshot);
 			if (s2FilterFail != null) {
 				return EntryDecision.block(s2FilterFail, snapshot);
@@ -2516,6 +2591,22 @@ public class CtiLbStrategy {
 		private double atrSma20Value = Double.NaN;
 		private double volumeSma10Value = Double.NaN;
 		private double volumeSma10_5mValue = Double.NaN;
+		private final BaselineEma bwBaseline_5m = new BaselineEma();
+		private final BaselineEma atrBaseline_5m = new BaselineEma();
+		private final BaselineEma macdAbsBaseline_5m = new BaselineEma();
+		private final BaselineEma volBaseline_5m = new BaselineEma();
+		private RegimeTag activeRegimeTag;
+		private RegimeTag lastRawRegimeTag;
+		private RegimeTag lastActiveRegimeTag;
+		private RegimeTag lastRegimePreset;
+		private int rawRegimeStreak;
+		private int regimeCooldownRemaining;
+		private boolean regimeShifted;
+		private boolean lastRegimeShift;
+		private boolean lastProtectionModeActive;
+		private String lastRegimeDir;
+		private int protectionBarsRemaining;
+		private Map<String, Boolean> lastSetupEnabledByRegime = new LinkedHashMap<>();
 
 		private void updateOneMinuteIndicators(Candle candle) {
 			if (candle.closeTime() <= last1mCloseTime) {
@@ -2535,9 +2626,9 @@ public class CtiLbStrategy {
 			volumeSma10Value = volumeSma10_1m.getValue(index).doubleValue();
 		}
 
-		private void updateFiveMinuteIndicators(Candle candle) {
+		private boolean updateFiveMinuteIndicators(Candle candle) {
 			if (candle.closeTime() <= last5mCloseTime) {
-				return;
+				return false;
 			}
 			last5mCloseTime = candle.closeTime();
 			series5m.addBar(new BaseBar(Duration.ofMinutes(5),
@@ -2553,6 +2644,7 @@ public class CtiLbStrategy {
 			rsi9_5mPrev = rsi9_5mValue;
 			rsi9_5mValue = rsi9_5m.getValue(index).doubleValue();
 			volumeSma10_5mValue = volumeSma10_5m.getValue(index).doubleValue();
+			return true;
 		}
 
 		private boolean isTrendEmaReady() {
@@ -2583,6 +2675,60 @@ public class CtiLbStrategy {
 			return series1m.getBarCount() >= ATR_SMA_20_PERIOD;
 		}
 
+		private void updateBaselines(double bbWidth, double atr14, double macdDelta, double volRatio) {
+			bwBaseline_5m.update(bbWidth);
+			atrBaseline_5m.update(atr14);
+			if (Double.isFinite(macdDelta)) {
+				macdAbsBaseline_5m.update(Math.abs(macdDelta));
+			} else {
+				macdAbsBaseline_5m.update(Double.NaN);
+			}
+			volBaseline_5m.update(volRatio);
+		}
+
+		private BaselineSnapshot baselineSnapshot() {
+			return new BaselineSnapshot(
+					bwBaseline_5m.valueIfReady(),
+					atrBaseline_5m.valueIfReady(),
+					macdAbsBaseline_5m.valueIfReady(),
+					volBaseline_5m.valueIfReady(),
+					bwBaseline_5m.ready()
+							&& macdAbsBaseline_5m.ready()
+							&& atrBaseline_5m.ready()
+							&& volBaseline_5m.ready());
+		}
+
+		private RegimeTag updateRegimeState(RegimeTag rawTag) {
+			regimeShifted = false;
+			if (rawTag == lastRawRegimeTag) {
+				rawRegimeStreak++;
+			} else {
+				lastRawRegimeTag = rawTag;
+				rawRegimeStreak = 1;
+			}
+			if (regimeCooldownRemaining > 0) {
+				regimeCooldownRemaining--;
+				if (activeRegimeTag == null) {
+					activeRegimeTag = rawTag;
+				}
+				return activeRegimeTag;
+			}
+			if (rawRegimeStreak >= REGIME_CONFIRM_BARS && rawTag != activeRegimeTag) {
+				RegimeTag previous = activeRegimeTag;
+				activeRegimeTag = rawTag;
+				regimeCooldownRemaining = REGIME_COOLDOWN_BARS;
+				regimeShifted = previous != null;
+			}
+			if (activeRegimeTag == null) {
+				activeRegimeTag = rawTag;
+			}
+			return activeRegimeTag;
+		}
+
+		private boolean regimeShifted() {
+			return regimeShifted;
+		}
+
 		private void resetTrailState() {
 			peakPriceSinceEntry = Double.NaN;
 			troughPriceSinceEntry = Double.NaN;
@@ -2602,6 +2748,76 @@ public class CtiLbStrategy {
 			continuationEntryTimeMs = 0L;
 			bestFavorablePriceSinceEntry = Double.NaN;
 		}
+	}
+
+	private static final class BaselineEma {
+		private double ema = Double.NaN;
+		private int samples;
+
+		private void update(double value) {
+			if (!Double.isFinite(value)) {
+				return;
+			}
+			samples++;
+			if (Double.isNaN(ema)) {
+				ema = value;
+				return;
+			}
+			ema += BASELINE_ALPHA_5M * (value - ema);
+		}
+
+		private boolean ready() {
+			return samples >= BASELINE_LEN_5M;
+		}
+
+		private Double valueIfReady() {
+			return ready() && Double.isFinite(ema) ? ema : null;
+		}
+	}
+
+	private record BaselineSnapshot(
+			Double bwEma,
+			Double atrEma,
+			Double macdAbsEma,
+			Double volEma,
+			boolean ready) {
+		static BaselineSnapshot empty() {
+			return new BaselineSnapshot(null, null, null, null, false);
+		}
+	}
+
+	private record RegimeDecisionSnapshot(
+			RegimeTag rawTag,
+			RegimeTag activeTag,
+			RegimeTag effectiveTag,
+			boolean regimeShift,
+			boolean protectionModeActive,
+			String regimeDir,
+			boolean inputsReady) {
+	}
+
+	private record SetupEnablement(Map<String, Boolean> setupEnabledByRegime) {
+		boolean isEnabled(LongEntrySetup setup) {
+			return Boolean.TRUE.equals(setupEnabledByRegime.get(setup.name()));
+		}
+
+		boolean isEnabled(ShortEntrySetup setup) {
+			return Boolean.TRUE.equals(setupEnabledByRegime.get(setup.name()));
+		}
+	}
+
+	private record RegimeRiskPreset(
+			RegimeTag tag,
+			double takeProfitBps,
+			double stopLossBps,
+			int timeStopBars) {
+	}
+
+	private enum RegimeTag {
+		BREAKOUT,
+		MEAN_REV,
+		TREND,
+		CHOP
 	}
 
 	private long resolveFlipCooldownRemaining(String symbol, long nowMs) {
@@ -3292,6 +3508,7 @@ public class CtiLbStrategy {
 		putFinite(line, "macdDelta", resolveMacdDelta(signal));
 		putFinite(line, "volRatio", confidence.volRatio());
 		putFinite(line, "adx5m", signal.adx5m());
+		appendBaselineFields(line, symbol, entryFilterState, signal, confidence);
 		String jsonLine = objectMapper.writeValueAsString(line) + "\n";
 		Files.write(path, jsonLine.getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE,
 				StandardOpenOption.APPEND);
@@ -3299,6 +3516,336 @@ public class CtiLbStrategy {
 
 	private static Double finiteOrNull(double value) {
 		return Double.isFinite(value) ? value : null;
+	}
+
+	private static Double safeRatio(Double numerator, Double denominator) {
+		if (numerator == null || denominator == null) {
+			return null;
+		}
+		if (!Double.isFinite(numerator) || !Double.isFinite(denominator) || denominator == 0.0) {
+			return null;
+		}
+		return numerator / denominator;
+	}
+
+	private static void putNullable(ObjectNode node, String field, Double value) {
+		if (value == null) {
+			node.putNull(field);
+		} else {
+			node.put(field, value);
+		}
+	}
+
+	private void appendBaselineFields(ObjectNode line, String symbol, EntryFilterState entryFilterState,
+			ScoreSignal signal, VolRsiConfidence confidence) {
+		SymbolState symbolState = symbolStates.get(symbol);
+		BaselineSnapshot baselines = symbolState == null ? BaselineSnapshot.empty() : symbolState.baselineSnapshot();
+		line.put("baselineLen_5m", BASELINE_LEN_5M);
+		Double bbWidth = entryFilterState == null ? null : finiteOrNull(entryFilterState.bbWidth_5m());
+		Double atr14 = entryFilterState == null ? null : finiteOrNull(entryFilterState.atr14());
+		Double macdDelta = signal == null ? null : finiteOrNull(resolveMacdDelta(signal));
+		Double volRatio = confidence == null ? null : finiteOrNull(confidence.volRatio());
+		Double bwRatio = safeRatio(bbWidth, baselines.bwEma());
+		Double atrRatio = safeRatio(atr14, baselines.atrEma());
+		Double macdRatio = safeRatio(macdDelta == null ? null : Math.abs(macdDelta), baselines.macdAbsEma());
+		Double volRatioOfEma = safeRatio(volRatio, baselines.volEma());
+		putNullable(line, "bwEma_5m", baselines.bwEma());
+		putNullable(line, "atrEma_5m", baselines.atrEma());
+		putNullable(line, "macdAbsEma_5m", baselines.macdAbsEma());
+		putNullable(line, "volEma_5m", baselines.volEma());
+		line.put("baselinesReady", baselines.ready());
+		putNullable(line, "bwRatio_5m", bwRatio);
+		putNullable(line, "atrRatio_5m", atrRatio);
+		putNullable(line, "macdRatio_5m", macdRatio);
+		putNullable(line, "volRatioOfEma", volRatioOfEma);
+		appendRegimeFields(line, symbolState);
+	}
+
+	private void updateBaselineState(SymbolState symbolState, EntryFilterState entryFilterState,
+			double macdDelta, double volRatio) {
+		double bbWidth = entryFilterState == null ? Double.NaN : entryFilterState.bbWidth_5m();
+		double atr14 = entryFilterState == null ? Double.NaN : entryFilterState.atr14();
+		symbolState.updateBaselines(bbWidth, atr14, macdDelta, volRatio);
+	}
+
+	private void updateBaselineState(SymbolState symbolState, Candle candle, ScoreSignal signal) {
+		List<Double> closes5m = extractCloses(symbolState.series5m, BB_LENGTH);
+		BbSnapshot bbSnapshot = computeBbFromLast(closes5m, BB_MULT);
+		double volRatio = resolveVolRatio(candle.volume(), symbolState.volumeSma10_5mValue);
+		double macdDelta = signal == null ? Double.NaN : resolveMacdDelta(signal);
+		symbolState.updateBaselines(bbSnapshot.width(), symbolState.atr14Value, macdDelta, volRatio);
+	}
+
+	private RegimeDecisionSnapshot resolveRegimeDecision(SymbolState symbolState, EntryFilterState entryFilterState,
+			ScoreSignal signal, Double volRatio, Double bwRatio, Double atrRatio, Double macdRatio, Double macdDelta) {
+		RegimeTag rawTag = resolveRawRegimeTag(entryFilterState, signal, volRatio, bwRatio, atrRatio, macdRatio);
+		RegimeTag activeTag = rawTag;
+		boolean regimeShift = false;
+		if (symbolState != null) {
+			activeTag = symbolState.updateRegimeState(rawTag);
+			regimeShift = symbolState.regimeShifted();
+		}
+		boolean protectionModeActive = false;
+		if (symbolState != null) {
+			if (strategyProperties.enableRegimeProtectionMode() && regimeShift) {
+				int protectionBars = strategyProperties.regimeProtectionBars();
+				symbolState.protectionBarsRemaining = protectionBars > 0 ? protectionBars : 0;
+			}
+			if (!strategyProperties.enableRegimeProtectionMode()) {
+				symbolState.protectionBarsRemaining = 0;
+			}
+			if (symbolState.protectionBarsRemaining > 0) {
+				protectionModeActive = true;
+				symbolState.protectionBarsRemaining--;
+			}
+		}
+		String regimeDir = resolveRegimeDir(signal, macdDelta);
+		boolean inputsReady = bwRatio != null && Double.isFinite(bwRatio)
+				&& macdRatio != null && Double.isFinite(macdRatio)
+				&& volRatio != null && Double.isFinite(volRatio);
+		RegimeTag effectiveTag = activeTag == null ? RegimeTag.CHOP : activeTag;
+		if (!inputsReady) {
+			effectiveTag = RegimeTag.CHOP;
+		}
+		RegimeDecisionSnapshot decision = new RegimeDecisionSnapshot(rawTag, activeTag, effectiveTag, regimeShift,
+				protectionModeActive, regimeDir, inputsReady);
+		if (symbolState != null) {
+			symbolState.lastRawRegimeTag = decision.rawTag();
+			symbolState.lastActiveRegimeTag = decision.activeTag();
+			symbolState.lastRegimeShift = decision.regimeShift();
+			symbolState.lastProtectionModeActive = decision.protectionModeActive();
+			symbolState.lastRegimeDir = decision.regimeDir();
+			symbolState.lastRegimePreset = decision.effectiveTag();
+		}
+		return decision;
+	}
+
+	private SetupEnablement resolveSetupEnablement(RegimeDecisionSnapshot regimeDecision, Indicators indicators,
+			Double volRatio, Double macdRatio) {
+		Map<String, Boolean> setupEnabledByRegime = new LinkedHashMap<>();
+		boolean enableRegimeMatrix = strategyProperties.enableRegimeSetupMatrix();
+		RegimeTag effectiveTag = regimeDecision == null || regimeDecision.effectiveTag() == null
+				? RegimeTag.CHOP
+				: regimeDecision.effectiveTag();
+		boolean protectionModeActive = regimeDecision != null && regimeDecision.protectionModeActive();
+		boolean fallbackOnlySetup5 = regimeDecision == null || !regimeDecision.inputsReady();
+		double volRatioValue = volRatio == null ? Double.NaN : volRatio;
+		double macdRatioValue = macdRatio == null ? Double.NaN : macdRatio;
+
+		boolean setup1Enabled = strategyProperties.longSetups() != null;
+		boolean setup2Enabled = strategyProperties.longSetups() != null;
+		boolean setup4Enabled = strategyProperties.enableLongSetup4() && strategyProperties.longSetups() != null;
+		boolean setup5Enabled = strategyProperties.enableLongSetup5() && strategyProperties.longSetups() != null;
+		boolean setupS6Enabled = strategyProperties.enableShortS6() && strategyProperties.shortSetups() != null;
+		boolean setupS2Enabled = strategyProperties.enableShortS2Only() && strategyProperties.shortSetups() != null;
+
+		if (protectionModeActive || fallbackOnlySetup5) {
+			setup1Enabled = false;
+			setup2Enabled = false;
+			setup4Enabled = false;
+			setup5Enabled = strategyProperties.enableLongSetup5();
+			setupS6Enabled = false;
+			setupS2Enabled = false;
+		} else if (enableRegimeMatrix) {
+			setupS2Enabled = false;
+			switch (effectiveTag) {
+				case CHOP, MEAN_REV -> {
+					setup1Enabled = false;
+					setup2Enabled = false;
+					setup4Enabled = false;
+					setup5Enabled = strategyProperties.enableLongSetup5();
+					setupS6Enabled = false;
+				}
+				case BREAKOUT -> {
+					setup1Enabled = false;
+					setup4Enabled = false;
+					setup2Enabled = isFiniteAtLeast(volRatioValue, 2.0);
+					setup5Enabled = isFiniteAtLeast(volRatioValue, 2.0) && isFiniteAtLeast(macdRatioValue, 1.25)
+							&& strategyProperties.enableLongSetup5();
+					setupS6Enabled = strategyProperties.enableShortS6();
+				}
+				case TREND -> {
+					setup1Enabled = true;
+					setup2Enabled = true;
+					setup5Enabled = strategyProperties.enableLongSetup5();
+					setupS6Enabled = strategyProperties.enableShortS6();
+					double chaseThreshold = strategyProperties.regimeSetup4ChaseEma20DistPct();
+					double ema20DistPct = indicators == null ? Double.NaN : indicators.ema20DistPct();
+					boolean chaseBlocked = Double.isFinite(ema20DistPct)
+							&& chaseThreshold > 0
+							&& ema20DistPct > chaseThreshold;
+					setup4Enabled = strategyProperties.enableLongSetup4() && !chaseBlocked;
+				}
+			}
+		}
+
+		setupEnabledByRegime.put(LongEntrySetup.SETUP_1.name(), setup1Enabled);
+		setupEnabledByRegime.put(LongEntrySetup.SETUP_2.name(), setup2Enabled);
+		setupEnabledByRegime.put(LongEntrySetup.SETUP_4.name(), setup4Enabled);
+		setupEnabledByRegime.put(LongEntrySetup.SETUP_5.name(), setup5Enabled);
+		setupEnabledByRegime.put(ShortEntrySetup.SETUP_S2.name(), setupS2Enabled);
+		setupEnabledByRegime.put(ShortEntrySetup.SETUP_S6.name(), setupS6Enabled);
+		return new SetupEnablement(setupEnabledByRegime);
+	}
+
+	private RegimeRiskPreset resolveRiskPreset(RegimeTag effectiveTag) {
+		RegimeTag tag = effectiveTag == null ? RegimeTag.CHOP : effectiveTag;
+		double baseTp = strategyProperties.regimeBaseTakeProfitBps();
+		double baseSl = strategyProperties.regimeBaseStopLossBps();
+		double baseTpBps = baseTp > 0 ? baseTp : resolveTakeProfitBps().doubleValue();
+		double baseSlBps = baseSl > 0 ? baseSl : resolveStopLossBps().doubleValue();
+		return switch (tag) {
+			case TREND -> new RegimeRiskPreset(tag,
+					baseTpBps * strategyProperties.regimeTrendTpMult(),
+					baseSlBps * strategyProperties.regimeTrendSlMult(),
+					strategyProperties.regimeTrendTimeStopBars());
+			case BREAKOUT -> new RegimeRiskPreset(tag,
+					baseTpBps * strategyProperties.regimeBreakoutTp2Mult(),
+					baseSlBps * strategyProperties.regimeBreakoutSlMult(),
+					strategyProperties.regimeBreakoutTimeStopBars());
+			case MEAN_REV -> new RegimeRiskPreset(tag,
+					baseTpBps * strategyProperties.regimeMeanRevTpMult(),
+					baseSlBps * strategyProperties.regimeMeanRevSlMult(),
+					strategyProperties.regimeMeanRevTimeStopBars());
+			case CHOP -> new RegimeRiskPreset(tag, baseTpBps, baseSlBps, strategyProperties.regimeChopTimeStopBars());
+		};
+	}
+	private void appendRegimeFields(ObjectNode line, SymbolState symbolState) {
+		RegimeTag rawTag = symbolState == null || symbolState.lastRawRegimeTag == null
+				? RegimeTag.CHOP
+				: symbolState.lastRawRegimeTag;
+		RegimeTag activeTag = symbolState == null || symbolState.lastActiveRegimeTag == null
+				? RegimeTag.CHOP
+				: symbolState.lastActiveRegimeTag;
+		boolean regimeShift = symbolState != null && symbolState.lastRegimeShift;
+		String regimeDir = symbolState != null && symbolState.lastRegimeDir != null
+				? symbolState.lastRegimeDir
+				: "NEUTRAL";
+		RegimeTag presetTag = symbolState != null && symbolState.lastRegimePreset != null
+				? symbolState.lastRegimePreset
+				: RegimeTag.CHOP;
+		boolean protectionModeActive = symbolState != null && symbolState.lastProtectionModeActive;
+		line.put("rawRegimeTag", rawTag.name());
+		line.put("activeRegimeTag", activeTag.name());
+		line.put("regimeShift", regimeShift);
+		line.put("regimeDir", regimeDir);
+		line.put("regimePreset", presetTag.name());
+		line.put("protectionModeActive", protectionModeActive);
+		ObjectNode setupEnabledNode = line.putObject("setupEnabledByRegime");
+		if (symbolState != null && symbolState.lastSetupEnabledByRegime != null) {
+			for (Map.Entry<String, Boolean> entry : symbolState.lastSetupEnabledByRegime.entrySet()) {
+				setupEnabledNode.put(entry.getKey(), entry.getValue());
+			}
+		}
+		ObjectNode debounceNode = line.putObject("regimeDebounce");
+		debounceNode.put("confirmBars", REGIME_CONFIRM_BARS);
+		debounceNode.put("cooldownBars", REGIME_COOLDOWN_BARS);
+	}
+
+	private RegimeTag resolveRawRegimeTag(EntryFilterState entryFilterState, ScoreSignal signal, Double volRatio,
+			Double bwRatio, Double atrRatio, Double macdRatio) {
+		boolean bbOutside = entryFilterState != null && entryFilterState.bbOutside_5m();
+		Double bbPercentB = entryFilterState == null ? null : finiteOrNull(entryFilterState.bbPercentB_5m());
+		Double adx5m = signal == null ? null : finiteOrNull(signal.adx5m());
+		if (isBreakoutRegime(volRatio, bwRatio, macdRatio, atrRatio, bbOutside, bbPercentB)) {
+			return RegimeTag.BREAKOUT;
+		}
+		if (isMeanRevRegime(adx5m, bwRatio, atrRatio, macdRatio, bbOutside, bbPercentB)) {
+			return RegimeTag.MEAN_REV;
+		}
+		if (isTrendRegime(adx5m, macdRatio, bwRatio, bbOutside, bbPercentB)) {
+			return RegimeTag.TREND;
+		}
+		if (isChopRegime(adx5m, bwRatio, macdRatio, volRatio, atrRatio)) {
+			return RegimeTag.CHOP;
+		}
+		return RegimeTag.CHOP;
+	}
+
+	private static boolean isBreakoutRegime(Double volRatio, Double bwRatio, Double macdRatio, Double atrRatio,
+			boolean bbOutside, Double bbPercentB) {
+		if (!isFiniteAtLeast(volRatio, 2.0)) {
+			return false;
+		}
+		if (!isFiniteAtLeast(bwRatio, 1.35)) {
+			return false;
+		}
+		if (!isFiniteAtLeast(macdRatio, 1.25)) {
+			return false;
+		}
+		if (atrRatio != null && !isFiniteAtLeast(atrRatio, 1.20)) {
+			return false;
+		}
+		return bbOutside
+				|| (bbPercentB != null && (bbPercentB <= 0.05 || bbPercentB >= 0.95));
+	}
+
+	private static boolean isMeanRevRegime(Double adx5m, Double bwRatio, Double atrRatio, Double macdRatio,
+			boolean bbOutside, Double bbPercentB) {
+		boolean extreme = bbOutside
+				|| (bbPercentB != null && (bbPercentB <= 0.10 || bbPercentB >= 0.90));
+		if (!extreme) {
+			return false;
+		}
+		if (!isFiniteAtMost(adx5m, 18.0)) {
+			return false;
+		}
+		if (!isFiniteAtMost(bwRatio, 1.15)) {
+			return false;
+		}
+		if (atrRatio != null && !isFiniteAtMost(atrRatio, 1.15)) {
+			return false;
+		}
+		return isFiniteAtMost(macdRatio, 1.35);
+	}
+
+	private static boolean isTrendRegime(Double adx5m, Double macdRatio, Double bwRatio, boolean bbOutside,
+			Double bbPercentB) {
+		if (!isFiniteAtLeast(adx5m, 22.0)) {
+			return false;
+		}
+		if (!isFiniteAtLeast(macdRatio, 1.10)) {
+			return false;
+		}
+		if (!isFiniteAtLeast(bwRatio, 0.95)) {
+			return false;
+		}
+		if (bbPercentB != null && !(bbPercentB >= 0.15 && bbPercentB <= 0.85)) {
+			return false;
+		}
+		return !bbOutside;
+	}
+
+	private static boolean isChopRegime(Double adx5m, Double bwRatio, Double macdRatio, Double volRatio,
+			Double atrRatio) {
+		if (!isFiniteAtMost(adx5m, 14.0)) {
+			return false;
+		}
+		if (!isFiniteAtMost(bwRatio, 0.90)) {
+			return false;
+		}
+		if (!isFiniteAtMost(macdRatio, 0.85)) {
+			return false;
+		}
+		if (!isFiniteAtMost(volRatio, 1.10)) {
+			return false;
+		}
+		return atrRatio == null || isFiniteAtMost(atrRatio, 0.90);
+	}
+
+	private String resolveRegimeDir(ScoreSignal signal, Double macdDelta) {
+		if (signal != null && signal.cti5mDir() != null) {
+			return signal.cti5mDir().name();
+		}
+		if (macdDelta != null && Double.isFinite(macdDelta)) {
+			if (macdDelta > 0) {
+				return "LONG";
+			}
+			if (macdDelta < 0) {
+				return "SHORT";
+			}
+		}
+		return "NEUTRAL";
 	}
 
 	static void addSetupMatchFields(ObjectMapper objectMapper, ObjectNode line, EntryDecision entryDecision) {
