@@ -651,8 +651,6 @@ public class CtiLbStrategy {
 				exitReasonForLog);
 		BigDecimal stopLossBps = resolveStopLossBps();
 		BigDecimal takeProfitBps = resolveTakeProfitBps();
-		boolean timeStopEnabled = strategyProperties.timeStopEnabled();
-		int timeStopBars = strategyProperties.timeStopBars();
 		boolean timeStopRequireNonPositive = strategyProperties.timeStopRequireNonPositivePnl();
 		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
 				entryState == null ? null : entryState.side(),
