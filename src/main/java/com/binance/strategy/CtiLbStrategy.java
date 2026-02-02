@@ -3590,7 +3590,6 @@ public class CtiLbStrategy {
 		Double macdDelta = signal == null ? null : finiteOrNull(resolveMacdDelta(signal));
 		Double volRatio = confidence == null ? null : finiteOrNull(confidence.volRatio());
 		Double bwRatio = safeRatio(bbWidth, baselines.bwEma());
-		Double atrRatio = safeRatio(atr14, baselines.atrEma());
 		Double macdRatio = safeRatio(macdDelta == null ? null : Math.abs(macdDelta), baselines.macdAbsEma());
 		Double volRatioOfEma = safeRatio(volRatio, baselines.volEma());
 		putNullable(line, "bwEma_5m", baselines.bwEma());
