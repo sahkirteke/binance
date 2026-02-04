@@ -137,6 +137,8 @@ public class CtiLbStrategy {
 	private final Map<String, Long> lastOppositeExitAtMs = new ConcurrentHashMap<>();
 	private final Map<String, Integer> pendingFlipDirs = new ConcurrentHashMap<>();
 	private final StopLossVerifier stopLossVerifier = new StopLossVerifier(0.0002, 0.95, 20, 10);
+	private final Map<String, StopLossAuditService.TradeTruthRecorder.ExitContext> exitContextBySymbol =
+			new ConcurrentHashMap<>();
 	private long activeBarKey = Long.MIN_VALUE;
 	private int newLongsThisBar;
 	private int newShortsThisBar;
@@ -286,6 +288,10 @@ public class CtiLbStrategy {
 		return strategyProperties.takeProfitBps();
 	}
 
+	Double resolveExpectedStopPriceForAudit(String symbol, CtiDirection side, BigDecimal entryPrice) {
+		return resolveStopPriceForLog(symbol, side, entryPrice);
+	}
+
 	private void resetBarStateIfNeeded(long closeTime) {
 		long barKey = closeTime / FIVE_MIN_MS;
 		if (barKey != activeBarKey) {
@@ -342,7 +348,7 @@ public class CtiLbStrategy {
 		return any ? score : Double.NaN;
 	}
 
-	private Double resolveStopPriceForLog(CtiDirection side, BigDecimal entryPrice) {
+	private Double resolveStopPriceForLog(String symbol, CtiDirection side, BigDecimal entryPrice) {
 		if (side == null || entryPrice == null || entryPrice.signum() <= 0) {
 			return null;
 		}
@@ -353,11 +359,11 @@ public class CtiLbStrategy {
 		double rawStopPrice = side == CtiDirection.SHORT
 				? entryPrice.doubleValue() * (1.0 + stopLossPct)
 				: entryPrice.doubleValue() * (1.0 - stopLossPct);
-		return roundStopPriceToTick(rawStopPrice, side);
+		return roundStopPriceToTick(symbol, rawStopPrice, side);
 	}
 
-	private Double roundStopPriceToTick(double price, CtiDirection side) {
-		BigDecimal tick = strategyProperties.priceTick();
+	private Double roundStopPriceToTick(String symbol, double price, CtiDirection side) {
+		BigDecimal tick = resolveTickSize(symbol);
 		if (tick == null || tick.signum() <= 0 || !Double.isFinite(price)) {
 			return Double.isFinite(price) ? price : null;
 		}
@@ -365,6 +371,14 @@ public class CtiLbStrategy {
 		BigDecimal divided = value.divide(tick, 0,
 				side == CtiDirection.SHORT ? java.math.RoundingMode.CEILING : java.math.RoundingMode.FLOOR);
 		return divided.multiply(tick, MathContext.DECIMAL64).doubleValue();
+	}
+
+	private BigDecimal resolveTickSize(String symbol) {
+		BinanceFuturesOrderClient.SymbolFilters filters = symbol == null ? null : symbolFilterService.getFilters(symbol);
+		if (filters != null && filters.tickSize() != null) {
+			return filters.tickSize();
+		}
+		return strategyProperties.priceTick();
 	}
 
 	private void recordStopLossVerification(String symbol, EntryState entryState, double exitPrice) {
@@ -380,7 +394,7 @@ public class CtiLbStrategy {
 		double actualMovePct = side == CtiDirection.SHORT
 				? (exitPrice - entryPrice) / entryPrice
 				: (entryPrice - exitPrice) / entryPrice;
-		Double stopPriceUse = resolveStopPriceForLog(side, entryState.entryPrice());
+		Double stopPriceUse = resolveStopPriceForLog(symbol, side, entryState.entryPrice());
 		double stopPriceValue = stopPriceUse == null ? Double.NaN : stopPriceUse;
 		LOGGER.info(
 				"EVENT=STOP_LOSS_EXIT symbol={} side={} entryPrice={} exitPrice={} stopPriceUse={} expectedSlPct={} actualMovePct={}",
@@ -406,6 +420,36 @@ public class CtiLbStrategy {
 					result.total(),
 					result.failures());
 		}
+	}
+
+	private void registerExitContext(String symbol, String exitReason, EntryState entryState) {
+		if (symbol == null) {
+			return;
+		}
+		Double expectedSlPct = resolveStopLossPctFraction();
+		Double expectedStopPrice = null;
+		Double stopPriceUsed = null;
+		if (entryState != null && entryState.entryPrice() != null && entryState.entryPrice().signum() > 0) {
+			expectedStopPrice = resolveStopPriceForLog(symbol, entryState.side(), entryState.entryPrice());
+			if (exitReason != null && exitReason.contains("STOP_LOSS")) {
+				stopPriceUsed = expectedStopPrice;
+			}
+		}
+		StopLossAuditService.TradeTruthRecorder.ExitContext context =
+				new StopLossAuditService.TradeTruthRecorder.ExitContext(
+						exitReason,
+						expectedSlPct,
+						expectedStopPrice,
+						stopPriceUsed);
+		exitContextBySymbol.put(symbol, context);
+		trailingPnlService.markExternalExit(symbol, exitReason);
+	}
+
+	StopLossAuditService.TradeTruthRecorder.ExitContext peekExitContext(String symbol) {
+		if (symbol == null) {
+			return null;
+		}
+		return exitContextBySymbol.remove(symbol);
 	}
 
 	private double calculateLeveragedPnlPct(EntryState entryState, double close) {
@@ -441,6 +485,7 @@ public class CtiLbStrategy {
 			cleanupPositionState(symbol);
 			return;
 		}
+		registerExitContext(symbol, request.reason(), entryState);
 
 		BigDecimal exitQty = resolveExitQuantity(symbol, entryState, request.markPrice());
 		if (exitQty == null || exitQty.signum() <= 0) {
@@ -872,10 +917,10 @@ public class CtiLbStrategy {
 			return;
 		}
 
-		if (current != PositionState.NONE && exitDecision.exit()) {
-			SignalAction exitAction = SignalAction.HOLD;
-			String decisionActionReason = exitDecision.reason();
-			String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
+			if (current != PositionState.NONE && exitDecision.exit()) {
+				SignalAction exitAction = SignalAction.HOLD;
+				String decisionActionReason = exitDecision.reason();
+				String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
 			if (closingInFlight) {
 				decisionActionReason = "CLOSE_IN_FLIGHT";
 				decisionBlockReason = "CLOSE_IN_FLIGHT";
@@ -887,13 +932,14 @@ public class CtiLbStrategy {
 						trendAlignedWithPosition, false);
 				return;
 			}
-			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
-			boolean stopLossExit = isStopLossExit(decisionActionReason);
-			boolean hardExitReason = isHardExitReason(decisionActionReason);
-			boolean trailStopHit = trailState.trailStopHit();
-			if (stopLossExit) {
-				recordStopLossVerification(symbol, entryState, close);
-			}
+				BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
+				boolean stopLossExit = isStopLossExit(decisionActionReason);
+				boolean hardExitReason = isHardExitReason(decisionActionReason);
+				boolean trailStopHit = trailState.trailStopHit();
+				if (stopLossExit) {
+					recordStopLossVerification(symbol, entryState, close);
+				}
+				registerExitContext(symbol, decisionActionReason, entryState);
 			boolean reversalConfirm = evaluateReversalConfirm(current, close, signal, symbolState);
 			boolean skipHoldChecks = emergencyExitTriggered || stopLossExit || trailStopHit || givebackExit || hardExitReason;
 			boolean exitBlockedByTrendAligned = false;
@@ -3723,12 +3769,34 @@ public class CtiLbStrategy {
 						}
 					}
 					payload.set("indicators", indicatorsNode);
-				if ("EXIT".equals(signalType)) {
-					BigDecimal realizedPnl = calculateRealizedPnl(entryState, quantity, closePrice);
-					if (realizedPnl != null) {
-						payload.put("realizedPnl", realizedPnl.stripTrailingZeros().toPlainString());
+					if ("EXIT".equals(signalType)) {
+						BigDecimal realizedPnl = calculateRealizedPnl(entryState, quantity, closePrice);
+						if (realizedPnl != null) {
+							payload.put("realizedPnl", realizedPnl.stripTrailingZeros().toPlainString());
+						}
+						if (entryState != null && entryState.entryPrice() != null) {
+							payload.put("entryAvgPrice", entryState.entryPrice().stripTrailingZeros().toPlainString());
+							payload.put("exitAvgPrice", BigDecimal.valueOf(closePrice).stripTrailingZeros().toPlainString());
+						}
+						double expectedSlPct = resolveStopLossPctFraction();
+						if (expectedSlPct > 0) {
+							payload.put("expectedSlPct", expectedSlPct);
+							Double expectedStopPrice = resolveStopPriceForLog(symbol,
+									entryState == null ? null : entryState.side(),
+									entryState == null ? null : entryState.entryPrice());
+							if (expectedStopPrice != null && Double.isFinite(expectedStopPrice)) {
+								payload.put("expectedStopPrice", expectedStopPrice);
+							}
+						}
+						if (decisionActionReason != null && decisionActionReason.contains("STOP_LOSS")) {
+							Double stopPriceUsed = resolveStopPriceForLog(symbol,
+									entryState == null ? null : entryState.side(),
+									entryState == null ? null : entryState.entryPrice());
+							if (stopPriceUsed != null && Double.isFinite(stopPriceUsed)) {
+								payload.put("stopPriceUsed", stopPriceUsed);
+							}
+						}
 					}
-				}
 				payload.put("decisionActionReason", decisionActionReason == null ? "NA" : decisionActionReason);
 				payload.put("decisionBlockReason", decisionBlockReason == null ? "NA" : decisionBlockReason);
 				payload.put("recommendationUsed", recommendationUsed == null ? "NA" : recommendationUsed.name());

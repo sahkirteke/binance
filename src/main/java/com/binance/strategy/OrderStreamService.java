@@ -36,6 +36,7 @@ public class OrderStreamService {
 	private final OrderTracker orderTracker;
 	private final CtiLbStrategy ctiLbStrategy;
 	private final TrailingPnlService trailingPnlService;
+	private final StopLossAuditService stopLossAuditService;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> socketSubscription = new AtomicReference<>();
 	private final AtomicReference<String> listenKeyRef = new AtomicReference<>();
@@ -46,7 +47,8 @@ public class OrderStreamService {
 			ObjectMapper objectMapper,
 			OrderTracker orderTracker,
 			CtiLbStrategy ctiLbStrategy,
-			TrailingPnlService trailingPnlService) {
+			TrailingPnlService trailingPnlService,
+			StopLossAuditService stopLossAuditService) {
 		this.orderClient = orderClient;
 		this.properties = properties;
 		this.strategyProperties = strategyProperties;
@@ -54,6 +56,7 @@ public class OrderStreamService {
 		this.orderTracker = orderTracker;
 		this.ctiLbStrategy = ctiLbStrategy;
 		this.trailingPnlService = trailingPnlService;
+		this.stopLossAuditService = stopLossAuditService;
 	}
 
 	@PostConstruct
@@ -127,7 +130,12 @@ public class OrderStreamService {
 					orderNode.path("T").asLong(),
 					orderNode.path("ap").asText(),
 					orderNode.path("z").asText(),
-					orderNode.path("q").asText());
+					orderNode.path("q").asText(),
+					orderNode.path("o").asText(),
+					orderNode.path("sp").asText(),
+					orderNode.path("p").asText(),
+					orderNode.path("cp").asBoolean(false));
+			stopLossAuditService.recordOrderUpdate(update);
 			orderTracker.updateFromStream(update)
 					.ifPresent(tracked -> logOrderUpdate(update, tracked));
 			if ("FILLED".equals(update.status())) {
