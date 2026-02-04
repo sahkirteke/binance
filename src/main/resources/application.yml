@@ -63,11 +63,11 @@ strategy:
   cooldown-ms: 650
   max-spread-bps: 10
   position-notional-usdt: 50
-  stop-loss-bps: 18
+  stop-loss-bps: 20
   take-profit-bps: 22
   # ---- Risk management ----
   take-profit-pct: 0.20
-  stop-loss-pct: 0.10
+  stop-loss-pct: 0.002
   quantity-step: 1
   roi-exit-enabled: true
   roi-take-profit-pct: 20
@@ -154,6 +154,18 @@ strategy:
   short-s6-bb-width-min: 0.020
   short-s6-ema20-dist-min: 0.010
   short-s6-adx-min: 25
+  short-ema-chase-veto: 0.008
+  short-vol-exhaustion-veto: 2.2
+  max-new-shorts-per-bar: 1
+  max-open-shorts: 1
+  max-new-longs-per-bar: 1
+  long-select-weight-vol-ratio: 1.0
+  long-select-weight-bw-ratio: 1.0
+  long-select-weight-atr-ratio: 1.0
+  long-select-weight-bb-percent-b: 0.6
+  long-setup5-elite-vol-ratio-max: 1.0
+  long-setup5-elite-bw-ratio-max: 1.30
+  long-setup5-elite-atr-ratio-max: 1.70
   enable-reversal-exit-only-when-profitable: true
   close-in-flight-cooldown-bars: 1
   long-setups:

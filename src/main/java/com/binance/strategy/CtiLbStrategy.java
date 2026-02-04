@@ -91,10 +91,13 @@ public class CtiLbStrategy {
 	private static final double BB_WIDTH_MIN = 0.0114;
 	private static final double BB_PB_LONG_BLOCK = 0.85;
 	private static final double BB_PB_SHORT_BLOCK = 0.15;
+	private static final double SHORT_PB_OVERSOLD_VETO = 0.15;
+	private static final double SHORT_RSI_OVERSOLD_VETO = 28.0;
 	private static final double VOL_RATIO_BREAKOUT_MIN = 2.2;
 	private static final double MIDDLE_BUF_5M = 0.0010;
 	private static final double MIDDLE_BUF_1M = 0.0005;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
+	private static final long FIVE_MIN_MS = 5 * 60_000L;
 	private static final Indicators EMPTY_SETUP_INDICATORS =
 			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, null);
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
@@ -133,6 +136,12 @@ public class CtiLbStrategy {
 	private final Map<String, SymbolState> symbolStates = new ConcurrentHashMap<>();
 	private final Map<String, Long> lastOppositeExitAtMs = new ConcurrentHashMap<>();
 	private final Map<String, Integer> pendingFlipDirs = new ConcurrentHashMap<>();
+	private final StopLossVerifier stopLossVerifier = new StopLossVerifier(0.0002, 0.95, 20, 10);
+	private long activeBarKey = Long.MIN_VALUE;
+	private int newLongsThisBar;
+	private int newShortsThisBar;
+	private Double bestLongScoreThisBar = Double.NaN;
+	private String bestLongSymbolThisBar;
 	private static final long POSITION_SYNC_INTERVAL_MS = 60_000L;
 	private static final BigDecimal DEFAULT_NOTIONAL_USDT = BigDecimal.valueOf(50);
 	private static final long DEFAULT_MIN_HOLD_MS = 30_000L;
@@ -259,11 +268,144 @@ public class CtiLbStrategy {
 		return strategyProperties.stopLossBps();
 	}
 
+	private double resolveStopLossPctFraction() {
+		if (strategyProperties.stopLossPct() > 0) {
+			return strategyProperties.stopLossPct();
+		}
+		BigDecimal stopLossBps = strategyProperties.stopLossBps();
+		if (stopLossBps == null) {
+			return 0.0;
+		}
+		return stopLossBps.doubleValue() / 10000.0;
+	}
+
 	private BigDecimal resolveTakeProfitBps() {
 		if (strategyProperties.takeProfitPct() > 0) {
 			return BigDecimal.valueOf(strategyProperties.takeProfitPct() * 10000.0);
 		}
 		return strategyProperties.takeProfitBps();
+	}
+
+	private void resetBarStateIfNeeded(long closeTime) {
+		long barKey = closeTime / FIVE_MIN_MS;
+		if (barKey != activeBarKey) {
+			activeBarKey = barKey;
+			newLongsThisBar = 0;
+			newShortsThisBar = 0;
+			bestLongScoreThisBar = Double.NaN;
+			bestLongSymbolThisBar = null;
+		}
+	}
+
+	private void recordNewEntryInBar(PositionState targetSide, long closeTime) {
+		resetBarStateIfNeeded(closeTime);
+		if (targetSide == PositionState.LONG) {
+			newLongsThisBar += 1;
+		} else if (targetSide == PositionState.SHORT) {
+			newShortsThisBar += 1;
+		}
+	}
+
+	private int countOpenShorts() {
+		int count = 0;
+		for (PositionState state : positionStates.values()) {
+			if (state == PositionState.SHORT) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private double computeLongSelectionScore(Double volRatio, Double bwRatio, Double atrRatio, Double bbPercentB) {
+		double score = 0.0;
+		boolean any = false;
+		double weightVol = strategyProperties.longSelectWeightVolRatio();
+		double weightBw = strategyProperties.longSelectWeightBwRatio();
+		double weightAtr = strategyProperties.longSelectWeightAtrRatio();
+		double weightBb = strategyProperties.longSelectWeightBbPercentB();
+		if (weightVol > 0 && volRatio != null && Double.isFinite(volRatio)) {
+			score += weightVol * volRatio;
+			any = true;
+		}
+		if (weightBw > 0 && bwRatio != null && Double.isFinite(bwRatio)) {
+			score += weightBw * bwRatio;
+			any = true;
+		}
+		if (weightAtr > 0 && atrRatio != null && Double.isFinite(atrRatio)) {
+			score += weightAtr * Math.abs(atrRatio - 1.0);
+			any = true;
+		}
+		if (weightBb > 0 && bbPercentB != null && Double.isFinite(bbPercentB)) {
+			score += weightBb * bbPercentB;
+			any = true;
+		}
+		return any ? score : Double.NaN;
+	}
+
+	private Double resolveStopPriceForLog(CtiDirection side, BigDecimal entryPrice) {
+		if (side == null || entryPrice == null || entryPrice.signum() <= 0) {
+			return null;
+		}
+		double stopLossPct = resolveStopLossPctFraction();
+		if (stopLossPct <= 0) {
+			return null;
+		}
+		double rawStopPrice = side == CtiDirection.SHORT
+				? entryPrice.doubleValue() * (1.0 + stopLossPct)
+				: entryPrice.doubleValue() * (1.0 - stopLossPct);
+		return roundStopPriceToTick(rawStopPrice, side);
+	}
+
+	private Double roundStopPriceToTick(double price, CtiDirection side) {
+		BigDecimal tick = strategyProperties.priceTick();
+		if (tick == null || tick.signum() <= 0 || !Double.isFinite(price)) {
+			return Double.isFinite(price) ? price : null;
+		}
+		BigDecimal value = BigDecimal.valueOf(price);
+		BigDecimal divided = value.divide(tick, 0,
+				side == CtiDirection.SHORT ? java.math.RoundingMode.CEILING : java.math.RoundingMode.FLOOR);
+		return divided.multiply(tick, MathContext.DECIMAL64).doubleValue();
+	}
+
+	private void recordStopLossVerification(String symbol, EntryState entryState, double exitPrice) {
+		if (entryState == null || entryState.entryPrice() == null || entryState.entryPrice().signum() <= 0) {
+			return;
+		}
+		double expectedSlPct = resolveStopLossPctFraction();
+		if (expectedSlPct <= 0) {
+			return;
+		}
+		double entryPrice = entryState.entryPrice().doubleValue();
+		CtiDirection side = entryState.side();
+		double actualMovePct = side == CtiDirection.SHORT
+				? (exitPrice - entryPrice) / entryPrice
+				: (entryPrice - exitPrice) / entryPrice;
+		Double stopPriceUse = resolveStopPriceForLog(side, entryState.entryPrice());
+		double stopPriceValue = stopPriceUse == null ? Double.NaN : stopPriceUse;
+		LOGGER.info(
+				"EVENT=STOP_LOSS_EXIT symbol={} side={} entryPrice={} exitPrice={} stopPriceUse={} expectedSlPct={} actualMovePct={}",
+				symbol,
+				side == null ? "NA" : side.name(),
+				entryPrice,
+				exitPrice,
+				stopPriceValue,
+				expectedSlPct,
+				actualMovePct);
+		StopLossVerifier.VerificationResult result = stopLossVerifier.record(
+				symbol,
+				side,
+				expectedSlPct,
+				actualMovePct,
+				entryPrice,
+				exitPrice,
+				stopPriceValue);
+		if (stopLossVerifier.shouldAlert(result)) {
+			LOGGER.error(
+					"EVENT=STOP_LOSS_VERIFY_FAIL passRate={} total={} failures={}",
+					result.passRate(),
+					result.total(),
+					result.failures());
+		}
 	}
 
 	private double calculateLeveragedPnlPct(EntryState entryState, double close) {
@@ -398,6 +540,7 @@ public class CtiLbStrategy {
 		if (previousCloseTime != null && previousCloseTime == closeTime) {
 			return;
 		}
+		resetBarStateIfNeeded(closeTime);
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 		tickCloseInFlight(symbol, current);
 		boolean closingInFlight = isCloseInFlight(symbol);
@@ -440,12 +583,15 @@ public class CtiLbStrategy {
 		Double bwRatio = safeRatio(bbWidth, baselines.bwEma());
 		Double atrRatio = safeRatio(atr14, baselines.atrEma());
 		Double macdRatio = safeRatio(macdDeltaValue == null ? null : Math.abs(macdDeltaValue), baselines.macdAbsEma());
+		Double volRatioOfEma = safeRatio(volRatioValue, baselines.volEma());
 		RegimeDecisionSnapshot regimeDecision = resolveRegimeDecision(symbolState, entryFilterState, signal,
 				volRatioValue, bwRatio, atrRatio, macdRatio, macdDeltaValue);
 		Indicators setupIndicators = buildSetupIndicators(entryFilterState, signal, volRatio, macdDelta, close);
-		SetupEnablement setupEnablement = resolveSetupEnablement(regimeDecision, setupIndicators, volRatioValue, macdRatio);
+		SetupEnablement setupEnablement = resolveSetupEnablement(regimeDecision, setupIndicators, volRatioValue,
+				macdRatio, bwRatio, atrRatio);
 		symbolState.lastSetupEnabledByRegime = setupEnablement.setupEnabledByRegime();
-		EntryDecision entryDecision = resolveEntryDecision(current, recommendationUsed, setupIndicators, setupEnablement);
+		EntryDecision entryDecision = resolveEntryDecision(current, recommendationUsed, setupIndicators,
+				entryFilterState, setupEnablement, regimeDecision, bwRatio, atrRatio, volRatioOfEma, closeTime, symbol);
 		if (isBbFalseEntryBlock(entryDecision.blockReason())) {
 //			LOGGER.info(
 //					"EVENT=ENTRY_BLOCK_FALSE_ENTRY symbol={} side=LONG reason={} pB={} rsi={} bbOutside={}",
@@ -745,6 +891,9 @@ public class CtiLbStrategy {
 			boolean stopLossExit = isStopLossExit(decisionActionReason);
 			boolean hardExitReason = isHardExitReason(decisionActionReason);
 			boolean trailStopHit = trailState.trailStopHit();
+			if (stopLossExit) {
+				recordStopLossVerification(symbol, entryState, close);
+			}
 			boolean reversalConfirm = evaluateReversalConfirm(current, close, signal, symbolState);
 			boolean skipHoldChecks = emergencyExitTriggered || stopLossExit || trailStopHit || givebackExit || hardExitReason;
 			boolean exitBlockedByTrendAligned = false;
@@ -950,6 +1099,34 @@ public class CtiLbStrategy {
 			decisionActionReason = entryDecision.blockReason();
 			decisionBlockReason = entryDecision.blockReason();
 		}
+		if (action != SignalAction.HOLD && target == PositionState.SHORT) {
+			if (!isShortRegimeMatch(regimeDecision)) {
+				action = SignalAction.HOLD;
+				decisionActionReason = "REGIME_RAW_ACTIVE_MISMATCH_SHORT_DISABLED";
+				decisionBlockReason = "REGIME_RAW_ACTIVE_MISMATCH_SHORT_DISABLED";
+			} else {
+				String shortPortfolioBlock = resolveShortPortfolioBlockReason(closeTime);
+				if (shortPortfolioBlock != null) {
+					action = SignalAction.HOLD;
+					decisionActionReason = shortPortfolioBlock;
+					decisionBlockReason = shortPortfolioBlock;
+				}
+				String shortVeto = resolveShortHardVeto(setupIndicators, entryFilterState, volRatioOfEma);
+				if (shortVeto != null) {
+					action = SignalAction.HOLD;
+					decisionActionReason = shortVeto;
+					decisionBlockReason = shortVeto;
+				}
+			}
+		}
+		if (action != SignalAction.HOLD && target == PositionState.LONG) {
+			int maxNewLongs = strategyProperties.maxNewLongsPerBar();
+			if (maxNewLongs > 0 && newLongsThisBar >= maxNewLongs) {
+				action = SignalAction.HOLD;
+				decisionActionReason = "PORTFOLIO_MAX_NEW_LONGS_PER_BAR";
+				decisionBlockReason = "PORTFOLIO_MAX_NEW_LONGS_PER_BAR";
+			}
+		}
 		if (current != PositionState.NONE && action != SignalAction.HOLD) {
 			if (decisionContinuationState.holdApplied()) {
 				action = SignalAction.HOLD;
@@ -1081,6 +1258,7 @@ public class CtiLbStrategy {
 							decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
+					recordNewEntryInBar(target, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				} else if (target != current) {
@@ -1097,6 +1275,7 @@ public class CtiLbStrategy {
 							decisionBlockReason,
 							recommendationUsed, recommendationRaw, confirmedRec);
 					positionStates.put(symbol, target);
+					recordNewEntryInBar(target, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				}
@@ -1171,6 +1350,7 @@ public class CtiLbStrategy {
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
+					recordNewEntryInBar(targetForLog, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				}
@@ -1189,6 +1369,7 @@ public class CtiLbStrategy {
 						recommendationUsedForLog, recommendationRawForLog, confirmedRecForLog);
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, targetForLog);
+					recordNewEntryInBar(targetForLog, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
 				}
@@ -1226,7 +1407,10 @@ public class CtiLbStrategy {
 								.doOnError(error -> logOrderEvent("ENTRY_ORDER", symbol, decisionActionReasonForLog,
 										targetForLog == PositionState.LONG ? "BUY" : "SELL", resolvedQtyForLog, false,
 										hedgeMode ? targetForLog.name() : "", correlationId, null, error.getMessage()))
-								.doOnNext(response -> positionStates.put(symbol, targetForLog))
+								.doOnNext(response -> {
+									positionStates.put(symbol, targetForLog);
+									recordNewEntryInBar(targetForLog, closeTime);
+								})
 								.doOnNext(response -> {
 									recordEntry(symbol, targetForLog, response, resolvedQtyForLog, closeTime, close);
 									flipCount.increment();
@@ -1261,7 +1445,10 @@ public class CtiLbStrategy {
 											targetForLog == PositionState.LONG ? "BUY" : "SELL", resolvedQtyForLog, false,
 											hedgeMode ? targetForLog.name() : "", openCorrelationId, null,
 											error.getMessage())))
-							.doOnNext(response -> positionStates.put(symbol, targetForLog))
+							.doOnNext(response -> {
+								positionStates.put(symbol, targetForLog);
+								recordNewEntryInBar(targetForLog, closeTime);
+							})
 							.doOnNext(response -> {
 								recordEntry(symbol, targetForLog, response, resolvedQtyForLog, closeTime, close);
 								recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
@@ -1916,17 +2103,24 @@ public class CtiLbStrategy {
 	}
 
 	private EntryDecision resolveEntryDecision(PositionState current, CtiDirection recommendationUsed,
-			Indicators indicators, SetupEnablement setupEnablement) {
+			Indicators indicators, EntryFilterState entryFilterState, SetupEnablement setupEnablement,
+			RegimeDecisionSnapshot regimeDecision, Double bwRatio, Double atrRatio, Double volRatioOfEma,
+			long closeTime, String symbol) {
 		Indicators snapshot = indicators == null ? EMPTY_SETUP_INDICATORS : indicators;
 		if (current != null && current != PositionState.NONE) {
 			return EntryDecision.block("IN_POSITION_NO_ENTRY", snapshot);
 		}
 		if (recommendationUsed == CtiDirection.LONG) {
-			if (strategyProperties.enableLongQualityGate()) {
-				// Quality gates are informational only; do not block entry.
+			EntryDecision longDecision = evaluateLongEntryDecision(snapshot, setupEnablement);
+			if (longDecision == null) {
+				return EntryDecision.block("NO_LONG_SETUP_MATCHED", snapshot);
 			}
-			if (strategyProperties.enableLongRsiQuality()) {
-				// Quality gates are informational only; do not block entry.
+			if (longDecision.blockReason() != null) {
+				return longDecision;
+			}
+			String longBlock = resolveLongPortfolioBlockReason(snapshot, bwRatio, atrRatio, closeTime, symbol);
+			if (longBlock != null) {
+				return EntryDecision.block(longBlock, snapshot);
 			}
 			if (Double.isFinite(snapshot.bbPercentB_5m())
 					&& snapshot.bbPercentB_5m() >= strategyProperties.longBbChasePbMin()) {
@@ -1935,23 +2129,110 @@ public class CtiLbStrategy {
 			if (snapshot.macdHistColor() != MacdHistColor.AQUA) {
 				return EntryDecision.block("LONG_MACD_COLOR_NOT_AQUA", snapshot);
 			}
-			EntryDecision longDecision = evaluateLongEntryDecision(snapshot, setupEnablement);
-			if (longDecision != null) {
-				return longDecision;
-			}
-			return EntryDecision.block("NO_LONG_SETUP_MATCHED", snapshot);
+			return longDecision;
 		} else if (recommendationUsed == CtiDirection.SHORT) {
+			if (!isShortRegimeMatch(regimeDecision)) {
+				return EntryDecision.block("REGIME_RAW_ACTIVE_MISMATCH_SHORT_DISABLED", snapshot);
+			}
+			EntryDecision shortDecision = evaluateShortEntryDecision(snapshot, setupEnablement);
+			if (shortDecision.blockReason() != null) {
+				return shortDecision;
+			}
+			String shortPortfolioBlock = resolveShortPortfolioBlockReason(closeTime);
+			if (shortPortfolioBlock != null) {
+				return EntryDecision.block(shortPortfolioBlock, snapshot);
+			}
+			String shortVeto = resolveShortHardVeto(snapshot, entryFilterState, volRatioOfEma);
+			if (shortVeto != null) {
+				return EntryDecision.block(shortVeto, snapshot);
+			}
 			if (snapshot.macdHistColor() != MacdHistColor.RED) {
 				return EntryDecision.block("SHORT_MACD_COLOR_NOT_RED", snapshot);
 			}
-			return evaluateShortEntryDecision(snapshot, setupEnablement);
+			return shortDecision;
 		}
 		return EntryDecision.block("REC_NEUTRAL", snapshot);
 	}
 
 	private EntryDecision resolveEntryDecision(PositionState current, CtiDirection recommendationUsed,
 			Indicators indicators) {
-		return resolveEntryDecision(current, recommendationUsed, indicators, null);
+		return resolveEntryDecision(current, recommendationUsed, indicators, null, null, null,
+				null, null, null, 0L, null);
+	}
+
+	private boolean isShortRegimeMatch(RegimeDecisionSnapshot regimeDecision) {
+		if (regimeDecision == null || regimeDecision.rawTag() == null || regimeDecision.activeTag() == null) {
+			return false;
+		}
+		if (regimeDecision.rawTag() != regimeDecision.activeTag()) {
+			return false;
+		}
+		return regimeDecision.rawTag() == RegimeTag.TREND || regimeDecision.rawTag() == RegimeTag.BREAKOUT;
+	}
+
+	private String resolveShortPortfolioBlockReason(long closeTime) {
+		resetBarStateIfNeeded(closeTime);
+		int maxNewShorts = strategyProperties.maxNewShortsPerBar();
+		if (maxNewShorts > 0 && newShortsThisBar >= maxNewShorts) {
+			return "PORTFOLIO_MAX_NEW_SHORTS_PER_BAR";
+		}
+		int maxOpenShorts = strategyProperties.maxOpenShorts();
+		if (maxOpenShorts > 0 && countOpenShorts() >= maxOpenShorts) {
+			return "PORTFOLIO_MAX_OPEN_SHORTS";
+		}
+		return null;
+	}
+
+	private String resolveLongPortfolioBlockReason(Indicators snapshot, Double bwRatio, Double atrRatio, long closeTime,
+			String symbol) {
+		resetBarStateIfNeeded(closeTime);
+		int maxNewLongs = strategyProperties.maxNewLongsPerBar();
+		if (maxNewLongs > 0 && newLongsThisBar >= maxNewLongs) {
+			return "PORTFOLIO_MAX_NEW_LONGS_PER_BAR";
+		}
+		Double bbPercentB = snapshot == null ? null : finiteOrNull(snapshot.bbPercentB_5m());
+		Double volRatio = snapshot == null ? null : finiteOrNull(snapshot.volRatio());
+		double score = computeLongSelectionScore(volRatio, bwRatio, atrRatio, bbPercentB);
+		if (!Double.isFinite(score)) {
+			return null;
+		}
+		if (Double.isNaN(bestLongScoreThisBar) || score < bestLongScoreThisBar) {
+			bestLongScoreThisBar = score;
+			bestLongSymbolThisBar = symbol;
+			return null;
+		}
+		if (symbol != null && symbol.equals(bestLongSymbolThisBar)) {
+			return null;
+		}
+		return "PORTFOLIO_LONG_SCORE_LOWER_THAN_BEST";
+	}
+
+	private String resolveShortHardVeto(Indicators snapshot, EntryFilterState entryFilterState, Double volRatioOfEma) {
+		if (snapshot == null) {
+			return null;
+		}
+		Double bbPercentB = finiteOrNull(snapshot.bbPercentB_5m());
+		if (bbPercentB != null && bbPercentB <= SHORT_PB_OVERSOLD_VETO) {
+			return "SHORT_OVERSOLD_PB_VETO";
+		}
+		if (entryFilterState != null && entryFilterState.bbOutside_5m()
+				&& bbPercentB != null && bbPercentB < 0.0) {
+			return "SHORT_BB_OUTSIDE_VETO";
+		}
+		Double rsi9 = finiteOrNull(snapshot.rsi9_5m());
+		if (rsi9 != null && rsi9 <= SHORT_RSI_OVERSOLD_VETO) {
+			return "SHORT_OVERSOLD_RSI_VETO";
+		}
+		double ema20DistPct = snapshot.ema20DistPct();
+		if (Double.isFinite(ema20DistPct) && ema20DistPct >= strategyProperties.shortEmaChaseVeto()) {
+			return "SHORT_EMA20_CHASE_VETO";
+		}
+		if (volRatioOfEma != null && Double.isFinite(volRatioOfEma)
+				&& volRatioOfEma >= strategyProperties.shortVolExhaustionVeto()
+				&& bbPercentB != null && bbPercentB <= SHORT_PB_OVERSOLD_VETO) {
+			return "SHORT_VOL_EXHAUSTION_VETO";
+		}
+		return null;
 	}
 
 	private EntryDecision evaluateLongEntryDecision(Indicators snapshot, SetupEnablement setupEnablement) {
@@ -3693,7 +3974,7 @@ public class CtiLbStrategy {
 	}
 
 	private SetupEnablement resolveSetupEnablement(RegimeDecisionSnapshot regimeDecision, Indicators indicators,
-			Double volRatio, Double macdRatio) {
+			Double volRatio, Double macdRatio, Double bwRatio, Double atrRatio) {
 		Map<String, Boolean> setupEnabledByRegime = new LinkedHashMap<>();
 		Map<String, String> setupDisableReasons = new LinkedHashMap<>();
 		boolean enableRegimeMatrix = strategyProperties.enableRegimeSetupMatrix();
@@ -3702,8 +3983,10 @@ public class CtiLbStrategy {
 				: regimeDecision.effectiveTag();
 		boolean protectionModeActive = regimeDecision != null && regimeDecision.protectionModeActive();
 		boolean fallbackOnlySetup5 = regimeDecision == null || !regimeDecision.inputsReady();
+		boolean shortRegimeMatch = isShortRegimeMatch(regimeDecision);
 		double volRatioValue = volRatio == null ? Double.NaN : volRatio;
 		double macdRatioValue = macdRatio == null ? Double.NaN : macdRatio;
+		boolean setup5Elite = isLongSetup5Elite(indicators, bwRatio, atrRatio);
 
 		boolean setup1Enabled = strategyProperties.longSetups() != null;
 		boolean setup2Enabled = strategyProperties.longSetups() != null;
@@ -3713,6 +3996,12 @@ public class CtiLbStrategy {
 		boolean setupS2Enabled = false;
 		if (strategyProperties.shortSetups() != null) {
 			setupDisableReasons.put(ShortEntrySetup.SETUP_S2.name(), "REGIME_SETUP_DISABLED");
+		}
+		if (!shortRegimeMatch) {
+			setupS6Enabled = false;
+			setupS2Enabled = false;
+			setupDisableReasons.put(ShortEntrySetup.SETUP_S2.name(), "REGIME_RAW_ACTIVE_MISMATCH_SHORT_DISABLED");
+			setupDisableReasons.put(ShortEntrySetup.SETUP_S6.name(), "REGIME_RAW_ACTIVE_MISMATCH_SHORT_DISABLED");
 		}
 
 		if (protectionModeActive) {
@@ -3737,11 +4026,14 @@ public class CtiLbStrategy {
 					setup1Enabled = false;
 					setup2Enabled = false;
 					setup4Enabled = false;
-					setup5Enabled = strategyProperties.enableLongSetup5();
+					setup5Enabled = strategyProperties.enableLongSetup5() && setup5Elite;
 					setupS6Enabled = false;
 					setupDisableReasons.put(LongEntrySetup.SETUP_1.name(), "REGIME_SETUP_DISABLED");
 					setupDisableReasons.put(LongEntrySetup.SETUP_2.name(), "REGIME_SETUP_DISABLED");
 					setupDisableReasons.put(LongEntrySetup.SETUP_4.name(), "REGIME_SETUP_DISABLED");
+					if (strategyProperties.enableLongSetup5() && !setup5Elite) {
+						setupDisableReasons.put(LongEntrySetup.SETUP_5.name(), "REGIME_CHOP_SETUP5_NOT_ELITE_DISABLED");
+					}
 					setupDisableReasons.put(ShortEntrySetup.SETUP_S6.name(), "REGIME_SETUP_DISABLED");
 				}
 				case BREAKOUT -> {
@@ -3750,15 +4042,15 @@ public class CtiLbStrategy {
 					setup2Enabled = isFiniteAtLeast(volRatioValue, 2.0);
 					setup5Enabled = isFiniteAtLeast(volRatioValue, 2.0) && isFiniteAtLeast(macdRatioValue, 1.25)
 							&& strategyProperties.enableLongSetup5();
-					setupS6Enabled = strategyProperties.enableShortS6();
+					setupS6Enabled = strategyProperties.enableShortS6() && shortRegimeMatch;
 					setupDisableReasons.put(LongEntrySetup.SETUP_1.name(), "REGIME_SETUP_DISABLED");
 					setupDisableReasons.put(LongEntrySetup.SETUP_4.name(), "REGIME_SETUP_DISABLED");
 				}
 				case TREND -> {
 					setup1Enabled = true;
 					setup2Enabled = true;
-					setup5Enabled = strategyProperties.enableLongSetup5();
-					setupS6Enabled = strategyProperties.enableShortS6();
+					setup5Enabled = strategyProperties.enableLongSetup5() && setup5Elite;
+					setupS6Enabled = strategyProperties.enableShortS6() && shortRegimeMatch;
 					double chaseThreshold = strategyProperties.regimeSetup4ChaseEma20DistPct();
 					double ema20DistPct = indicators == null ? Double.NaN : indicators.ema20DistPct();
 					boolean chaseBlocked = Double.isFinite(ema20DistPct)
@@ -3767,6 +4059,9 @@ public class CtiLbStrategy {
 					setup4Enabled = strategyProperties.enableLongSetup4() && !chaseBlocked;
 					if (chaseBlocked) {
 						setupDisableReasons.put(LongEntrySetup.SETUP_4.name(), "REGIME_SETUP_DISABLED");
+					}
+					if (strategyProperties.enableLongSetup5() && !setup5Elite) {
+						setupDisableReasons.put(LongEntrySetup.SETUP_5.name(), "REGIME_TREND_SETUP5_NOT_ELITE_DISABLED");
 					}
 				}
 			}
@@ -3794,6 +4089,25 @@ public class CtiLbStrategy {
 			setupDisableReasons.putIfAbsent(ShortEntrySetup.SETUP_S6.name(), "REGIME_SETUP_DISABLED");
 		}
 		return new SetupEnablement(setupEnabledByRegime, setupDisableReasons);
+	}
+
+	private boolean isLongSetup5Elite(Indicators indicators, Double bwRatio, Double atrRatio) {
+		if (indicators == null) {
+			return false;
+		}
+		double volRatio = indicators.volRatio();
+		if (!Double.isFinite(volRatio) || volRatio > strategyProperties.longSetup5EliteVolRatioMax()) {
+			return false;
+		}
+		if (bwRatio != null && Double.isFinite(bwRatio)
+				&& bwRatio > strategyProperties.longSetup5EliteBwRatioMax()) {
+			return false;
+		}
+		if (atrRatio != null && Double.isFinite(atrRatio)
+				&& atrRatio > strategyProperties.longSetup5EliteAtrRatioMax()) {
+			return false;
+		}
+		return true;
 	}
 	private void appendRegimeFields(ObjectNode line, SymbolState symbolState) {
 		RegimeTag rawTag = symbolState == null || symbolState.lastRawRegimeTag == null
