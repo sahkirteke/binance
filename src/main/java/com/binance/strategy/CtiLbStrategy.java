@@ -14,7 +14,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
@@ -236,38 +235,6 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 		closeInFlightBars.put(symbol, bars);
 	}
 
-	private String resolveExitReasonForDecision(String decisionValue, boolean emergencyExit,
-			boolean normalExitConfirmed) {
-		if (decisionValue == null || "HOLD".equals(decisionValue) || "NO_ENTRY".equals(decisionValue)) {
-			return "NONE";
-		}
-		if (decisionValue.contains("EMERGENCY") || emergencyExit) {
-			return "EMERGENCY";
-		}
-		if (decisionValue.startsWith("CLOSE") || normalExitConfirmed) {
-			return "REVERSAL";
-		}
-		return "NONE";
-	}
-
-	private boolean isTrailingExitOnly(String symbol, PositionState current) {
-		return current != PositionState.NONE
-				&& strategyProperties.pnlTrailEnabled()
-				&& Boolean.TRUE.equals(trailingArmedBySymbol.get(symbol));
-	}
-
-	private double resolvePnlTrailProfitArm() {
-		return strategyProperties.pnlTrailProfitArm() > 0 ? strategyProperties.pnlTrailProfitArm() : 20.0;
-	}
-
-	private double resolvePnlTrailLossArm() {
-		return strategyProperties.pnlTrailLossArm() < 0 ? strategyProperties.pnlTrailLossArm() : -20.0;
-	}
-
-	private int resolveLeverageForTrail() {
-		return strategyProperties.leverage() > 0 ? strategyProperties.leverage() : 50;
-	}
-
 	private BigDecimal resolveStopLossBps() {
 		if (strategyProperties.stopLossPct() > 0) {
 			return BigDecimal.valueOf(strategyProperties.stopLossPct() * 10000.0);
@@ -455,19 +422,6 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 			return null;
 		}
 		return exitContextBySymbol.remove(symbol);
-	}
-
-	private double calculateLeveragedPnlPct(EntryState entryState, double close) {
-		if (entryState == null || entryState.entryPrice() == null || entryState.entryPrice().signum() <= 0
-				|| close <= 0) {
-			return Double.NaN;
-		}
-		double entryPrice = entryState.entryPrice().doubleValue();
-		double delta = (close - entryPrice) / entryPrice;
-		if (entryState.side() == CtiDirection.SHORT) {
-			delta = -delta;
-		}
-		return delta * 100.0 * resolveLeverageForTrail();
 	}
 
 	public void requestTrailingExit(TrailingExitRequest request) {
@@ -2356,35 +2310,6 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 		return null;
 	}
 
-	private EntryDecision evaluateShortEntryDecision(Indicators snapshot, SetupEnablement setupEnablement) {
-		if (snapshot == null) {
-			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", EMPTY_SETUP_INDICATORS);
-		}
-		ShortSetupProperties shortSetups = strategyProperties.shortSetups();
-		if (shortSetups == null) {
-			return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
-		}
-		if (strategyProperties.enableShortS6() && matchesShortS6(snapshot)) {
-			if (setupEnablement != null && !setupEnablement.isEnabled(ShortEntrySetup.SETUP_S6)) {
-				return EntryDecision.block(setupEnablement.disableReason(ShortEntrySetup.SETUP_S6), snapshot);
-			}
-			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S6, snapshot)
-					.withDecisionActionReason("SHORT_S6_MATCH");
-		}
-		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(snapshot)) {
-			if (setupEnablement != null && !setupEnablement.isEnabled(ShortEntrySetup.SETUP_S2)) {
-				return EntryDecision.block(setupEnablement.disableReason(ShortEntrySetup.SETUP_S2), snapshot);
-			}
-			String s2FilterFail = resolveShortS2FilterFailure(snapshot);
-			if (s2FilterFail != null) {
-				return EntryDecision.block(s2FilterFail, snapshot);
-			}
-			return EntryDecision.shortMatch(ShortEntrySetup.SETUP_S2, snapshot)
-					.withDecisionActionReason("SHORT_S2_MATCH");
-		}
-		return EntryDecision.block("NO_SHORT_SETUP_MATCHED", snapshot);
-	}
-
 	private Indicators buildSetupIndicators(EntryFilterState entryFilterState, ScoreSignal signal, double volRatio,
 			double macdDelta, double close) {
 		double bbWidth = entryFilterState == null ? Double.NaN : entryFilterState.bbWidth_5m();
@@ -2396,47 +2321,6 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 		double adx5m = signal == null || signal.adx5m() == null ? Double.NaN : signal.adx5m();
 		MacdHistColor macdHistColor = signal == null ? null : signal.macdHistColor();
 		return new Indicators(bbWidth, bbPercentB, volRatio, ema20DistPct, rsi9, adx5m, macdDelta, macdHistColor);
-	}
-
-	private Optional<LongEntrySetup> evaluateLongSetup(Indicators indicators) {
-		if (indicators == null) {
-			return Optional.empty();
-		}
-		LongSetupProperties longSetups = strategyProperties.longSetups();
-		if (longSetups == null) {
-			return Optional.empty();
-		}
-		if (matchesSetup1(indicators)) {
-			return Optional.of(LongEntrySetup.SETUP_1);
-		}
-		if (matchesSetup2(indicators)) {
-			return Optional.of(LongEntrySetup.SETUP_2);
-		}
-		if (strategyProperties.enableLongSetup4() && matchesSetup4(indicators)) {
-			return Optional.of(LongEntrySetup.SETUP_4);
-		}
-		if (strategyProperties.enableLongSetup5() && matchesSetup5(indicators)) {
-			return Optional.of(LongEntrySetup.SETUP_5);
-		}
-		return Optional.empty();
-	}
-
-	private Optional<ShortEntrySetup> evaluateShortSetup(Indicators indicators) {
-		if (indicators == null) {
-			return Optional.empty();
-		}
-		ShortSetupProperties shortSetups = strategyProperties.shortSetups();
-		if (shortSetups == null) {
-			return Optional.empty();
-		}
-		if (strategyProperties.enableShortS6() && matchesShortS6(indicators)) {
-			return Optional.of(ShortEntrySetup.SETUP_S6);
-		}
-		if (strategyProperties.enableShortS2Only() && matchesShortS2Base(indicators)
-				&& resolveShortS2FilterFailure(indicators) == null) {
-			return Optional.of(ShortEntrySetup.SETUP_S2);
-		}
-		return Optional.empty();
 	}
 
 	private boolean matchesSetup1(Indicators i) {
@@ -2456,10 +2340,6 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 				&& isFiniteBetween(i.volRatio(), 0.9, 1.2);
 	}
 
-	private boolean matchesSetup3(Indicators i) {
-		return false;
-	}
-
 	private boolean matchesSetup4(Indicators i) {
 		LongSetupProperties.Setup4 config = strategyProperties.longSetups().setup4();
 		return config != null
@@ -2472,75 +2352,6 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 		return config != null
 				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
 				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin());
-	}
-
-	private boolean matchesShortS1(Indicators i) {
-		ShortSetupProperties.S1 config = strategyProperties.shortSetups().s1();
-		return config != null
-				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
-				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
-	}
-
-	private boolean matchesShortS2(Indicators i) {
-		ShortSetupProperties.S2 config = strategyProperties.shortSetups().s2();
-		return config != null
-				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
-				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
-	}
-
-	private boolean matchesShortS2Base(Indicators i) {
-		ShortSetupProperties.S2 config = strategyProperties.shortSetups().s2();
-		return config != null
-				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax())
-				&& isFiniteBetween(i.ema20DistPct(), config.ema20DistMin(), config.ema20DistMax());
-	}
-
-	private boolean matchesShortS3(Indicators i) {
-		ShortSetupProperties.S3 config = strategyProperties.shortSetups().s3();
-		return config != null
-				&& isFiniteBetween(i.bbWidth_5m(), config.bbWidthMin(), config.bbWidthMax())
-				&& isFiniteBetween(i.rsi9_5m(), config.rsiMin(), config.rsiMax());
-	}
-
-	private boolean matchesShortS4(Indicators i) {
-		ShortSetupProperties.S4 config = strategyProperties.shortSetups().s4();
-		return config != null
-				&& isFiniteBetween(i.bbPercentB_5m(), config.bbPercentBMin(), config.bbPercentBMax())
-				&& isFiniteBetween(i.macdDelta(), config.macdDeltaMin(), config.macdDeltaMax());
-	}
-
-	private boolean matchesShortS5(Indicators i) {
-		ShortSetupProperties.S5 config = strategyProperties.shortSetups().s5();
-		return config != null
-				&& isFiniteBetween(i.adx5m(), config.adxMin(), config.adxMax())
-				&& isFiniteGreaterThan(i.macdDelta(), config.macdDeltaMinExclusive());
-	}
-
-	private boolean matchesShortS6(Indicators i) {
-		ShortSetupProperties.S6 config = strategyProperties.shortSetups().s6();
-		if (config == null) {
-			return false;
-		}
-		return isFiniteAtLeast(i.volRatio(), config.volRatioMin())
-				&& isFiniteAtLeast(i.bbWidth_5m(), config.bbWidthMin())
-				&& isFiniteAtLeast(i.ema20DistPct(), config.ema20DistMin())
-				&& isFiniteAtLeast(i.adx5m(), config.adxMin());
-	}
-
-	private String resolveShortS2FilterFailure(Indicators i) {
-		if (!isFiniteAtLeast(i.volRatio(), strategyProperties.shortS2VolRatioMin())) {
-			return "SHORT_S2_FILTER_FAIL_VOL";
-		}
-		if (!Double.isFinite(i.macdDelta()) || i.macdDelta() > -1e-5) {
-			return "SHORT_S2_FILTER_FAIL_MACD";
-		}
-		if (strategyProperties.enableShortS2BbPercentGate()) {
-			if (!isFiniteAtMost(i.bbPercentB_5m(), strategyProperties.shortS2BbPercentMax())) {
-				return "SHORT_S2_FILTER_FAIL_PB";
-			}
-			return null;
-		}
-		return null;
 	}
 
 	private EntryDecision applyMacdEntryGates(EntryDecision entryDecision, CtiDirection candidateSide, ScoreSignal signal) {
