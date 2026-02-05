@@ -72,7 +72,7 @@ public class CtiScoreCalculator {
 		SCORE_RULES,
 		TIE_BREAK_BIAS,
 		TIE_HOLD,
-		INSUFFICIENT_DATA
+		CTI5M_TREND, INSUFFICIENT_DATA
 	}
 
 	public record ScoreResult(

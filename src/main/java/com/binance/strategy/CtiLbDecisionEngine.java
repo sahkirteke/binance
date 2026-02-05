@@ -146,6 +146,20 @@ public final class CtiLbDecisionEngine {
 		return signedDelta * 10000.0;
 	}
 
+	public static double resolveStopPrice(CtiDirection side, double entryPrice, BigDecimal stopLossBps) {
+		if (side == null || entryPrice <= 0.0 || stopLossBps == null || stopLossBps.signum() <= 0) {
+			return Double.NaN;
+		}
+		double stopLossFraction = stopLossBps.doubleValue() / 10000.0;
+		if (side == CtiDirection.LONG) {
+			return entryPrice * (1.0 - stopLossFraction);
+		}
+		if (side == CtiDirection.SHORT) {
+			return entryPrice * (1.0 + stopLossFraction);
+		}
+		return Double.NaN;
+	}
+
 	private static double toFraction(BigDecimal bps) {
 		if (bps == null) {
 			return 0.0;

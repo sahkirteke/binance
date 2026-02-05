@@ -77,8 +77,9 @@ public class StrategyRouter {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
-		resolveIndicator(symbol).warmupFiveMinuteCandle(candle);
-		ctiLbStrategy.onWarmupFiveMinuteCandle(symbol, candle);
+		ScoreSignalIndicator indicator = resolveIndicator(symbol);
+		ScoreSignal signal = indicator.onClosedFiveMinuteCandle(candle);
+		ctiLbStrategy.onWarmupFiveMinuteCandle(symbol, candle, signal);
 	}
 
 	public boolean isWarmupReady(String symbol) {

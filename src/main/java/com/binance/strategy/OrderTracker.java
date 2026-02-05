@@ -89,6 +89,10 @@ public class OrderTracker {
 			long eventTime,
 			String avgPrice,
 			String executedQty,
-			String origQty) {
+			String origQty,
+			String orderType,
+			String stopPrice,
+			String price,
+			boolean closePosition) {
 	}
 }

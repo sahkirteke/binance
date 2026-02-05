@@ -31,6 +31,7 @@ public class TrailingPnlService {
 	private final BinanceFuturesOrderClient orderClient;
 	private final CtiLbStrategy ctiLbStrategy;
 	private final ObjectMapper objectMapper;
+	private final StopLossAuditService stopLossAuditService;
 	private final Map<String, PositionSnapshot> positionMap = new ConcurrentHashMap<>();
 	private final Map<String, TrailingState> trailingMap = new ConcurrentHashMap<>();
 	private final Map<String, Object> fileLocks = new ConcurrentHashMap<>();
@@ -40,11 +41,13 @@ public class TrailingPnlService {
 	public TrailingPnlService(StrategyProperties strategyProperties,
 			BinanceFuturesOrderClient orderClient,
 			CtiLbStrategy ctiLbStrategy,
-			ObjectMapper objectMapper) {
+			ObjectMapper objectMapper,
+			StopLossAuditService stopLossAuditService) {
 		this.strategyProperties = strategyProperties;
 		this.orderClient = orderClient;
 		this.ctiLbStrategy = ctiLbStrategy;
 		this.objectMapper = objectMapper;
+		this.stopLossAuditService = stopLossAuditService;
 		startPositionSync();
 	}
 
@@ -182,6 +185,7 @@ public class TrailingPnlService {
 			}
 
 			updateDebounce(state, profitExit, lossHardExit, lossRecoveryExit);
+			recordTrailingStops(symbol, state, trailWidth, profitStop, hardStop, recoveryStop);
 
 			if (!state.closingFlag.get() && shouldExit(state)) {
 				String reason = resolveExitReason(state);
@@ -218,6 +222,24 @@ public class TrailingPnlService {
 //						symbol, state.closingAttempts);
 				state.closingFlag.set(false);
 			}
+		}
+	}
+
+	public void markExternalExit(String symbol, String reason) {
+		TrailingState state = trailingMap.computeIfAbsent(symbol, ignored -> new TrailingState());
+		synchronized (state) {
+			state.closingFlag.set(true);
+			state.closingSinceMs = System.currentTimeMillis();
+			state.closingAttempts += 1;
+			stopLossAuditService.recordTrailingUpdate(symbol,
+					reason == null ? "EXTERNAL_EXIT" : reason,
+					state.closingSinceMs,
+					state.lastStopPrice,
+					state.lastStopPrice,
+					null,
+					null,
+					null,
+					null);
 		}
 	}
 	public void onPositionUpdate(String symbol, double entryPrice, double qty, String side, Integer leverage) {
@@ -464,6 +486,30 @@ public class TrailingPnlService {
 				: exitConfirmTicksDefault;
 	}
 
+	private void recordTrailingStops(String symbol, TrailingState state, double trailWidth, double profitStop,
+			double hardStop, double recoveryStop) {
+		if (state == null) {
+			return;
+		}
+		Double previous = state.lastStopPrice;
+		Double next = Double.isFinite(profitStop) ? profitStop : null;
+		if (!equalNullable(previous, next)) {
+			stopLossAuditService.recordTrailingUpdate(symbol, "TRAIL_STOP_UPDATE", System.currentTimeMillis(),
+					previous, next, trailWidth, profitStop, hardStop, recoveryStop);
+			state.lastStopPrice = next;
+		}
+	}
+
+	private boolean equalNullable(Double left, Double right) {
+		if (left == null && right == null) {
+			return true;
+		}
+		if (left == null || right == null) {
+			return false;
+		}
+		return Double.compare(left, right) == 0;
+	}
+
 	private record PositionSnapshot(
 			double entryPrice,
 			double qty,
@@ -486,6 +532,7 @@ public class TrailingPnlService {
 		private boolean profitExitReady;
 		private boolean lossHardExitReady;
 		private boolean lossRecoveryExitReady;
+		private Double lastStopPrice;
 		private final AtomicBoolean closingFlag = new AtomicBoolean(false);
 		private long closingSinceMs;
 		private int closingAttempts;
@@ -508,6 +555,7 @@ public class TrailingPnlService {
 			profitExitReady = false;
 			lossHardExitReady = false;
 			lossRecoveryExitReady = false;
+			lastStopPrice = null;
 			closingFlag.set(false);
 			closingSinceMs = 0L;
 			closingAttempts = 0;
