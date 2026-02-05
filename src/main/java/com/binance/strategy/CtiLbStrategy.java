@@ -909,8 +909,8 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 					return;
 				}
 				BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
-				boolean stopLossExit = isStopLossExit(decisionActionReason);
-				if (stopLossExit) {
+				boolean stopLossExitTriggered = isStopLossExit(decisionActionReason);
+				if (stopLossExitTriggered) {
 					recordStopLossVerification(symbol, entryState, close);
 				}
 				registerExitContext(symbol, decisionActionReason, entryState);
@@ -990,11 +990,6 @@ public class CtiLbStrategy implements StopLossTriggerHandler {
 				? resolveHoldReason(signal, hasSignal, confirmationMet)
 				: current == PositionState.NONE ? "OK" : resolveFlipReason(current, target);
 		String decisionBlockReason = resolveDecisionBlockReason(signal, action, actionConfirmedRec, current);
-		if (current != PositionState.NONE && action != SignalAction.HOLD && trailingExitOnly) {
-			action = SignalAction.HOLD;
-			decisionActionReason = "TRAILING_EXIT_ONLY";
-			decisionBlockReason = "TRAILING_EXIT_ONLY";
-		}
 		if (current == PositionState.NONE && entryDecision.blockReason() != null) {
 			action = SignalAction.HOLD;
 			decisionActionReason = entryDecision.blockReason();
