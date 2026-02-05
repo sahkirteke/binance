@@ -35,7 +35,17 @@ strategy:
     - BATUSDT
     - CHRUSDT
     - POLUSDT
-
+    - BTCUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - AAVEUSDT
+    - TRXUSDT
+    - DOTUSDT
+    - ATOMUSDT
+    - NEARUSDT
+    - OPUSDT
+    - SANDUSDT
+    - APEUSDT
 
   depth-limit: 50
   market-quantity: 0.01
