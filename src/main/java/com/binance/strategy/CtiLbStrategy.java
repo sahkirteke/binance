@@ -56,7 +56,7 @@ import reactor.util.retry.Retry;
 import reactor.netty.http.client.PrematureCloseException;
 
 @Component
-public class CtiLbStrategy {
+public class CtiLbStrategy implements StopLossTriggerHandler {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(CtiLbStrategy.class);
 	enum LongEntrySetup {
@@ -120,6 +120,7 @@ public class CtiLbStrategy {
 	private final SymbolFilterService symbolFilterService;
 	private final OrderTracker orderTracker;
 	private final ObjectMapper objectMapper;
+	private final StopLossOrderManager stopLossOrderManager;
 	private final Map<String, Long> lastCloseTimes = new ConcurrentHashMap<>();
 	private final Map<String, PositionState> positionStates = new ConcurrentHashMap<>();
 	private final Map<String, EntryState> entryStates = new ConcurrentHashMap<>();
@@ -159,13 +160,15 @@ public class CtiLbStrategy {
 	private TrailingPnlService trailingPnlService;
 	public CtiLbStrategy(BinanceFuturesOrderClient orderClient, StrategyProperties strategyProperties,
 			WarmupProperties warmupProperties, SymbolFilterService symbolFilterService, OrderTracker orderTracker,
-			ObjectMapper objectMapper) {
+			ObjectMapper objectMapper, StopLossOrderManager stopLossOrderManager) {
 		this.orderClient = orderClient;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
 		this.symbolFilterService = symbolFilterService;
 		this.orderTracker = orderTracker;
 		this.objectMapper = objectMapper;
+		this.stopLossOrderManager = stopLossOrderManager;
+		this.stopLossOrderManager.registerTriggerHandler(this);
 //		logConfigSnapshot();
 	}
 
@@ -544,6 +547,7 @@ public class CtiLbStrategy {
 					entryStates.remove(symbol);
 					clearTrailingArmed(symbol);
 					trailingPnlService.resetState(symbol);
+					stopLossOrderManager.onPositionClosed(symbol);
 				})
 				.doOnError(error -> {
 //					LOGGER.warn("EVENT=TRAIL_EXIT_FAILED symbol={} reason={}", symbol, error.getMessage());
@@ -552,11 +556,41 @@ public class CtiLbStrategy {
 				.onErrorResume(error -> Mono.empty())
 				.subscribe();
 	}
+
+	@Override
+	public void onStopLossTriggered(StopLossTrigger trigger) {
+		if (trigger == null || trigger.symbol() == null) {
+			return;
+		}
+		if (trigger.mode() != StopLossMode.PAPER) {
+			return;
+		}
+		String symbol = trigger.symbol();
+		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
+		if (current == PositionState.NONE) {
+			return;
+		}
+		EntryState entryState = entryStates.get(symbol);
+		if (entryState == null) {
+			return;
+		}
+		BigDecimal exitQty = resolveExitQuantity(symbol, entryState, trigger.stopPrice());
+		if (exitQty == null || exitQty.signum() <= 0) {
+			return;
+		}
+		recordStopLossVerification(symbol, entryState, trigger.stopPrice());
+		registerExitContext(symbol, "STOP_LOSS", entryState);
+		recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, null, System.currentTimeMillis(),
+				trigger.stopPrice(), exitQty, current, null, entryState, null, null,
+				"STOP_LOSS", "STOP_LOSS", null, null, null);
+		cleanupPositionState(symbol);
+	}
 	private void cleanupPositionState(String symbol) {
 		positionStates.put(symbol, PositionState.NONE);
 		entryStates.remove(symbol);
 		clearTrailingArmed(symbol);
 		trailingPnlService.resetState(symbol);
+		stopLossOrderManager.onPositionClosed(symbol);
 	}
 
 	public void syncPositionNow(String symbol, long eventTime) {
@@ -889,15 +923,16 @@ public class CtiLbStrategy {
 
 		if (current == PositionState.NONE && !effectiveEnableOrders() && entryState != null && exitDecision.exit()) {
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
-			if (exitQty != null && exitQty.signum() > 0) {
-					recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, signal, closeTime, close, exitQty,
-							PositionState.NONE, null, entryState, entryFilterState, null, exitDecision.reason(),
-							CtiLbDecisionEngine.resolveExitDecisionBlockReason(), recommendationUsed,
-							recommendationRaw, confirmedRec);
-				positionStates.put(symbol, PositionState.NONE);
-				entryStates.remove(symbol);
-				clearTrailingArmed(symbol);
-			}
+				if (exitQty != null && exitQty.signum() > 0) {
+						recordSignalSnapshot(symbol, "EXIT", SignalAction.HOLD, signal, closeTime, close, exitQty,
+								PositionState.NONE, null, entryState, entryFilterState, null, exitDecision.reason(),
+								CtiLbDecisionEngine.resolveExitDecisionBlockReason(), recommendationUsed,
+								recommendationRaw, confirmedRec);
+					positionStates.put(symbol, PositionState.NONE);
+					entryStates.remove(symbol);
+					clearTrailingArmed(symbol);
+					stopLossOrderManager.onPositionClosed(symbol);
+				}
 			return;
 		}
 
@@ -935,12 +970,13 @@ public class CtiLbStrategy {
 							current, null, entryState, entryFilterState, null, decisionActionReason,
 							decisionBlockReason, recommendationUsed, recommendationRaw, confirmedRec);
 				}
-				if (!effectiveEnableOrders()) {
-					positionStates.put(symbol, PositionState.NONE);
-					entryStates.remove(symbol);
-					clearTrailingArmed(symbol);
-					return;
-				}
+					if (!effectiveEnableOrders()) {
+						positionStates.put(symbol, PositionState.NONE);
+						entryStates.remove(symbol);
+						clearTrailingArmed(symbol);
+						stopLossOrderManager.onPositionClosed(symbol);
+						return;
+					}
 				if (exitQty == null || exitQty.signum() <= 0) {
 					return;
 				}
@@ -964,11 +1000,12 @@ public class CtiLbStrategy {
 											error.getMessage()));
 						})
 						.doOnNext(response -> {
-							positionStates.put(symbol, PositionState.NONE);
-							entryStates.remove(symbol);
-							clearTrailingArmed(symbol);
-							recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
-						})
+						positionStates.put(symbol, PositionState.NONE);
+						entryStates.remove(symbol);
+						clearTrailingArmed(symbol);
+						recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
+						stopLossOrderManager.onPositionClosed(symbol);
+					})
 						.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}",
 								decisionActionReasonFinal, error.getMessage()))
 						.onErrorResume(error -> Mono.empty())
@@ -1171,6 +1208,7 @@ public class CtiLbStrategy {
 					recordNewEntryInBar(target, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
+					stopLossOrderManager.onEntryFilled(symbol, entrySnapshot.side(), entrySnapshot.entryPrice());
 				} else if (target != current) {
 					recordSignalSnapshot(symbol, "EXIT", action, signal, closeTime, close, closeQty,
 							current, target, entryState, entryFilterState, null, decisionActionReason, decisionBlockReason,
@@ -1188,6 +1226,7 @@ public class CtiLbStrategy {
 					recordNewEntryInBar(target, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
+					stopLossOrderManager.onEntryFilled(symbol, entrySnapshot.side(), entrySnapshot.entryPrice());
 				}
 			}
 			action = SignalAction.HOLD;
@@ -1263,6 +1302,7 @@ public class CtiLbStrategy {
 					recordNewEntryInBar(targetForLog, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
+					stopLossOrderManager.onEntryFilled(symbol, entrySnapshot.side(), entrySnapshot.entryPrice());
 				}
 			} else if (targetForLog != currentForLog) {
 				recordSignalSnapshot(symbol, "EXIT", actionForLog, signal, closeTime, close, closeQty, currentForLog,
@@ -1282,6 +1322,7 @@ public class CtiLbStrategy {
 					recordNewEntryInBar(targetForLog, closeTime);
 					clearTrailingArmed(symbol);
 					entryStates.put(symbol, entrySnapshot);
+					stopLossOrderManager.onEntryFilled(symbol, entrySnapshot.side(), entrySnapshot.entryPrice());
 				}
 			}
 			if (!effectiveEnableOrders()) {

@@ -162,6 +162,7 @@ public record StrategyProperties(
 		boolean priorityExitOverEntry,
 		boolean enableReversalExitOnlyWhenProfitable,
 		int closeInFlightCooldownBars,
+		StopLossProperties stopLoss,
 		EliteModeProperties eliteMode,
 		LongSetupProperties longSetups,
 		ShortSetupProperties shortSetups) {

@@ -29,6 +29,7 @@ public class MarkPriceStreamWatcher {
 	private final StrategyProperties strategyProperties;
 	private final WarmupProperties warmupProperties;
 	private final TrailingPnlService trailingPnlService;
+	private final StopLossOrderManager stopLossOrderManager;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
@@ -40,11 +41,13 @@ public class MarkPriceStreamWatcher {
 			StrategyProperties strategyProperties,
 			WarmupProperties warmupProperties,
 			TrailingPnlService trailingPnlService,
+			StopLossOrderManager stopLossOrderManager,
 			ObjectMapper objectMapper) {
 		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
 		this.trailingPnlService = trailingPnlService;
+		this.stopLossOrderManager = stopLossOrderManager;
 		this.objectMapper = objectMapper;
 	}
 
@@ -54,8 +57,8 @@ public class MarkPriceStreamWatcher {
 			LOGGER.info("Mark price stream not started (active={})", strategyProperties.active());
 			return;
 		}
-		if (!strategyProperties.pnlTrailEnabled() && !strategyProperties.roiExitEnabled()) {
-			LOGGER.info("Mark price stream not started (pnl trailing disabled and roi exit disabled).");
+		if (!shouldStartStream()) {
+			LOGGER.info("Mark price stream not started (pnl/roi/stopLoss disabled).");
 			return;
 		}
 		markWarmupComplete();
@@ -66,7 +69,7 @@ public class MarkPriceStreamWatcher {
 		if (strategyProperties.active() != StrategyType.CTI_LB) {
 			return;
 		}
-		if (!strategyProperties.pnlTrailEnabled() && !strategyProperties.roiExitEnabled()) {
+		if (!shouldStartStream()) {
 			return;
 		}
 		if (!streamsStarted.compareAndSet(false, true)) {
@@ -108,9 +111,16 @@ public class MarkPriceStreamWatcher {
 				return;
 			}
 			trailingPnlService.onMarkPrice(symbol, markPrice);
+			stopLossOrderManager.onPriceUpdate(symbol, markPrice, null);
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse mark price message", ex);
 		}
+	}
+
+	private boolean shouldStartStream() {
+		boolean stopLossEnabled = strategyProperties.stopLoss() != null
+				&& strategyProperties.stopLoss().mode() != null;
+		return strategyProperties.pnlTrailEnabled() || strategyProperties.roiExitEnabled() || stopLossEnabled;
 	}
 
 	private void startCombinedStream() {

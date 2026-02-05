@@ -33,6 +33,7 @@ public class KlineStreamWatcher {
 	private final StrategyProperties strategyProperties;
 	private final StrategyRouter strategyRouter;
 	private final WarmupProperties warmupProperties;
+	private final StopLossOrderManager stopLossOrderManager;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
@@ -44,11 +45,13 @@ public class KlineStreamWatcher {
 			StrategyProperties strategyProperties,
 			StrategyRouter strategyRouter,
 			WarmupProperties warmupProperties,
+			StopLossOrderManager stopLossOrderManager,
 			ObjectMapper objectMapper) {
 		this.binanceProperties = binanceProperties;
 		this.strategyProperties = strategyProperties;
 		this.strategyRouter = strategyRouter;
 		this.warmupProperties = warmupProperties;
+		this.stopLossOrderManager = stopLossOrderManager;
 		this.objectMapper = objectMapper;
 	}
 
@@ -116,6 +119,7 @@ public class KlineStreamWatcher {
 			}
 			Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.volume(),
 					kline.closeTime());
+			stopLossOrderManager.onPriceUpdate(event.symbol(), null, candle.close());
 			if (KLINE_INTERVAL_5M.equals(message.interval())) {
 				strategyRouter.onClosedFiveMinuteCandle(event.symbol(), candle);
 			} else {

@@ -176,6 +176,8 @@ strategy:
   long-setup5-elite-vol-ratio-max: 1.0
   long-setup5-elite-bw-ratio-max: 1.30
   long-setup5-elite-atr-ratio-max: 1.70
+  stop-loss:
+    mode: PAPER
   elite-mode:
     enabled: true
     long:
