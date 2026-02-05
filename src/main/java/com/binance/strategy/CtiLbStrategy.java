@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -98,6 +99,7 @@ public class CtiLbStrategy {
 	private static final double MIDDLE_BUF_1M = 0.0005;
 	private static final double GIVEBACK_THRESHOLD_BPS = 25.0;
 	private static final long FIVE_MIN_MS = 5 * 60_000L;
+	private static final long TIME_STOP_20M_MS = 20 * 60_000L;
 	private static final Indicators EMPTY_SETUP_INDICATORS =
 			new Indicators(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, null);
 	private static final Pattern BINANCE_CODE_PATTERN = Pattern.compile("\"code\"\\s*:\\s*(-?\\d+)");
@@ -470,6 +472,11 @@ public class CtiLbStrategy {
 			return;
 		}
 		String symbol = request.symbol();
+		String reason = request.reason();
+		if (!"TAKE_PROFIT".equals(reason) && !"STOP_LOSS".equals(reason) && !"TIME_STOP_20M".equals(reason)) {
+			trailingPnlService.resetClosingFlag(symbol);
+			return;
+		}
 		PositionState current = positionStates.getOrDefault(symbol, PositionState.NONE);
 
 		if (current == PositionState.NONE) {
@@ -636,7 +643,8 @@ public class CtiLbStrategy {
 				macdRatio, bwRatio, atrRatio);
 		symbolState.lastSetupEnabledByRegime = setupEnablement.setupEnabledByRegime();
 		EntryDecision entryDecision = resolveEntryDecision(current, recommendationUsed, setupIndicators,
-				entryFilterState, setupEnablement, regimeDecision, bwRatio, atrRatio, volRatioOfEma, closeTime, symbol);
+				entryFilterState, setupEnablement, regimeDecision, bwRatio, atrRatio, volRatioOfEma, macdRatio, closeTime,
+				symbol);
 		if (isBbFalseEntryBlock(entryDecision.blockReason())) {
 //			LOGGER.info(
 //					"EVENT=ENTRY_BLOCK_FALSE_ENTRY symbol={} side=LONG reason={} pB={} rsi={} bbOutside={}",
@@ -781,8 +789,8 @@ public class CtiLbStrategy {
 		int flipQualityScore = 0;
 		boolean exitBlockedByTrendAlignedAction = false;
 		int barsInPosition = resolveBarsInPosition(entryState, closeTime);
-		boolean timeStopEnabled = strategyProperties.timeStopEnabled();
-		int timeStopBars = strategyProperties.timeStopBars();
+		boolean timeStopEnabled = true;
+		int timeStopBars = (int) (TIME_STOP_20M_MS / FIVE_MIN_MS);
 		symbolState.lastTimeStopEnabled = timeStopEnabled;
 		symbolState.lastTimeStopBars = timeStopBars;
 		symbolState.lastTimeStopBarsUsed = barsInPosition;
@@ -805,8 +813,41 @@ public class CtiLbStrategy {
 				barsInPosition,
 				strategyProperties);
 		String trendHoldReason = null;
-		String exitReasonForLog = resolveExitReasonForDecision(decisionValue, emergencyExitTriggered,
-				normalExitConfirmed);
+		BigDecimal stopLossBps = resolveStopLossBps();
+		BigDecimal takeProfitBps = resolveTakeProfitBps();
+		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
+				entryState == null ? null : entryState.side(),
+				entryState == null ? null : entryState.entryPrice(),
+				close,
+				stopLossBps,
+				takeProfitBps,
+				resolveFeeBps(),
+				strategyProperties.maxSpreadBps(),
+				strategyProperties.flipSpreadMaxBps(),
+				closeTime,
+				entryState == null ? null : entryState.entryTimeMs(),
+				resolveMinHoldMs(),
+				scoreExitConfirmed);
+		boolean stopLossExit = isStopLossExit(exitDecision.reason());
+		boolean takeProfitExit = isTakeProfitExit(exitDecision.reason());
+		if (!stopLossExit && !takeProfitExit) {
+			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, null, exitDecision.pnlBps());
+		}
+		if (!exitDecision.exit() && entryState != null && entryState.entryTimeMs() > 0) {
+			long elapsedMs = closeTime - entryState.entryTimeMs();
+			if (elapsedMs >= TIME_STOP_20M_MS) {
+				exitDecision = new CtiLbDecisionEngine.ExitDecision(true, "TIME_STOP_20M", exitDecision.pnlBps());
+			}
+		}
+		if (current != PositionState.NONE) {
+			decisionValue = exitDecision.exit()
+					? (current == PositionState.LONG ? "CLOSE_LONG" : "CLOSE_SHORT")
+					: "HOLD";
+		}
+		String exitReasonForLog = resolveAllowedExitReason(exitDecision.reason());
+		if (exitReasonForLog == null) {
+			exitReasonForLog = "NONE";
+		}
 		recordDecisionSnapshot(
 				symbol,
 				signal,
@@ -843,65 +884,8 @@ public class CtiLbStrategy {
 				current,
 				closingInFlight,
 				exitReasonForLog);
-		BigDecimal stopLossBps = resolveStopLossBps();
-		BigDecimal takeProfitBps = resolveTakeProfitBps();
-		boolean timeStopRequireNonPositive = strategyProperties.timeStopRequireNonPositivePnl();
-		CtiLbDecisionEngine.ExitDecision exitDecision = CtiLbDecisionEngine.evaluateExit(
-				entryState == null ? null : entryState.side(),
-				entryState == null ? null : entryState.entryPrice(),
-				close,
-				stopLossBps,
-				takeProfitBps,
-				resolveFeeBps(),
-				strategyProperties.maxSpreadBps(),
-				strategyProperties.flipSpreadMaxBps(),
-				closeTime,
-				entryState == null ? null : entryState.entryTimeMs(),
-				resolveMinHoldMs(),
-				scoreExitConfirmed);
-		double leveragedPnlPct = Double.NaN;
-		if (strategyProperties.pnlTrailEnabled()
-				&& current != PositionState.NONE
-				&& entryState != null) {
-			leveragedPnlPct = calculateLeveragedPnlPct(entryState, close);
-			if (!Double.isNaN(leveragedPnlPct) && leveragedPnlPct >= resolvePnlTrailProfitArm()) {
-				setTrailingArmed(symbol, true);
-			}
-		}
-		boolean trailingExitOnly = isTrailingExitOnly(symbol, current);
-		boolean trailingLossOnly = !Double.isNaN(leveragedPnlPct) && leveragedPnlPct <= resolvePnlTrailLossArm();
-		if (trailingLossOnly) {
-			trailingExitOnly = true;
-		}
-		if (trailingExitOnly) {
-			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "TRAILING_EXIT_ONLY", exitDecision.pnlBps());
-		}
-		if (strategyProperties.enableReversalExitOnlyWhenProfitable()
-				&& "SCORE_REVERSAL_CONFIRMED".equals(exitDecision.reason())
-				&& exitDecision.pnlBps() <= 0.0) {
-			exitDecision = new CtiLbDecisionEngine.ExitDecision(false, "REVERSAL_EXIT_UNPROFITABLE",
-					exitDecision.pnlBps());
-		}
-		if (!exitDecision.exit()
-				&& timeStopEnabled
-				&& current == PositionState.LONG
-				&& entryState != null
-				&& timeStopBars > 0
-				&& barsInPosition >= timeStopBars
-				&& (!timeStopRequireNonPositive || exitDecision.pnlBps() <= 0.0)) {
-			exitDecision = new CtiLbDecisionEngine.ExitDecision(true, "EXIT_TIME_STOP_LONG", exitDecision.pnlBps());
-		}
 		Double estimatedPnlPct = exitDecision.pnlBps() / 100.0;
 		double pnlBps = exitDecision.pnlBps();
-		updateMaxPnlState(symbolState, entryState, pnlBps);
-		double maxPnlBps = symbolState.maxPnlBpsSinceEntry;
-		double givebackBps = Double.isNaN(maxPnlBps) ? Double.NaN : maxPnlBps - pnlBps;
-		boolean givebackExit = !Double.isNaN(givebackBps)
-				&& maxPnlBps > 0.0
-				&& givebackBps >= GIVEBACK_THRESHOLD_BPS;
-		if (givebackExit && !exitDecision.exit()) {
-			exitDecision = new CtiLbDecisionEngine.ExitDecision(true, "EXIT_GIVEBACK", pnlBps);
-		}
 
 		if (current == PositionState.NONE && !effectiveEnableOrders() && entryState != null && exitDecision.exit()) {
 			BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
@@ -919,198 +903,78 @@ public class CtiLbStrategy {
 
 			if (current != PositionState.NONE && exitDecision.exit()) {
 				SignalAction exitAction = SignalAction.HOLD;
-				String decisionActionReason = exitDecision.reason();
+				String decisionActionReason = resolveAllowedExitReason(exitDecision.reason());
 				String decisionBlockReason = CtiLbDecisionEngine.resolveExitDecisionBlockReason();
-			if (closingInFlight) {
-				decisionActionReason = "CLOSE_IN_FLIGHT";
-				decisionBlockReason = "CLOSE_IN_FLIGHT";
-				logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
-						recommendationRaw, null, entryState, estimatedPnlPct, decisionActionReason,
-						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-						qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-						trendHoldReason, flipQualityScore, decisionTpTrailingState,
-						trendAlignedWithPosition, false);
-				return;
-			}
+				if (decisionActionReason == null) {
+					return;
+				}
+				if (closingInFlight) {
+					decisionActionReason = "CLOSE_IN_FLIGHT";
+					decisionBlockReason = "CLOSE_IN_FLIGHT";
+					logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
+							recommendationRaw, null, entryState, estimatedPnlPct, decisionActionReason,
+							decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
+							qualityScoreForLog, qualityConfirmReason, trendHoldActive,
+							trendHoldReason, flipQualityScore, decisionTpTrailingState,
+							trendAlignedWithPosition, false);
+					return;
+				}
 				BigDecimal exitQty = resolveExitQuantity(symbol, entryState, close);
 				boolean stopLossExit = isStopLossExit(decisionActionReason);
-				boolean hardExitReason = isHardExitReason(decisionActionReason);
-				boolean trailStopHit = trailState.trailStopHit();
 				if (stopLossExit) {
 					recordStopLossVerification(symbol, entryState, close);
 				}
 				registerExitContext(symbol, decisionActionReason, entryState);
-			boolean reversalConfirm = evaluateReversalConfirm(current, close, signal, symbolState);
-			boolean skipHoldChecks = emergencyExitTriggered || stopLossExit || trailStopHit || givebackExit || hardExitReason;
-			boolean exitBlockedByTrendAligned = false;
-			boolean continuationHold = false;
-			boolean holdExit = false;
-			boolean topZone = isTopZone(confidence);
-			boolean bottomZone = isBottomZone(confidence);
-			boolean softExit = !stopLossExit && !hardExitReason && !givebackExit && !trailStopHit;
-			boolean macdStreakConfirmed = resolveMacdStreakConfirmed(current, symbolState);
-			boolean exitAllowed = true;
-			String blockedReason = null;
-			if (softExit && !reversalConfirm) {
-				if (current == PositionState.LONG && bottomZone) {
-					exitAllowed = false;
-					blockedReason = "BOTTOM_ZONE_SOFT_EXIT_BLOCK";
-				} else if (current == PositionState.SHORT && topZone) {
-					exitAllowed = false;
-					blockedReason = "TOP_ZONE_SOFT_EXIT_BLOCK";
-				} else if (!macdStreakConfirmed) {
-					exitAllowed = false;
-					blockedReason = "SOFT_EXIT_MACD_STREAK";
-				}
-			}
-			LOGGER.info(
-					"EVENT=EXIT_GUARD symbol={} side={} topZone={} bottomZone={} emergencyBase={} c1={} c2={} c3={} emergencyConfirmed={} normalExitConfirmed={} stopLossExit={} skipHoldChecks={} finalExitAllowed={} blockedReason={}",
-					symbol,
-					current,
-					topZone,
-					bottomZone,
-					emergencyEval.base(),
-					emergencyEval.c1(),
-					emergencyEval.c2(),
-					emergencyEval.c3(),
-					emergencyExitTriggered,
-					normalExitConfirmed,
-					stopLossExit,
-					skipHoldChecks,
-					exitAllowed,
-					blockedReason == null ? "NA" : blockedReason);
-			LOGGER.info(
-					"EVENT=EXIT_ACCEL symbol={} side={} reversalConfirm={} givebackBps={} maxPnlBps={} skipHoldChecks={} finalExitAllowed={}",
-					symbol,
-					current,
-					reversalConfirm,
-					Double.isNaN(givebackBps) ? "NA" : String.format("%.2f", givebackBps),
-					Double.isNaN(maxPnlBps) ? "NA" : String.format("%.2f", maxPnlBps),
-					skipHoldChecks,
-					exitAllowed);
-			if (!exitAllowed) {
-				decisionActionReason = blockedReason;
-				decisionBlockReason = blockedReason;
 				logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
 						recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
 						decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-						qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-						trendHoldReason, flipQualityScore, decisionTpTrailingState,
-						trendAlignedWithPosition, exitBlockedByTrendAligned);
-				return;
-			}
-			if (skipHoldChecks) {
-				if (emergencyExitTriggered) {
-					decisionActionReason = emergencyExitReason;
-				} else if (normalExitConfirmed && !givebackExit) {
-					decisionActionReason = current == PositionState.LONG ? "CLOSE_LONG" : "CLOSE_SHORT";
+						qualityScoreForLog, qualityConfirmReason, trendHoldActive, trendHoldReason,
+						flipQualityScore, decisionTpTrailingState, trendAlignedWithPosition, false);
+				if (exitQty != null && exitQty.signum() > 0) {
+					recordSignalSnapshot(symbol, "EXIT", exitAction, signal, closeTime, close, exitQty,
+							current, null, entryState, entryFilterState, null, decisionActionReason,
+							decisionBlockReason, recommendationUsed, recommendationRaw, confirmedRec);
 				}
-			}
-			if (!skipHoldChecks && !reversalConfirm) {
-				if (trendHoldActive && !stopLossExit && isTakeProfitExit(decisionActionReason)
-						&& strategyProperties.tpTrailingEnabled()) {
-					if (!decisionTpTrailingState.allowExit()) {
-						decisionActionReason = "TREND_HOLD_ACTIVE";
-						decisionBlockReason = "TREND_HOLD_ACTIVE";
-						trendHoldReason = "TREND_HOLD_ACTIVE";
-						logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
-								recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
-								decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-								qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-								trendHoldReason, flipQualityScore, decisionTpTrailingState,
-							trendAlignedWithPosition, false);
-						return;
-					}
-				}
-				ExitHoldDecision exitHoldDecision = evaluateExitHoldDecision(stopLossExit, scoreExitConfirmed,
-						trendAlignedWithPosition);
-				if (exitHoldDecision.hold()) {
-					decisionActionReason = exitHoldDecision.reason();
-					decisionBlockReason = exitHoldDecision.reason();
-					exitBlockedByTrendAligned = exitHoldDecision.exitBlockedByTrendAligned();
-					logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
-							recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason,
-							decisionBlockReason, decisionTrailState, decisionContinuationState, flipGateReason,
-							qualityScoreForLog, qualityConfirmReason, trendHoldActive,
-							trendHoldReason, flipQualityScore, decisionTpTrailingState,
-						trendAlignedWithPosition, exitBlockedByTrendAligned);
-					return;
-				}
-				continuationHold = decisionContinuationState.holdApplied() && !stopLossExit;
-				holdExit = shouldHoldTrendStrong(
-						entryState == null ? null : entryState.side(),
-						entryState == null ? null : entryState.entryPrice(),
-						close,
-						fiveMinDir,
-						symbolState.ema20_5mValue,
-						symbolState.ema200_5mValue,
-						symbolState.isTrendEmaReady(),
-						trailState.trailStopHit(),
-						stopLossExit,
-						confirmedRec,
-						strategyProperties.trendHoldMinProfitPct());
-				if (continuationHold) {
-					decisionActionReason = "EXIT_HOLD_CONTINUATION";
-					decisionBlockReason = "EXIT_HOLD_CONTINUATION";
-					decisionContinuationState = decisionContinuationState.withHoldApplied(true);
-				} else if (holdExit) {
-					decisionActionReason = "EXIT_HOLD_TREND_STRONG";
-					decisionBlockReason = "EXIT_HOLD_TREND_STRONG";
-					decisionTrailState = decisionTrailState.withExitHoldApplied(true);
-				}
-			}
-			logDecision(symbol, signal, close, exitAction, confirmedRec, recommendationUsed,
-					recommendationRaw, exitQty, entryState, estimatedPnlPct, decisionActionReason, decisionBlockReason,
-					decisionTrailState, decisionContinuationState, flipGateReason,
-					qualityScoreForLog, qualityConfirmReason, trendHoldActive, trendHoldReason,
-					flipQualityScore, decisionTpTrailingState, trendAlignedWithPosition,
-					exitBlockedByTrendAligned);
-			if (!continuationHold && !holdExit && exitQty != null && exitQty.signum() > 0) {
-				recordSignalSnapshot(symbol, "EXIT", exitAction, signal, closeTime, close, exitQty,
-						current, null, entryState, entryFilterState, null, decisionActionReason, decisionBlockReason, recommendationUsed,
-						recommendationRaw, confirmedRec);
-			}
-			if (continuationHold || holdExit || !effectiveEnableOrders()) {
 				if (!effectiveEnableOrders()) {
 					positionStates.put(symbol, PositionState.NONE);
 					entryStates.remove(symbol);
 					clearTrailingArmed(symbol);
+					return;
 				}
-				return;
-			}
-			if (exitQty == null || exitQty.signum() <= 0) {
-				return;
-			}
-			final String decisionActionReasonFinal = decisionActionReason;
-			final BigDecimal exitQtyFinal = exitQty;
-			final PositionState currentFinal = current;
-			markCloseInFlight(symbol);
-			orderClient.fetchHedgeModeEnabled()
-					.flatMap(hedgeMode -> {
-						String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT");
-						return closePosition(symbol, currentFinal, exitQtyFinal, hedgeMode, correlationId)
-								.doOnNext(response -> {
-									orderTracker.registerSubmitted(symbol, correlationId, response, true);
-									logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
+				if (exitQty == null || exitQty.signum() <= 0) {
+					return;
+				}
+				final String decisionActionReasonFinal = decisionActionReason;
+				final BigDecimal exitQtyFinal = exitQty;
+				final PositionState currentFinal = current;
+				markCloseInFlight(symbol);
+				orderClient.fetchHedgeModeEnabled()
+						.flatMap(hedgeMode -> {
+							String correlationId = orderTracker.nextCorrelationId(symbol, "EXIT");
+							return closePosition(symbol, currentFinal, exitQtyFinal, hedgeMode, correlationId)
+									.doOnNext(response -> {
+										orderTracker.registerSubmitted(symbol, correlationId, response, true);
+										logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
+												currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
+												hedgeMode ? currentFinal.name() : "", correlationId, response, null);
+									})
+									.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
 											currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
-											hedgeMode ? currentFinal.name() : "", correlationId, response, null);
-								})
-								.doOnError(error -> logOrderEvent("EXIT_ORDER", symbol, decisionActionReasonFinal,
-										currentFinal == PositionState.LONG ? "SELL" : "BUY", exitQtyFinal, true,
-										hedgeMode ? currentFinal.name() : "", correlationId, null, error.getMessage()));
-					})
-					.doOnNext(response -> {
-						positionStates.put(symbol, PositionState.NONE);
-						entryStates.remove(symbol);
-						clearTrailingArmed(symbol);
-						recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
-					})
-					.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}", decisionActionReasonFinal,
-							error.getMessage()))
-					.onErrorResume(error -> Mono.empty())
-					.subscribe();
-			return;
-		}
+											hedgeMode ? currentFinal.name() : "", correlationId, null,
+											error.getMessage()));
+						})
+						.doOnNext(response -> {
+							positionStates.put(symbol, PositionState.NONE);
+							entryStates.remove(symbol);
+							clearTrailingArmed(symbol);
+							recordFlip(symbol, closeTime, BigDecimal.valueOf(close));
+						})
+						.doOnError(error -> LOGGER.warn("Failed to execute CTI LB exit {}: {}",
+								decisionActionReasonFinal, error.getMessage()))
+						.onErrorResume(error -> Mono.empty())
+						.subscribe();
+				return;
+			}
 
 		if (current != PositionState.NONE) {
 			SignalAction holdAction = SignalAction.HOLD;
@@ -1788,11 +1652,24 @@ public class CtiLbStrategy {
 	}
 
 	private static boolean isStopLossExit(String reason) {
-		return reason != null && reason.startsWith("EXIT_STOP_LOSS");
+		return reason != null && (reason.startsWith("EXIT_STOP_LOSS") || "STOP_LOSS".equals(reason));
 	}
 
 	private static boolean isTakeProfitExit(String reason) {
-		return reason != null && reason.startsWith("EXIT_TAKE_PROFIT");
+		return reason != null && (reason.startsWith("EXIT_TAKE_PROFIT") || "TAKE_PROFIT".equals(reason));
+	}
+
+	private static String resolveAllowedExitReason(String reason) {
+		if (isStopLossExit(reason)) {
+			return "STOP_LOSS";
+		}
+		if (isTakeProfitExit(reason)) {
+			return "TAKE_PROFIT";
+		}
+		if ("TIME_STOP_20M".equals(reason)) {
+			return "TIME_STOP_20M";
+		}
+		return null;
 	}
 
 	static ExitHoldDecision evaluateExitHoldDecision(boolean stopLossExit, boolean scoreExitConfirmed,
@@ -2151,7 +2028,7 @@ public class CtiLbStrategy {
 	private EntryDecision resolveEntryDecision(PositionState current, CtiDirection recommendationUsed,
 			Indicators indicators, EntryFilterState entryFilterState, SetupEnablement setupEnablement,
 			RegimeDecisionSnapshot regimeDecision, Double bwRatio, Double atrRatio, Double volRatioOfEma,
-			long closeTime, String symbol) {
+			Double macdRatio, long closeTime, String symbol) {
 		Indicators snapshot = indicators == null ? EMPTY_SETUP_INDICATORS : indicators;
 		if (current != null && current != PositionState.NONE) {
 			return EntryDecision.block("IN_POSITION_NO_ENTRY", snapshot);
@@ -2175,25 +2052,16 @@ public class CtiLbStrategy {
 			if (snapshot.macdHistColor() != MacdHistColor.AQUA) {
 				return EntryDecision.block("LONG_MACD_COLOR_NOT_AQUA", snapshot);
 			}
-			return longDecision;
+			return applyLongEliteFilter(longDecision, snapshot, regimeDecision, bwRatio, atrRatio, volRatioOfEma);
 		} else if (recommendationUsed == CtiDirection.SHORT) {
-			if (!isShortRegimeMatch(regimeDecision)) {
-				return EntryDecision.block("REGIME_RAW_ACTIVE_MISMATCH_SHORT_DISABLED", snapshot);
-			}
-			EntryDecision shortDecision = evaluateShortEntryDecision(snapshot, setupEnablement);
+			EntryDecision shortDecision = evaluateShortEliteDecision(snapshot, entryFilterState, regimeDecision,
+					bwRatio, volRatioOfEma, macdRatio);
 			if (shortDecision.blockReason() != null) {
 				return shortDecision;
 			}
 			String shortPortfolioBlock = resolveShortPortfolioBlockReason(closeTime);
 			if (shortPortfolioBlock != null) {
-				return EntryDecision.block(shortPortfolioBlock, snapshot);
-			}
-			String shortVeto = resolveShortHardVeto(snapshot, entryFilterState, volRatioOfEma);
-			if (shortVeto != null) {
-				return EntryDecision.block(shortVeto, snapshot);
-			}
-			if (snapshot.macdHistColor() != MacdHistColor.RED) {
-				return EntryDecision.block("SHORT_MACD_COLOR_NOT_RED", snapshot);
+				return shortDecision.withBlockReason(shortPortfolioBlock);
 			}
 			return shortDecision;
 		}
@@ -2203,14 +2071,14 @@ public class CtiLbStrategy {
 	private EntryDecision resolveEntryDecision(PositionState current, CtiDirection recommendationUsed,
 			Indicators indicators) {
 		return resolveEntryDecision(current, recommendationUsed, indicators, null, null, null,
-				null, null, null, 0L, null);
+				null, null, null, null, 0L, null);
 	}
 
 	private boolean isShortRegimeMatch(RegimeDecisionSnapshot regimeDecision) {
 		if (regimeDecision == null || regimeDecision.rawTag() == null || regimeDecision.activeTag() == null) {
 			return false;
 		}
-		if (regimeDecision.rawTag() != regimeDecision.activeTag()) {
+		if (!Objects.equals(regimeDecision.rawTag(), regimeDecision.activeTag())) {
 			return false;
 		}
 		return regimeDecision.rawTag() == RegimeTag.TREND || regimeDecision.rawTag() == RegimeTag.BREAKOUT;
@@ -2279,6 +2147,141 @@ public class CtiLbStrategy {
 			return "SHORT_VOL_EXHAUSTION_VETO";
 		}
 		return null;
+	}
+
+	private EntryDecision applyLongEliteFilter(EntryDecision decision, Indicators snapshot,
+			RegimeDecisionSnapshot regimeDecision, Double bwRatio, Double atrRatio, Double volRatioOfEma) {
+		if (decision == null) {
+			return null;
+		}
+		EliteModeProperties eliteMode = strategyProperties.eliteMode();
+		EliteModeProperties.LongEliteProperties longElite = eliteMode == null ? null : eliteMode.longMode();
+		boolean eligible = eliteMode != null && eliteMode.enabled() && longElite != null && longElite.enabled();
+		if (!eligible) {
+			return withLongElite(decision, false, false, List.of());
+		}
+		if (decision.matchedSetup() != LongEntrySetup.SETUP_5) {
+			return withLongElite(decision, false, false, List.of());
+		}
+		if (longElite.applyOnlyIfMatchedSetup() != null
+				&& !longElite.applyOnlyIfMatchedSetup().equals(decision.matchedSetupName())) {
+			return withLongElite(decision, false, false, List.of());
+		}
+		RegimeTag activeTag = regimeDecision == null ? null : regimeDecision.activeTag();
+		if (longElite.applyRegime() != null && !matchesRegimeTag(longElite.applyRegime(), activeTag)) {
+			return withLongElite(decision, false, false, List.of());
+		}
+		List<String> failReasons = new ArrayList<>();
+		if (bwRatio == null || !Double.isFinite(bwRatio) || bwRatio > longElite.bwRatioMax()) {
+			failReasons.add("BW");
+		}
+		if (atrRatio == null || !Double.isFinite(atrRatio) || atrRatio > longElite.atrRatioMax()) {
+			failReasons.add("ATR");
+		}
+		double volRatioValue = volRatioOfEma == null || !Double.isFinite(volRatioOfEma) ? 1.0 : volRatioOfEma;
+		if (volRatioValue > longElite.volRatioOfEmaMax()) {
+			failReasons.add("VOL");
+		}
+		double ema20DistPct = snapshot == null ? Double.NaN : snapshot.ema20DistPct();
+		if (!Double.isFinite(ema20DistPct) || ema20DistPct > longElite.ema20DistPctMax()) {
+			failReasons.add("EMA20DIST");
+		}
+		double bbPercentB = snapshot == null ? Double.NaN : snapshot.bbPercentB_5m();
+		if (!Double.isFinite(bbPercentB) || bbPercentB > longElite.bbPercentBMax()) {
+			failReasons.add("PB");
+		}
+		if (!failReasons.isEmpty()) {
+			EntryDecision blocked = decision.withBlockReason("LONG_ELITE_FILTER_FAIL");
+			return withLongElite(blocked, true, false, failReasons);
+		}
+		return withLongElite(decision, true, true, List.of());
+	}
+
+	private EntryDecision evaluateShortEliteDecision(Indicators snapshot, EntryFilterState entryFilterState,
+			RegimeDecisionSnapshot regimeDecision, Double bwRatio, Double volRatioOfEma, Double macdRatio) {
+		Indicators safeSnapshot = snapshot == null ? EMPTY_SETUP_INDICATORS : snapshot;
+		EliteModeProperties eliteMode = strategyProperties.eliteMode();
+		EliteModeProperties.ShortEliteProperties shortElite = eliteMode == null ? null : eliteMode.shortMode();
+		boolean enabled = eliteMode != null && eliteMode.enabled() && shortElite != null && shortElite.enabled();
+		if (!enabled) {
+			return shortEliteBlock("SHORT_ELITE_DISABLED", safeSnapshot);
+		}
+		RegimeTag activeTag = regimeDecision == null ? null : regimeDecision.activeTag();
+		RegimeTag rawTag = regimeDecision == null ? null : regimeDecision.rawTag();
+		boolean rawActiveEqual = Objects.equals(rawTag, activeTag);
+		if (shortElite.allowedRegime() != null && !matchesRegimeTag(shortElite.allowedRegime(), activeTag)) {
+			return shortEliteBlock("SHORT_NOT_IN_TREND", safeSnapshot);
+		}
+		if (shortElite.requireRawEqualsActive() && !rawActiveEqual) {
+			return shortEliteBlock("SHORT_DISABLE_REGIME_LAG", safeSnapshot);
+		}
+		double bbPercentB = safeSnapshot.bbPercentB_5m();
+		boolean bbOutside = entryFilterState != null && entryFilterState.bbOutside_5m();
+		EliteModeProperties.ShortEliteVeto veto = shortElite.veto();
+		if (veto != null) {
+			if (veto.requireBbOutsideFalse() && bbOutside) {
+				return shortEliteBlock("SHORT_VETO_BB_OUTSIDE", safeSnapshot);
+			}
+			if (Double.isFinite(bbPercentB) && bbPercentB <= veto.bbPercentBMinExclusive()) {
+				return shortEliteBlock("SHORT_VETO_PB_TOO_LOW", safeSnapshot);
+			}
+			double ema20DistPct = safeSnapshot.ema20DistPct();
+			if (Double.isFinite(ema20DistPct) && ema20DistPct > veto.ema20DistPctMax()) {
+				return shortEliteBlock("SHORT_VETO_EMA20_CHASE", safeSnapshot);
+			}
+		}
+		double bwRatioValue = bwRatio == null ? Double.NaN : bwRatio;
+		double macdRatioValue = macdRatio == null ? Double.NaN : macdRatio;
+		double volRatioValue = volRatioOfEma == null || !Double.isFinite(volRatioOfEma) ? 1.0 : volRatioOfEma;
+		EliteModeProperties.ShortEliteSetup setup1 = shortElite.s1();
+		if (setup1 != null
+				&& isFiniteInRange(bbPercentB, setup1.pbMin(), setup1.pbMax())
+				&& isFiniteInRange(bwRatioValue, setup1.bwRatioMin(), setup1.bwRatioMax())
+				&& volRatioValue <= setup1.volRatioOfEmaMax()
+				&& isFiniteAtLeast(macdRatioValue, setup1.macdRatioMin())) {
+			return EntryDecision.shortEliteMatch("SHORT_ELITE_1", safeSnapshot,
+					new ShortEliteSnapshot(bbPercentB, bwRatioValue, volRatioValue, macdRatioValue,
+							safeSnapshot.ema20DistPct(), bbOutside, rawTag, activeTag, rawActiveEqual));
+		}
+		EliteModeProperties.ShortEliteSetup setup2 = shortElite.s2();
+		if (setup2 != null
+				&& isFiniteInRange(bbPercentB, setup2.pbMin(), setup2.pbMax())
+				&& isFiniteInRange(bwRatioValue, setup2.bwRatioMin(), setup2.bwRatioMax())
+				&& volRatioValue <= setup2.volRatioOfEmaMax()
+				&& isFiniteAtLeast(macdRatioValue, setup2.macdRatioMin())) {
+			return EntryDecision.shortEliteMatch("SHORT_ELITE_2", safeSnapshot,
+					new ShortEliteSnapshot(bbPercentB, bwRatioValue, volRatioValue, macdRatioValue,
+							safeSnapshot.ema20DistPct(), bbOutside, rawTag, activeTag, rawActiveEqual));
+		}
+		return shortEliteBlock("NO_SHORT_ELITE_MATCH", safeSnapshot);
+	}
+
+	private EntryDecision withLongElite(EntryDecision decision, boolean applied, boolean passed,
+			List<String> failReasons) {
+		if (decision == null) {
+			return null;
+		}
+		return new EntryDecision(decision.confirmedRec(), decision.blockReason(), decision.decisionActionReason(),
+				decision.matchedSetup(), decision.matchedSetupName(), decision.matchedSetupSide(),
+				decision.setupSnapshot(), applied, passed, failReasons, decision.shortEliteMatched(),
+				decision.shortEliteMatchedSetup(), decision.shortEliteSnapshot());
+	}
+
+	private EntryDecision shortEliteBlock(String reason, Indicators snapshot) {
+		return new EntryDecision(null, reason, null, null, null, null, snapshot,
+				null, null, null, false, null, null);
+	}
+
+	private static boolean isFiniteInRange(double value, double min, double maxExclusive) {
+		return Double.isFinite(value) && Double.isFinite(min) && Double.isFinite(maxExclusive)
+				&& value >= min && value < maxExclusive;
+	}
+
+	private static boolean matchesRegimeTag(String expected, RegimeTag actual) {
+		if (expected == null || actual == null) {
+			return false;
+		}
+		return Objects.equals(expected, actual.name());
 	}
 
 	private EntryDecision evaluateLongEntryDecision(Indicators snapshot, SetupEnablement setupEnablement) {
@@ -2666,34 +2669,63 @@ public class CtiLbStrategy {
 			LongEntrySetup matchedSetup,
 			String matchedSetupName,
 			String matchedSetupSide,
-			Indicators setupSnapshot) {
+			Indicators setupSnapshot,
+			Boolean longEliteApplied,
+			Boolean longElitePassed,
+			List<String> longEliteFailReasons,
+			Boolean shortEliteMatched,
+			String shortEliteMatchedSetup,
+			ShortEliteSnapshot shortEliteSnapshot) {
 		static EntryDecision defaultDecision() {
-			return new EntryDecision(null, null, null, null, null, null, null);
+			return new EntryDecision(null, null, null, null, null, null, null,
+					null, null, null, null, null, null);
 		}
 
 		EntryDecision withBlockReason(String reason) {
 			return new EntryDecision(confirmedRec, reason, decisionActionReason, matchedSetup, matchedSetupName,
-					matchedSetupSide, setupSnapshot);
+					matchedSetupSide, setupSnapshot, longEliteApplied, longElitePassed, longEliteFailReasons,
+					shortEliteMatched, shortEliteMatchedSetup, shortEliteSnapshot);
 		}
 
 		EntryDecision withDecisionActionReason(String reason) {
 			return new EntryDecision(confirmedRec, blockReason, reason, matchedSetup, matchedSetupName,
-					matchedSetupSide, setupSnapshot);
+					matchedSetupSide, setupSnapshot, longEliteApplied, longElitePassed, longEliteFailReasons,
+					shortEliteMatched, shortEliteMatchedSetup, shortEliteSnapshot);
 		}
 
 		static EntryDecision longMatch(LongEntrySetup setup, Indicators snapshot) {
 			return new EntryDecision(CtiDirection.LONG, null, "LONG_SETUP_MATCH", setup,
-					setup == null ? null : setup.name(), "LONG", snapshot);
+					setup == null ? null : setup.name(), "LONG", snapshot,
+					null, null, null, null, null, null);
 		}
 
 		static EntryDecision shortMatch(ShortEntrySetup setup, Indicators snapshot) {
 			return new EntryDecision(CtiDirection.SHORT, null, "SHORT_SETUP_MATCH", null,
-					setup == null ? null : setup.name(), "SHORT", snapshot);
+					setup == null ? null : setup.name(), "SHORT", snapshot,
+					null, null, null, null, null, null);
+		}
+
+		static EntryDecision shortEliteMatch(String setupName, Indicators snapshot, ShortEliteSnapshot eliteSnapshot) {
+			return new EntryDecision(CtiDirection.SHORT, null, "SHORT_ELITE_MATCH", null, setupName, "SHORT", snapshot,
+					null, null, null, true, setupName, eliteSnapshot);
 		}
 
 		static EntryDecision block(String reason, Indicators snapshot) {
-			return new EntryDecision(null, reason, null, null, null, null, snapshot);
+			return new EntryDecision(null, reason, null, null, null, null, snapshot,
+					null, null, null, null, null, null);
 		}
+	}
+
+	private record ShortEliteSnapshot(
+			double pb,
+			double bwRatio,
+			double volRatioOfEma,
+			double macdRatio,
+			double ema20DistPct,
+			boolean bbOutside,
+			RegimeTag rawRegimeTag,
+			RegimeTag activeRegimeTag,
+			boolean rawActiveEqual) {
 	}
 
 	private record EntryGateEvaluation(EntryDecision entryDecision, EntryGateMetrics metrics) {
@@ -4197,6 +4229,7 @@ public class CtiLbStrategy {
 		int timeStopBarsUsed = symbolState != null ? symbolState.lastTimeStopBarsUsed : 0;
 		line.put("rawRegimeTag", rawTag.name());
 		line.put("activeRegimeTag", activeTag.name());
+		line.put("rawActiveEqual", Objects.equals(rawTag, activeTag));
 		line.put("regimeShift", regimeShift);
 		line.put("regimeDir", regimeDir);
 		line.put("regimePreset", presetTag.name());
@@ -4333,6 +4366,44 @@ public class CtiLbStrategy {
 		boolean shortSetupMatched = "SHORT".equals(matchedSide);
 		line.put("longSetupMatched", longSetupMatched);
 		line.put("shortSetupMatched", shortSetupMatched);
+		Boolean longEliteApplied = entryDecision == null ? null : entryDecision.longEliteApplied();
+		Boolean longElitePassed = entryDecision == null ? null : entryDecision.longElitePassed();
+		List<String> longEliteFailReasons = entryDecision == null ? null : entryDecision.longEliteFailReasons();
+		line.put("longEliteApplied", longEliteApplied != null && longEliteApplied);
+		line.put("longElitePassed", longElitePassed != null && longElitePassed);
+		ArrayNode failNode = objectMapper.createArrayNode();
+		if (longEliteFailReasons != null) {
+			for (String reason : longEliteFailReasons) {
+				failNode.add(reason);
+			}
+		}
+		line.set("longEliteFailReasons", failNode);
+		Boolean shortEliteMatched = entryDecision == null ? null : entryDecision.shortEliteMatched();
+		String shortEliteMatchedSetup = entryDecision == null ? null : entryDecision.shortEliteMatchedSetup();
+		line.put("shortEliteMatched", shortEliteMatched != null && shortEliteMatched);
+		if (shortEliteMatchedSetup == null) {
+			line.putNull("shortEliteMatchedSetup");
+		} else {
+			line.put("shortEliteMatchedSetup", shortEliteMatchedSetup);
+		}
+		ShortEliteSnapshot shortEliteSnapshot = entryDecision == null ? null : entryDecision.shortEliteSnapshot();
+		if (Boolean.TRUE.equals(shortEliteMatched) && shortEliteSnapshot != null) {
+			ObjectNode shortEliteNode = objectMapper.createObjectNode();
+			putFinite(shortEliteNode, "pb", shortEliteSnapshot.pb());
+			putFinite(shortEliteNode, "bwRatio", shortEliteSnapshot.bwRatio());
+			putFinite(shortEliteNode, "volRatioOfEma", shortEliteSnapshot.volRatioOfEma());
+			putFinite(shortEliteNode, "macdRatio", shortEliteSnapshot.macdRatio());
+			putFinite(shortEliteNode, "ema20DistPct", shortEliteSnapshot.ema20DistPct());
+			shortEliteNode.put("bbOutside", shortEliteSnapshot.bbOutside());
+			shortEliteNode.put("rawRegimeTag",
+					shortEliteSnapshot.rawRegimeTag() == null ? "NA" : shortEliteSnapshot.rawRegimeTag().name());
+			shortEliteNode.put("activeRegimeTag",
+					shortEliteSnapshot.activeRegimeTag() == null ? "NA" : shortEliteSnapshot.activeRegimeTag().name());
+			shortEliteNode.put("rawActiveEqual", shortEliteSnapshot.rawActiveEqual());
+			line.set("shortEliteSnapshot", shortEliteNode);
+		} else {
+			line.putNull("shortEliteSnapshot");
+		}
 		if (longSetupMatched) {
 			line.put("matchedSetupLong", matchedName);
 			line.putNull("matchedSetupShort");

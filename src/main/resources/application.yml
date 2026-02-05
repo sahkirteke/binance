@@ -176,6 +176,39 @@ strategy:
   long-setup5-elite-vol-ratio-max: 1.0
   long-setup5-elite-bw-ratio-max: 1.30
   long-setup5-elite-atr-ratio-max: 1.70
+  elite-mode:
+    enabled: true
+    long:
+      enabled: true
+      apply-regime: CHOP
+      apply-only-if-matched-setup: SETUP_5
+      bw-ratio-max: 0.95
+      atr-ratio-max: 1.15
+      vol-ratio-of-ema-max: 0.70
+      ema20-dist-pct-max: 0.006
+      bb-percent-b-max: 0.62
+    short:
+      enabled: true
+      allowed-regime: TREND
+      require-raw-equals-active: true
+      veto:
+        bb-percent-b-min-exclusive: 0.15
+        require-bb-outside-false: true
+        ema20-dist-pct-max: 0.008
+      s1:
+        pb-min: 0.40
+        pb-max: 0.65
+        bw-ratio-min: 1.40
+        bw-ratio-max: 2.50
+        vol-ratio-of-ema-max: 0.70
+        macd-ratio-min: 2.00
+      s2:
+        pb-min: 0.35
+        pb-max: 0.40
+        bw-ratio-min: 1.40
+        bw-ratio-max: 2.50
+        vol-ratio-of-ema-max: 0.60
+        macd-ratio-min: 2.50
   enable-reversal-exit-only-when-profitable: true
   close-in-flight-cooldown-bars: 1
   long-setups:
