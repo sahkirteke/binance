@@ -62,6 +62,17 @@ class EliteV1StrategyTest {
 	}
 
 	@Test
+	void warmupBelowThresholdShouldReturnInputsNotReady() {
+		EliteV1Strategy.PreCheckAction action = EliteV1Strategy.evaluatePreChecks(
+				false,
+				EliteV1Strategy.Side.NONE,
+				false,
+				0,
+				1);
+		assertEquals(EliteV1Strategy.DecisionAction.INPUTS_NOT_READY, action.action());
+	}
+
+	@Test
 	void tradedTodayShouldBlockNewEntry() {
 		EliteV1Strategy.PreCheckAction action = EliteV1Strategy.evaluatePreChecks(
 				true,

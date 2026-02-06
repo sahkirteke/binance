@@ -6,7 +6,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.Name;
 import org.springframework.validation.annotation.Validated;
 
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
@@ -15,17 +14,17 @@ import jakarta.validation.constraints.Positive;
 @ConfigurationProperties(prefix = "eliteV1")
 public record EliteV1Properties(
 		@NotNull Mode mode,
-		@NotBlank String timeframe,
-		@NotBlank String evalEvery,
+		@NotNull String zoneId,
 		@NotEmpty List<String> symbols,
-		@Positive int maxOpenPositions,
+		double paperNotionalUsd,
+		@Positive int maxOpenPositionsGlobal,
 		@Positive int maxEntriesPerSymbolPerDay,
 		double tpPct,
 		double slPct,
-		Double paperNotional,
 		@Positive int timeStopMinutes,
 		@NotNull ConflictResolution conflictResolution,
-		@NotNull InputsNotReadyPolicy inputsNotReadyPolicy,
+		@Positive int warmupMin5mBars,
+		@NotNull RegimeConfig regime,
 		@Name("long") @NotNull LongConfig longConfig,
 		@Name("short") @NotNull ShortConfig shortConfig) {
 
@@ -39,13 +38,16 @@ public record EliteV1Properties(
 		TP_FIRST
 	}
 
-	public enum InputsNotReadyPolicy {
-		NO_TRADE
-	}
-
 	public enum Regime {
 		CHOP,
 		TREND
+	}
+
+	public record RegimeConfig(
+			double chopBwRatioMax,
+			double chopMacdRatioMax,
+			@Positive int debounceBars,
+			@Positive int cooldownBars) {
 	}
 
 	public record LongConfig(

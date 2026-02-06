@@ -23,6 +23,7 @@ import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -39,7 +40,6 @@ import com.binance.strategy.StrategyType;
 import com.binance.strategy.SymbolFilterService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import jakarta.annotation.PreDestroy;
@@ -52,10 +52,7 @@ import reactor.util.retry.Retry;
 public class EliteV1Strategy implements Strategy {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(EliteV1Strategy.class);
-	private static final ZoneId ISTANBUL = ZoneId.of("Europe/Istanbul");
 	private static final DateTimeFormatter DAY_FMT = DateTimeFormatter.BASIC_ISO_DATE;
-	private static final int MIN_5M_BARS = 60;
-	private static final double DEFAULT_NOTIONAL = 50.0;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
@@ -69,7 +66,9 @@ public class EliteV1Strategy implements Strategy {
 	private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
+	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
 	private volatile Disposable wsSubscription;
+	private ZoneId zoneId;
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
 			EliteV1Properties props,
@@ -91,8 +90,12 @@ public class EliteV1Strategy implements Strategy {
 		if (!started.compareAndSet(false, true)) {
 			return;
 		}
-		writer.start();
 		validateConfig();
+		if (props.mode() == EliteV1Properties.Mode.LIVE) {
+			LOGGER.warn("ELITE_V1 LIVE mode not implemented; falling back to PAPER behavior.");
+		}
+		zoneId = ZoneId.of(props.zoneId());
+		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
 
@@ -111,7 +114,7 @@ public class EliteV1Strategy implements Strategy {
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
 				.subscribe();
-		LOGGER.info("ELITE_V1 started mode={} symbols={}", props.mode(), props.symbols().size());
+		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={}", props.mode(), props.symbols().size(), props.zoneId());
 	}
 
 	@Override
@@ -143,8 +146,7 @@ public class EliteV1Strategy implements Strategy {
 			if (state == null) {
 				return;
 			}
-			Candle candle = new Candle(
-					event.kline().open(),
+			Candle candle = new Candle(event.kline().open(),
 					event.kline().high(),
 					event.kline().low(),
 					event.kline().close(),
@@ -158,7 +160,7 @@ public class EliteV1Strategy implements Strategy {
 
 	private void onClosed1m(SymbolState state, Candle bar1m) {
 		state.last1m.addLast(bar1m);
-		if (state.last1m.size() > 1000) {
+		if (state.last1m.size() > 300) {
 			state.last1m.removeFirst();
 		}
 		checkPaperExit(state, bar1m);
@@ -168,63 +170,73 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 		state.last5m.addLast(bar5m);
-		if (state.last5m.size() > 1000) {
+		if (state.last5m.size() > 500) {
 			state.last5m.removeFirst();
 		}
 		state.indicators.update(bar5m);
+		Metrics metrics = state.indicators.metrics();
+		if (metrics != null) {
+			RegimeTag rawRegime = rawRegime(metrics.bwRatio5m, metrics.macdRatio5m,
+					props.regime().chopBwRatioMax(), props.regime().chopMacdRatioMax());
+			RegimeTag activeRegime = state.regimeState.update(rawRegime,
+					props.regime().debounceBars(), props.regime().cooldownBars());
+			state.indicators.setRegimes(rawRegime, activeRegime);
+		}
 		evaluateAt5m(state, bar5m);
 	}
 
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
-		String dayKey = dayKey(bar5m.closeTime());
-		if (!Objects.equals(dayKey, state.dayKey)) {
-			state.dayKey = dayKey;
-			state.tradedToday = false;
+		rollDay(state, bar5m.closeTime());
+		Metrics metrics = state.indicators.metrics();
+		if (metrics == null) {
+			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null);
+			return;
+		}
+
+		PreCheckAction preCheck = evaluatePreChecks(state.indicators.baselinesReady(props.warmupMin5mBars()),
+				state.positionSide,
+				state.entriesToday >= props.maxEntriesPerSymbolPerDay(),
+				globalOpenPositions.get(),
+				props.maxOpenPositionsGlobal());
+		if (preCheck.action != DecisionAction.CONTINUE) {
+			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics);
+			return;
+		}
+
+		Candidate longCandidate = evaluateLong(metrics);
+		Candidate shortCandidate = evaluateShort(metrics);
+
+		if (longCandidate.enter && shortCandidate.enter) {
+			writeDecision(state, bar5m, "NO_ENTRY", null, "BOTH_SIDES_MATCHED", metrics);
+			return;
+		}
+		if (longCandidate.enter) {
+			openPaperPosition(state, bar5m, Side.LONG, longCandidate.setup, metrics.activeRegimeTag);
+			writeDecision(state, bar5m, "ENTER_LONG", longCandidate.setup, null, metrics);
+			return;
+		}
+		if (shortCandidate.enter) {
+			openPaperPosition(state, bar5m, Side.SHORT, shortCandidate.setup, metrics.activeRegimeTag);
+			writeDecision(state, bar5m, "ENTER_SHORT", shortCandidate.setup, null, metrics);
+			return;
+		}
+		String blockReason = shortCandidate.blockReason != null ? shortCandidate.blockReason : longCandidate.blockReason;
+		writeDecision(state, bar5m, "NO_ENTRY", null, blockReason, metrics);
+	}
+
+	private void rollDay(SymbolState state, long closeTimeMs) {
+		LocalDate day = Instant.ofEpochMilli(closeTimeMs).atZone(zoneId).toLocalDate();
+		if (!Objects.equals(day, state.dayKey)) {
+			state.dayKey = day;
 			state.entriesToday = 0;
 		}
-
-		PreCheckAction preCheck = evaluatePreChecks(
-				state.indicators.baselinesReady(),
-				state.positionSide,
-				state.tradedToday || state.entriesToday >= props.maxEntriesPerSymbolPerDay(),
-				openPositionCount(),
-				props.maxOpenPositions());
-		if (preCheck.action() != DecisionAction.CONTINUE) {
-			writeDecision(state, bar5m, preCheck.action().name(), null, null, preCheck.blockReason(), List.of(), null);
-			return;
-		}
-
-		Metrics metrics = state.indicators.metrics();
-		if (!metrics.readyForRegime()) {
-			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, null, "INPUTS_NOT_READY", List.of(), metrics);
-			return;
-		}
-		RegimeTag rawRegime = rawRegime(metrics.bwRatio5m, metrics.macdRatio5m);
-		RegimeTag activeRegime = state.regimeState.update(rawRegime);
-		metrics = metrics.withRegimes(rawRegime, activeRegime);
-
-		Candidate candidate = findCandidate(activeRegime, metrics);
-		if (candidate.side == Side.NONE) {
-			writeDecision(state, bar5m, "NO_ENTRY", "NONE", null, candidate.blockReason, candidate.failReasons, metrics);
-			return;
-		}
-
-		openPaperPosition(state, bar5m, candidate);
-		writeDecision(state,
-				bar5m,
-				candidate.side == Side.LONG ? "ENTER_LONG" : "ENTER_SHORT",
-				candidate.side.name(),
-				candidate.setup,
-				null,
-				candidate.failReasons,
-				metrics);
 	}
 
 	static PreCheckAction evaluatePreChecks(boolean baselinesReady,
 			Side positionSide,
 			boolean tradedToday,
 			int globalOpenPositions,
-			int maxOpenPositions) {
+			int maxOpenPositionsGlobal) {
 		if (!baselinesReady) {
 			return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null);
 		}
@@ -234,128 +246,206 @@ public class EliteV1Strategy implements Strategy {
 		if (tradedToday) {
 			return new PreCheckAction(DecisionAction.TRADDED_TODAY, "TRADDED_TODAY");
 		}
-		if (globalOpenPositions >= maxOpenPositions) {
-			return new PreCheckAction(DecisionAction.NO_ENTRY, "GLOBAL_MAX_OPEN_POS");
+		if (globalOpenPositions >= maxOpenPositionsGlobal) {
+			return new PreCheckAction(DecisionAction.GLOBAL_MAX_OPEN_POS, "GLOBAL_MAX_OPEN_POS");
 		}
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
 	}
 
-	private Candidate findCandidate(RegimeTag activeRegime, Metrics m) {
-		if (props.longConfig().enabled() && activeRegime == RegimeTag.CHOP) {
-			if (m.rsi9_5m >= props.longConfig().rsiMin()
-					&& m.rsi9_5m <= props.longConfig().rsiMax()
-					&& m.ema20DistPct >= props.longConfig().ema20DistMin()
-					&& m.bbPercentB_5m <= props.longConfig().bbPercentBMax()) {
-				if (props.longConfig().enableSetup5SafetyGate()) {
-					if (m.bbWidth_5m >= props.longConfig().setup5().maxBbWidth()) {
-						return Candidate.blocked("SETUP5_BLOCK_BBWIDTH_TOO_WIDE");
-					}
-					if (m.volRatio >= props.longConfig().setup5().maxVolRatio()) {
-						return Candidate.blocked("SETUP5_BLOCK_VOL_SPIKE");
-					}
-					if (activeRegime == RegimeTag.CHOP && m.bwRatio5m > props.longConfig().setup5().chopMaxBwRatio()) {
-						return Candidate.blocked("SETUP5_BLOCK_CHOP_BWRATIO");
-					}
-				}
-				return Candidate.long("SETUP5_ELITE");
+	private Candidate evaluateLong(Metrics m) {
+		if (!props.longConfig().enabled() || m.activeRegimeTag != RegimeTag.CHOP) {
+			return Candidate.noEntry(null);
+		}
+		boolean match = m.rsi9_5m >= props.longConfig().rsiMin()
+				&& m.rsi9_5m <= props.longConfig().rsiMax()
+				&& m.ema20DistPct >= props.longConfig().ema20DistMin()
+				&& m.bbPercentB_5m <= props.longConfig().bbPercentBMax();
+		if (!match) {
+			return Candidate.noEntry(null);
+		}
+		if (props.longConfig().enableSetup5SafetyGate()) {
+			if (m.bbWidth_5m >= props.longConfig().setup5().maxBbWidth()) {
+				return Candidate.noEntry("SETUP5_BLOCK_BBWIDTH_TOO_WIDE");
+			}
+			if (m.volRatio >= props.longConfig().setup5().maxVolRatio()) {
+				return Candidate.noEntry("SETUP5_BLOCK_VOL_SPIKE");
+			}
+			if (m.bwRatio5m > props.longConfig().setup5().chopMaxBwRatio()) {
+				return Candidate.noEntry("SETUP5_BLOCK_CHOP_BWRATIO");
 			}
 		}
+		return Candidate.enter("SETUP5_ELITE");
+	}
 
-		if (props.shortConfig().enabled() && activeRegime == RegimeTag.TREND) {
-			if (props.shortConfig().veto().requireBbOutsideFalse() && m.bbOutside_5m) {
-				return Candidate.blocked("SHORT_VETO_BB_OUTSIDE");
-			}
-			if (m.bbPercentB_5m <= props.shortConfig().veto().bbPercentBMinExclusive()) {
-				return Candidate.blocked("SHORT_VETO_PB_TOO_LOW");
-			}
-			if (m.ema20DistPct > props.shortConfig().veto().ema20DistPctMax()) {
-				return Candidate.blocked("SHORT_VETO_EMA20_CHASE");
-			}
-			if (matchShortElite1(m)) {
-				return Candidate.short("SHORT_ELITE_1");
-			}
-			if (matchShortElite2(m)) {
-				return Candidate.short("SHORT_ELITE_2");
-			}
-			return Candidate.blocked("NO_SHORT_ELITE_MATCH");
+	private Candidate evaluateShort(Metrics m) {
+		if (!props.shortConfig().enabled() || m.activeRegimeTag != RegimeTag.TREND) {
+			return Candidate.noEntry(null);
 		}
-		return Candidate.blocked("NO_ENTRY");
+		if (m.bbOutside_5m && props.shortConfig().veto().requireBbOutsideFalse()) {
+			return Candidate.noEntry("SHORT_VETO_BB_OUTSIDE");
+		}
+		if (m.bbPercentB_5m <= props.shortConfig().veto().bbPercentBMinExclusive()) {
+			return Candidate.noEntry("SHORT_VETO_PB_TOO_LOW");
+		}
+		if (m.ema20DistPct > props.shortConfig().veto().ema20DistPctMax()) {
+			return Candidate.noEntry("SHORT_VETO_EMA20_CHASE");
+		}
+		if (matchShortBand(m, props.shortConfig().elite1())) {
+			return Candidate.enter("SHORT_ELITE_1");
+		}
+		if (matchShortBand(m, props.shortConfig().elite2())) {
+			return Candidate.enter("SHORT_ELITE_2");
+		}
+		return Candidate.noEntry("NO_SHORT_ELITE_MATCH");
 	}
 
-	private boolean matchShortElite1(Metrics m) {
-		EliteV1Properties.ShortEliteBand b = props.shortConfig().elite1();
-		return inRangeMinIncMaxExc(m.bbPercentB_5m, b.pbMin(), b.pbMax())
-				&& inRangeMinIncMaxExc(m.bwRatio5m, b.bwRatioMin(), b.bwRatioMax())
-				&& m.volRatioOfEma <= b.volRatioOfEmaMax()
-				&& m.macdRatio5m >= b.macdRatioMin();
+	private boolean matchShortBand(Metrics m, EliteV1Properties.ShortEliteBand band) {
+		return m.bbPercentB_5m >= band.pbMin()
+				&& m.bbPercentB_5m < band.pbMax()
+				&& m.bwRatio5m >= band.bwRatioMin()
+				&& m.bwRatio5m < band.bwRatioMax()
+				&& m.volRatioOfEma <= band.volRatioOfEmaMax()
+				&& m.macdRatio5m >= band.macdRatioMin();
 	}
 
-	private boolean matchShortElite2(Metrics m) {
-		EliteV1Properties.ShortEliteBand b = props.shortConfig().elite2();
-		return inRangeMinIncMaxExc(m.bbPercentB_5m, b.pbMin(), b.pbMax())
-				&& inRangeMinIncMaxExc(m.bwRatio5m, b.bwRatioMin(), b.bwRatioMax())
-				&& m.volRatioOfEma <= b.volRatioOfEmaMax()
-				&& m.macdRatio5m >= b.macdRatioMin();
-	}
-
-	private boolean inRangeMinIncMaxExc(double value, double min, double maxExclusive) {
-		return value >= min && value < maxExclusive;
-	}
-
-	private void openPaperPosition(SymbolState state, Candle bar5m, Candidate candidate) {
+	private void openPaperPosition(SymbolState state,
+			Candle bar5m,
+			Side side,
+			String matchedSetup,
+			RegimeTag activeRegimeTag) {
 		double entryPrice = bar5m.close();
-		double notional = props.paperNotional() != null ? props.paperNotional() : DEFAULT_NOTIONAL;
-		double qty = notional / Math.max(entryPrice, 1e-9);
-		double tick = resolveTickSize(state.symbol);
+		double qty = props.paperNotionalUsd() / Math.max(entryPrice, 1e-9);
+		double tickSize = resolveTickSize(state.symbol);
 
 		double tpRaw;
 		double slRaw;
 		double tpPrice;
 		double slPrice;
-		if (candidate.side == Side.LONG) {
+		if (side == Side.LONG) {
 			tpRaw = entryPrice * (1.0 + props.tpPct());
 			slRaw = entryPrice * (1.0 - props.slPct());
-			tpPrice = roundUp(tpRaw, tick);
-			slPrice = roundDown(slRaw, tick);
+			tpPrice = roundUp(tpRaw, tickSize);
+			slPrice = roundDown(slRaw, tickSize);
 		} else {
 			tpRaw = entryPrice * (1.0 - props.tpPct());
 			slRaw = entryPrice * (1.0 + props.slPct());
-			tpPrice = roundDown(tpRaw, tick);
-			slPrice = roundUp(slRaw, tick);
+			tpPrice = roundDown(tpRaw, tickSize);
+			slPrice = roundUp(slRaw, tickSize);
 		}
 
-		state.positionSide = candidate.side;
+		state.positionSide = side;
 		state.entryPrice = entryPrice;
 		state.qty = qty;
 		state.entryTimeMs = bar5m.closeTime();
-		state.order = new VirtualBracketOrder(UUID.randomUUID().toString(), tpPrice, slPrice, state.entryTimeMs);
+		state.tpPrice = tpPrice;
+		state.slPrice = slPrice;
+		state.bracketId = UUID.randomUUID().toString();
 		state.entriesToday++;
-		state.tpRaw = tpRaw;
-		state.slRaw = slRaw;
-		writeTradeEntry(state, candidate.setup);
+		globalOpenPositions.incrementAndGet();
+
+		ObjectNode node = objectMapper.createObjectNode();
+		node.put("type", "ENTRY");
+		node.put("symbol", state.symbol);
+		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
+		node.put("side", side.name());
+		node.put("entryPrice", entryPrice);
+		node.put("qty", qty);
+		node.put("tpPrice", tpPrice);
+		node.put("slPrice", slPrice);
+		node.put("tpRaw", tpRaw);
+		node.put("slRaw", slRaw);
+		node.put("tickSize", tickSize);
+		node.put("matchedSetup", matchedSetup);
+		node.put("activeRegimeTag", activeRegimeTag.name());
+		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 	}
 
-	private void checkPaperExit(SymbolState state, Candle bar1m) {
-		if (state.positionSide == Side.NONE || state.order == null) {
+	private void checkPaperExit(SymbolState state, Candle oneMinuteBar) {
+		if (state.positionSide == Side.NONE || state.bracketId == null) {
 			return;
 		}
-		ExitReason touchExit = resolveTouchExit(state.positionSide,
-				state.order.tpPrice,
-				state.order.slPrice,
-				bar1m,
+		ExitReason touchReason = resolveTouchExit(state.positionSide,
+				state.tpPrice,
+				state.slPrice,
+				oneMinuteBar,
 				props.conflictResolution());
-		if (touchExit != null) {
-			double exitPrice = touchExit == ExitReason.TAKE_PROFIT ? state.order.tpPrice : state.order.slPrice;
-			exitPosition(state, touchExit, exitPrice, bar1m.closeTime());
+		if (touchReason != null) {
+			double exitPrice = touchReason == ExitReason.TAKE_PROFIT ? state.tpPrice : state.slPrice;
+			exitPosition(state, touchReason, exitPrice, oneMinuteBar.closeTime());
 			return;
 		}
-		if (shouldTimeStop(state.entryTimeMs, bar1m.closeTime(), props.timeStopMinutes())) {
-			exitPosition(state, ExitReason.TIME_STOP_20M, bar1m.close(), bar1m.closeTime());
+		if (shouldTimeStop(state.entryTimeMs, oneMinuteBar.closeTime(), props.timeStopMinutes())) {
+			exitPosition(state, ExitReason.TIME_STOP_20M, oneMinuteBar.close(), oneMinuteBar.closeTime());
 		}
 	}
 
-	static boolean shouldTimeStop(long entryTimeMs, long nowMs, int timeStopMinutes) {
-		return nowMs - entryTimeMs >= (long) timeStopMinutes * 60_000L;
+	private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs) {
+		double pnl = state.positionSide == Side.LONG
+				? (exitPrice - state.entryPrice) * state.qty
+				: (state.entryPrice - exitPrice) * state.qty;
+
+		ObjectNode node = objectMapper.createObjectNode();
+		node.put("type", "EXIT");
+		node.put("symbol", state.symbol);
+		node.put("time", Instant.ofEpochMilli(exitTimeMs).toString());
+		node.put("side", state.positionSide.name());
+		node.put("entryPrice", state.entryPrice);
+		node.put("exitPrice", exitPrice);
+		node.put("qty", state.qty);
+		node.put("realizedPnl", pnl);
+		node.put("exitReason", reason.name());
+		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+
+		state.positionSide = Side.NONE;
+		state.bracketId = null;
+		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
+	}
+
+	private void writeDecision(SymbolState state,
+			Candle bar5m,
+			String action,
+			String matchedSetup,
+			String blockReason,
+			Metrics metrics) {
+		ObjectNode node = objectMapper.createObjectNode();
+		node.put("type", "DECISION");
+		node.put("symbol", state.symbol);
+		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
+		node.put("dayKey", DAY_FMT.format(state.dayKey));
+		node.put("entriesToday", state.entriesToday);
+		node.put("baselinesReady", state.indicators.baselinesReady(props.warmupMin5mBars()));
+		if (metrics != null) {
+			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
+			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
+			ObjectNode metricNode = node.putObject("metrics");
+			metricNode.put("bbWidth", metrics.bbWidth_5m);
+			metricNode.put("bwRatio", metrics.bwRatio5m);
+			metricNode.put("volRatio", metrics.volRatio);
+			metricNode.put("ema20DistPct", metrics.ema20DistPct);
+			metricNode.put("percentB", metrics.bbPercentB_5m);
+			metricNode.put("macdRatio", metrics.macdRatio5m);
+			metricNode.put("atrRatio", metrics.atrRatio5m);
+		}
+		node.put("action", action);
+		node.put("matchedSetup", matchedSetup);
+		node.put("blockReason", blockReason);
+		writer.write(decisionPath(state.symbol, state.dayKey), node.toString(), false);
+	}
+
+	private Path decisionPath(String symbol, LocalDate day) {
+		return DECISION_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
+	}
+
+	private Path tradePath(String symbol, LocalDate day) {
+		return TRADE_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
+	}
+
+	private double resolveTickSize(String symbol) {
+		var filters = symbolFilterService.getFilters(symbol);
+		if (filters == null || filters.tickSize() == null) {
+			return DEFAULT_TICK_SIZE;
+		}
+		return filters.tickSize().doubleValue();
 	}
 
 	static ExitReason resolveTouchExit(Side side,
@@ -382,92 +472,11 @@ public class EliteV1Strategy implements Strategy {
 					? ExitReason.STOP_LOSS
 					: ExitReason.TAKE_PROFIT;
 		}
-		return touchedTp ? ExitReason.TAKE_PROFIT : ExitReason.STOP_LOSS;
+		return touchedSl ? ExitReason.STOP_LOSS : ExitReason.TAKE_PROFIT;
 	}
 
-	private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs) {
-		double pnl = state.positionSide == Side.LONG
-				? (exitPrice - state.entryPrice) * state.qty
-				: (state.entryPrice - exitPrice) * state.qty;
-		writeTradeExit(state, reason, exitPrice, pnl, exitTimeMs);
-		state.positionSide = Side.NONE;
-		state.order = null;
-		state.tradedToday = true;
-	}
-
-	private int openPositionCount() {
-		return (int) states.values().stream().filter(state -> state.positionSide != Side.NONE).count();
-	}
-
-	private void writeDecision(SymbolState state,
-			Candle bar5m,
-			String action,
-			String entryCandidateSide,
-			String matchedSetup,
-			String blockReason,
-			List<String> failReasons,
-			Metrics metrics) {
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", "DECISION");
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
-		node.put("dayKey", state.dayKey);
-		node.put("baselinesReady", state.indicators.barCount() >= MIN_5M_BARS);
-		node.put("activeRegimeTag", metrics == null ? "UNKNOWN" : metrics.activeRegime.name());
-		ObjectNode metricNode = node.putObject("metrics");
-		if (metrics != null) {
-			metricNode.put("bbWidth_5m", metrics.bbWidth_5m);
-			metricNode.put("bwRatio_5m", metrics.bwRatio5m);
-			metricNode.put("volRatio", metrics.volRatio);
-			metricNode.put("volRatioOfEma", metrics.volRatioOfEma);
-			metricNode.put("macdRatio_5m", metrics.macdRatio5m);
-			metricNode.put("atrRatio_5m", metrics.atrRatio5m);
-			metricNode.put("ema20DistPct", metrics.ema20DistPct);
-			metricNode.put("bbPercentB_5m", metrics.bbPercentB_5m);
-		}
-		node.put("entryCandidateSide", entryCandidateSide == null ? "NONE" : entryCandidateSide);
-		node.put("matchedSetup", matchedSetup);
-		node.put("action", action);
-		node.put("blockReason", blockReason);
-		ArrayNode reasons = node.putArray("failReasons");
-		failReasons.forEach(reasons::add);
-		writer.write(DECISION_DIR.resolve(state.symbol + "-" + state.dayKey + ".jsonl"), node.toString(), false);
-	}
-
-	private void writeTradeEntry(SymbolState state, String setup) {
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", "ENTRY");
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(state.entryTimeMs).toString());
-		node.put("setup", setup);
-		node.put("entryPrice", state.entryPrice);
-		node.put("qty", state.qty);
-		node.put("tpRaw", state.tpRaw);
-		node.put("tpPrice", state.order.tpPrice);
-		node.put("slRaw", state.slRaw);
-		node.put("slPrice", state.order.slPrice);
-		node.put("tpPct", props.tpPct());
-		node.put("slPct", props.slPct());
-		writer.write(TRADE_DIR.resolve(state.symbol + "-" + state.dayKey + ".jsonl"), node.toString(), true);
-	}
-
-	private void writeTradeExit(SymbolState state, ExitReason reason, double exitPrice, double realizedPnl, long exitTimeMs) {
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", "EXIT");
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(exitTimeMs).toString());
-		node.put("exitReason", reason.name());
-		node.put("exitPrice", exitPrice);
-		node.put("realizedPnl", realizedPnl);
-		writer.write(TRADE_DIR.resolve(state.symbol + "-" + state.dayKey + ".jsonl"), node.toString(), true);
-	}
-
-	private double resolveTickSize(String symbol) {
-		var filters = symbolFilterService.getFilters(symbol);
-		if (filters == null || filters.tickSize() == null) {
-			return DEFAULT_TICK_SIZE;
-		}
-		return filters.tickSize().doubleValue();
+	static boolean shouldTimeStop(long entryTimeMs, long nowMs, int timeStopMinutes) {
+		return nowMs - entryTimeMs >= (long) timeStopMinutes * 60_000L;
 	}
 
 	static double roundUp(double raw, double tickSize) {
@@ -486,27 +495,16 @@ public class EliteV1Strategy implements Strategy {
 				.doubleValue();
 	}
 
-	private static RegimeTag rawRegime(double bwRatio, double macdRatio) {
-		if (bwRatio < 1.15 && macdRatio < 1.50) {
+	static RegimeTag rawRegime(double bwRatio, double macdRatio, double chopBwRatioMax, double chopMacdRatioMax) {
+		if (bwRatio < chopBwRatioMax && macdRatio < chopMacdRatioMax) {
 			return RegimeTag.CHOP;
 		}
 		return RegimeTag.TREND;
 	}
 
-	private String dayKey(long closeTimeMs) {
-		LocalDate date = Instant.ofEpochMilli(closeTimeMs).atZone(ISTANBUL).toLocalDate();
-		return DAY_FMT.format(date);
-	}
-
 	private void validateConfig() {
-		if (!"1m".equalsIgnoreCase(props.timeframe())) {
-			throw new IllegalStateException("ELITE_V1 timeframe must be 1m");
-		}
-		if (!"5m".equalsIgnoreCase(props.evalEvery())) {
-			throw new IllegalStateException("ELITE_V1 evalEvery must be 5m");
-		}
-		if (props.inputsNotReadyPolicy() != EliteV1Properties.InputsNotReadyPolicy.NO_TRADE) {
-			throw new IllegalStateException("ELITE_V1 supports only inputsNotReadyPolicy=NO_TRADE");
+		if (props.paperNotionalUsd() <= 0) {
+			throw new IllegalStateException("paperNotionalUsd must be > 0");
 		}
 	}
 
@@ -532,76 +530,38 @@ public class EliteV1Strategy implements Strategy {
 		INPUTS_NOT_READY,
 		IN_POSITION,
 		TRADDED_TODAY,
-		NO_ENTRY
+		GLOBAL_MAX_OPEN_POS
 	}
 
 	record PreCheckAction(DecisionAction action, String blockReason) {
 	}
 
-	private record Candidate(Side side, String setup, String blockReason, List<String> failReasons) {
-		static Candidate long(String setup) {
-			return new Candidate(Side.LONG, setup, null, List.of());
+	private record Candidate(boolean enter, String setup, String blockReason) {
+		private static Candidate enter(String setup) {
+			return new Candidate(true, setup, null);
 		}
 
-		static Candidate short(String setup) {
-			return new Candidate(Side.SHORT, setup, null, List.of());
-		}
-
-		static Candidate blocked(String blockReason) {
-			return new Candidate(Side.NONE, null, blockReason, List.of(blockReason));
-		}
-	}
-
-	private record VirtualBracketOrder(String orderId, double tpPrice, double slPrice, long entryTimeMs) {
-	}
-
-	private record Metrics(double bbWidth_5m,
-			double bwRatio5m,
-			double volRatio,
-			double volRatioOfEma,
-			double macdRatio5m,
-			double atrRatio5m,
-			double ema20DistPct,
-			double bbPercentB_5m,
-			double rsi9_5m,
-			boolean bbOutside_5m,
-			RegimeTag rawRegime,
-			RegimeTag activeRegime,
-			boolean readyForRegime) {
-		Metrics withRegimes(RegimeTag raw, RegimeTag active) {
-			return new Metrics(bbWidth_5m,
-					bwRatio5m,
-					volRatio,
-					volRatioOfEma,
-					macdRatio5m,
-					atrRatio5m,
-					ema20DistPct,
-					bbPercentB_5m,
-					rsi9_5m,
-					bbOutside_5m,
-					raw,
-					active,
-					readyForRegime);
+		private static Candidate noEntry(String blockReason) {
+			return new Candidate(false, null, blockReason);
 		}
 	}
 
 	private static final class SymbolState {
 		private final String symbol;
-		private final FiveBarAggregator aggregator = new FiveBarAggregator();
-		private final Deque<Candle> last1m = new ArrayDeque<>();
-		private final Deque<Candle> last5m = new ArrayDeque<>();
-		private final IndicatorState indicators = new IndicatorState();
-		private final RegimeState regimeState = new RegimeState();
-		private String dayKey;
-		private boolean tradedToday;
+		private LocalDate dayKey;
 		private int entriesToday;
 		private Side positionSide = Side.NONE;
+		private long entryTimeMs;
 		private double entryPrice;
 		private double qty;
-		private long entryTimeMs;
-		private double tpRaw;
-		private double slRaw;
-		private VirtualBracketOrder order;
+		private double tpPrice;
+		private double slPrice;
+		private String bracketId;
+		private final Deque<Candle> last1m = new ArrayDeque<>();
+		private final Deque<Candle> last5m = new ArrayDeque<>();
+		private final FiveBarAggregator aggregator = new FiveBarAggregator();
+		private final IndicatorState indicators = new IndicatorState();
+		private final RegimeState regimeState = new RegimeState();
 
 		private SymbolState(String symbol) {
 			this.symbol = symbol;
@@ -611,8 +571,8 @@ public class EliteV1Strategy implements Strategy {
 	private static final class FiveBarAggregator {
 		private final List<Candle> buffer = new ArrayList<>(5);
 
-		private Candle addFinalOneMinute(Candle finalOneMinute) {
-			buffer.add(finalOneMinute);
+		private Candle addFinalOneMinute(Candle candle1m) {
+			buffer.add(candle1m);
 			if (buffer.size() < 5) {
 				return null;
 			}
@@ -621,35 +581,37 @@ public class EliteV1Strategy implements Strategy {
 			double high = buffer.stream().mapToDouble(Candle::high).max().orElse(first.high());
 			double low = buffer.stream().mapToDouble(Candle::low).min().orElse(first.low());
 			double volume = buffer.stream().mapToDouble(Candle::volume).sum();
-			Candle out = new Candle(first.open(), high, low, last.close(), volume, last.closeTime());
+			Candle candle5m = new Candle(first.open(), high, low, last.close(), volume, last.closeTime());
 			buffer.clear();
-			return out;
+			return candle5m;
 		}
 	}
 
 	private static final class RegimeState {
-		private RegimeTag active = RegimeTag.CHOP;
-		private final Deque<RegimeTag> lastRaw = new ArrayDeque<>();
-		private int cooldownBarsLeft;
+		private RegimeTag rawRegimeTag = RegimeTag.CHOP;
+		private RegimeTag activeRegimeTag = RegimeTag.CHOP;
+		private int debounceCounter;
+		private int cooldownCounter;
+		private RegimeTag pendingRegime;
 
-		private RegimeTag update(RegimeTag raw) {
-			lastRaw.addLast(raw);
-			if (lastRaw.size() > 2) {
-				lastRaw.removeFirst();
+		private RegimeTag update(RegimeTag raw, int debounceBars, int cooldownBars) {
+			rawRegimeTag = raw;
+			if (cooldownCounter > 0) {
+				cooldownCounter--;
+				return activeRegimeTag;
 			}
-			if (cooldownBarsLeft > 0) {
-				cooldownBarsLeft--;
-				return active;
+			if (pendingRegime != raw) {
+				pendingRegime = raw;
+				debounceCounter = 1;
+				return activeRegimeTag;
 			}
-			if (lastRaw.size() == 2) {
-				RegimeTag first = lastRaw.peekFirst();
-				RegimeTag second = lastRaw.peekLast();
-				if (first == second && active != first) {
-					active = first;
-					cooldownBarsLeft = 3;
-				}
+			debounceCounter++;
+			if (debounceCounter >= debounceBars && activeRegimeTag != raw) {
+				activeRegimeTag = raw;
+				cooldownCounter = cooldownBars;
+				debounceCounter = 0;
 			}
-			return active;
+			return activeRegimeTag;
 		}
 	}
 
@@ -672,106 +634,59 @@ public class EliteV1Strategy implements Strategy {
 		private boolean ema26Ready;
 		private double macdSignal;
 		private boolean macdSignalReady;
-		private int barCount;
+		private int bars;
 		private final Ewma bwEma = new Ewma(20);
 		private final Ewma atrEma = new Ewma(20);
 		private final Ewma macdAbsEma = new Ewma(20);
-		private final Ewma volumeEma = new Ewma(20);
+		private final Ewma volEma = new Ewma(20);
 		private final Ewma volRatioEma = new Ewma(20);
 		private Metrics latest;
-		private boolean baselinesReady;
-		private int regimeReadyBars;
 
 		private void update(Candle bar) {
-			barCount++;
-			double close = bar.close();
-			updateEma20(close);
-			updateRsi(close);
-			double tr = updateAtr(bar);
-			double atr14 = average(trWindow14);
-			double atrEmaValue = atrEma.update(atr14);
-			double atrRatio = ratio(atr14, atrEmaValue);
-			double bbWidth = computeBbWidth(close);
-			double bwEmaValue = bwEma.update(bbWidth);
-			double bwRatio = ratio(bbWidth, bwEmaValue);
+			bars++;
+			updateEma20(bar.close());
+			updateRsi(bar.close());
+			double atr14 = updateAtr(bar);
+			double atrRatio = ratio(atr14, atrEma.update(atr14));
+			double bbWidth = computeBbWidth(bar.close());
+			double bwRatio = ratio(bbWidth, bwEma.update(bbWidth));
 
-			updateMacd(close);
+			updateMacd(bar.close());
 			double macd = ema12 - ema26;
 			double macdDelta = macd - macdSignal;
-			double macdAbs = macdAbsEma.update(Math.abs(macdDelta));
-			double macdRatio = ratio(Math.abs(macdDelta), macdAbs);
+			double macdRatio = ratio(Math.abs(macdDelta), macdAbsEma.update(Math.abs(macdDelta)));
 
-			double volEmaValue = volumeEma.update(bar.volume());
-			double volRatio = ratio(bar.volume(), volEmaValue);
-			double volRatioOfEma;
-			if (volRatioEma.initialized()) {
-				volRatioOfEma = ratio(volRatio, volRatioEma.update(volRatio));
-			} else {
+			double volRatio = ratio(bar.volume(), volEma.update(bar.volume()));
+			double volRatioOfEma = volRatioEma.initialized() ? ratio(volRatio, volRatioEma.update(volRatio)) : 1.0;
+			if (!volRatioEma.initialized()) {
 				volRatioEma.update(volRatio);
-				volRatioOfEma = 1.0;
 			}
 
 			double std = std(closeWindow20);
 			double sma = average(closeWindow20);
 			double bbUpper = sma + 2.0 * std;
 			double bbLower = sma - 2.0 * std;
-			double bbPercentB = ratio(close - bbLower, Math.max(bbUpper - bbLower, 1e-9));
-			boolean bbOutside = close > bbUpper || close < bbLower;
-			double ema20DistPct = ratio(Math.abs(close - ema20), Math.max(close, 1e-9));
+			double percentB = ratio(bar.close() - bbLower, Math.max(bbUpper - bbLower, 1e-9));
+			boolean bbOutside = bar.close() > bbUpper || bar.close() < bbLower;
+			double ema20DistPct = ratio(Math.abs(bar.close() - ema20), Math.max(bar.close(), 1e-9));
 			double rsi = computeRsi();
 
-			boolean readyForRegime = bwEma.initialized()
-					&& atrEma.initialized()
-					&& macdAbsEma.initialized();
-			if (readyForRegime) {
-				regimeReadyBars++;
-			}
-			baselinesReady = readyForRegime && regimeReadyBars >= MIN_5M_BARS;
-
-			latest = new Metrics(
-					bbWidth,
-					bwRatio,
-					volRatio,
-					volRatioOfEma,
-					macdRatio,
-					atrRatio,
-					ema20DistPct,
-					bbPercentB,
-					rsi,
-					bbOutside,
-					RegimeTag.CHOP,
-					RegimeTag.CHOP,
-					readyForRegime);
+			latest = new Metrics(bbWidth, bwRatio, volRatio, volRatioOfEma, macdRatio, atrRatio,
+					ema20DistPct, percentB, rsi, bbOutside, RegimeTag.CHOP, RegimeTag.CHOP);
 		}
 
-		private void updateEma20(double close) {
-			if (!ema20Ready) {
-				ema20 = close;
-				ema20Ready = true;
-			} else {
-				ema20 = ema(ema20, close, 20);
+		private void setRegimes(RegimeTag raw, RegimeTag active) {
+			if (latest != null) {
+				latest = latest.withRegimes(raw, active);
 			}
-			push(closeWindow20, close, 20);
 		}
 
-		private void updateRsi(double close) {
-			if (!prevCloseReady) {
-				prevClose = close;
-				prevCloseReady = true;
-				return;
-			}
-			double change = close - prevClose;
-			double gain = Math.max(change, 0);
-			double loss = Math.max(-change, 0);
-			rsiCounter++;
-			if (rsiCounter == 1) {
-				avgGain = gain;
-				avgLoss = loss;
-			} else {
-				avgGain = (avgGain * 8 + gain) / 9;
-				avgLoss = (avgLoss * 8 + loss) / 9;
-			}
-			prevClose = close;
+		private Metrics metrics() {
+			return latest;
+		}
+
+		private boolean baselinesReady(int warmupMin5mBars) {
+			return bars >= warmupMin5mBars && bwEma.initialized() && atrEma.initialized() && macdAbsEma.initialized();
 		}
 
 		private double updateAtr(Candle bar) {
@@ -785,7 +700,38 @@ public class EliteV1Strategy implements Strategy {
 			}
 			prevCloseAtr = bar.close();
 			push(trWindow14, tr, 14);
-			return tr;
+			return average(trWindow14);
+		}
+
+		private void updateEma20(double close) {
+			if (!ema20Ready) {
+				ema20 = close;
+				ema20Ready = true;
+			} else {
+				ema20 = ema(ema20, close, 20);
+			}
+			push(closeWindow20, close, 20);
+			push(volumeWindow20, close, 20);
+		}
+
+		private void updateRsi(double close) {
+			if (!prevCloseReady) {
+				prevClose = close;
+				prevCloseReady = true;
+				return;
+			}
+			double change = close - prevClose;
+			double gain = Math.max(change, 0.0);
+			double loss = Math.max(-change, 0.0);
+			rsiCounter++;
+			if (rsiCounter == 1) {
+				avgGain = gain;
+				avgLoss = loss;
+			} else {
+				avgGain = (avgGain * 8 + gain) / 9;
+				avgLoss = (avgLoss * 8 + loss) / 9;
+			}
+			prevClose = close;
 		}
 
 		private void updateMacd(double close) {
@@ -813,22 +759,22 @@ public class EliteV1Strategy implements Strategy {
 		private double computeBbWidth(double close) {
 			double std = std(closeWindow20);
 			double sma = average(closeWindow20);
-			double bbUpper = sma + 2.0 * std;
-			double bbLower = sma - 2.0 * std;
-			return ratio(bbUpper - bbLower, Math.max(close, 1e-9));
+			double upper = sma + 2.0 * std;
+			double lower = sma - 2.0 * std;
+			return ratio(upper - lower, Math.max(close, 1e-9));
 		}
 
 		private double computeRsi() {
-			if (avgLoss == 0.0) {
+			if (avgLoss <= 1e-9) {
 				return 100.0;
 			}
 			double rs = avgGain / avgLoss;
 			return 100.0 - (100.0 / (1.0 + rs));
 		}
 
-		private double ema(double previous, double current, int period) {
+		private double ema(double prev, double current, int period) {
 			double alpha = 2.0 / (period + 1.0);
-			return alpha * current + (1.0 - alpha) * previous;
+			return alpha * current + (1.0 - alpha) * prev;
 		}
 
 		private double average(Deque<Double> values) {
@@ -857,17 +803,25 @@ public class EliteV1Strategy implements Strategy {
 				values.removeFirst();
 			}
 		}
+	}
 
-		private Metrics metrics() {
-			return latest;
-		}
+	private record Metrics(
+			double bbWidth_5m,
+			double bwRatio5m,
+			double volRatio,
+			double volRatioOfEma,
+			double macdRatio5m,
+			double atrRatio5m,
+			double ema20DistPct,
+			double bbPercentB_5m,
+			double rsi9_5m,
+			boolean bbOutside_5m,
+			RegimeTag rawRegimeTag,
+			RegimeTag activeRegimeTag) {
 
-		private int barCount() {
-			return barCount;
-		}
-
-		private boolean baselinesReady() {
-			return baselinesReady;
+		private Metrics withRegimes(RegimeTag raw, RegimeTag active) {
+			return new Metrics(bbWidth_5m, bwRatio5m, volRatio, volRatioOfEma, macdRatio5m, atrRatio5m,
+					ema20DistPct, bbPercentB_5m, rsi9_5m, bbOutside_5m, raw, active);
 		}
 	}
 
@@ -921,10 +875,10 @@ public class EliteV1Strategy implements Strategy {
 						Files.createDirectories(item.path().getParent());
 						Files.writeString(item.path(), item.line() + "\n", StandardCharsets.UTF_8,
 								StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-					} catch (InterruptedException interruptedException) {
+					} catch (InterruptedException e) {
 						Thread.currentThread().interrupt();
-					} catch (IOException ioException) {
-						logger.warn("elite log write failed", ioException);
+					} catch (IOException ioe) {
+						logger.warn("elite log write failed", ioe);
 					}
 				}
 			});
@@ -937,7 +891,7 @@ public class EliteV1Strategy implements Strategy {
 			if (critical) {
 				try {
 					queue.put(item);
-				} catch (InterruptedException interruptedException) {
+				} catch (InterruptedException e) {
 					Thread.currentThread().interrupt();
 				}
 				return;
@@ -945,7 +899,7 @@ public class EliteV1Strategy implements Strategy {
 			if (!queue.offer(item)) {
 				long droppedCount = dropped.incrementAndGet();
 				if (droppedCount % 100 == 0) {
-					logger.warn("elite async decision log dropped={} entries", droppedCount);
+					logger.warn("elite decision log dropped={} entries", droppedCount);
 				}
 			}
 		}
