@@ -38,6 +38,7 @@ import com.binance.strategy.Candle;
 import com.binance.strategy.Strategy;
 import com.binance.strategy.StrategyType;
 import com.binance.strategy.SymbolFilterService;
+import com.binance.strategy.WarmupProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -64,6 +65,7 @@ public class EliteV1Strategy implements Strategy {
 	private final EliteV1Properties props;
 	private final ObjectMapper objectMapper;
 	private final SymbolFilterService symbolFilterService;
+	private final WarmupProperties warmupProperties;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
 	private final Scheduler loop = Schedulers.newSingle("elite-v1-loop", true);
 	private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
@@ -72,15 +74,20 @@ public class EliteV1Strategy implements Strategy {
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
 	private volatile Disposable wsSubscription;
 	private ZoneId zoneId;
+	private int requiredWarmup1m;
+	private int requiredWarmup5m;
+	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
 			EliteV1Properties props,
 			ObjectMapper objectMapper,
-			SymbolFilterService symbolFilterService) {
+			SymbolFilterService symbolFilterService,
+			WarmupProperties warmupProperties) {
 		this.binanceProperties = binanceProperties;
 		this.props = props;
 		this.objectMapper = objectMapper;
 		this.symbolFilterService = symbolFilterService;
+		this.warmupProperties = warmupProperties;
 	}
 
 	@Override
@@ -94,6 +101,13 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 		validateConfig();
+		requiredWarmup5m = resolveRequiredWarmup5m(warmupProperties);
+		requiredWarmup1m = resolveRequiredWarmup1m(warmupProperties);
+		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup1m={} warmup5m={} mode={}",
+				props.symbols().size(),
+				requiredWarmup1m,
+				requiredWarmup5m,
+				warmupMode.name());
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
 			LOGGER.warn("ELITE_V1 LIVE mode not implemented; falling back to PAPER behavior.");
 		}
@@ -162,6 +176,7 @@ public class EliteV1Strategy implements Strategy {
 	}
 
 	private void onClosed1m(SymbolState state, Candle bar1m) {
+		state.seen1mCloses++;
 		state.last1m.addLast(bar1m);
 		if (state.last1m.size() > 300) {
 			state.last1m.removeFirst();
@@ -179,6 +194,7 @@ public class EliteV1Strategy implements Strategy {
 		if (bar5m == null) {
 			return;
 		}
+		state.seen5mCloses++;
 		state.last5m.addLast(bar5m);
 		if (state.last5m.size() > 500) {
 			state.last5m.removeFirst();
@@ -197,15 +213,36 @@ public class EliteV1Strategy implements Strategy {
 
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
 		rollDay(state, bar5m.closeTime());
-		boolean baselinesReady = state.indicators.baselinesReady(props.warmupMin5mBars());
-		if (baselinesReady && !state.warmupDoneLogged) {
-			state.warmupDoneLogged = true;
-			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} required5mBars={} have5mBars={}",
-					state.symbol,
-					props.warmupMin5mBars(),
-					state.indicators.barCount());
-		}
 		Metrics metrics = state.indicators.metrics();
+		boolean baselinesReady = isBaselinesReady(state, metrics);
+		state.baselinesReady = baselinesReady;
+		if (!baselinesReady && state.seen1mCloses > 0 && state.seen1mCloses % 60 == 0) {
+			LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={}/{} seen5m={}/{} baselinesReady=false",
+					state.symbol,
+					state.seen1mCloses,
+					requiredWarmup1m,
+					state.seen5mCloses,
+					requiredWarmup5m);
+		}
+		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
+			state.warmupDoneLogged = true;
+			var at = Instant.ofEpochMilli(bar5m.closeTime());
+			var atTr = at.atZone(zoneId);
+			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required1m={} required5m={} atMs={} timeUtc={} timeTr={}",
+					state.symbol,
+					state.seen1mCloses,
+					state.seen5mCloses,
+					requiredWarmup1m,
+					requiredWarmup5m,
+					bar5m.closeTime(),
+					at.toString(),
+					ISO_OFFSET_FMT.format(atTr));
+			LOGGER.info("EVENT=ATR_BASELINE_OK strategy=ELITE_V1 symbol={} atr14={} atrEma={} atrRatio={}",
+					state.symbol,
+					metrics.atr14,
+					metrics.atrEma_5m,
+					metrics.atrRatio5m);
+		}
 		if (!baselinesReady || metrics == null) {
 			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
 			return;
@@ -248,6 +285,23 @@ public class EliteV1Strategy implements Strategy {
 			state.dayKey = day;
 			state.entriesToday = 0;
 		}
+	}
+
+	private boolean isBaselinesReady(SymbolState state, Metrics metrics) {
+		return state.seen1mCloses >= requiredWarmup1m
+				&& state.seen5mCloses >= requiredWarmup5m
+				&& metrics != null
+				&& state.indicators.baselineIndicatorsSeeded();
+	}
+
+	static int resolveRequiredWarmup1m(WarmupProperties warmupProperties) {
+		int required5m = resolveRequiredWarmup5m(warmupProperties);
+		int from1m = Math.max(warmupProperties.candles1m(), 0);
+		return Math.max(from1m, required5m * 5);
+	}
+
+	static int resolveRequiredWarmup5m(WarmupProperties warmupProperties) {
+		return Math.max(warmupProperties.candles5m(), 0);
 	}
 
 	static PreCheckAction evaluatePreChecks(boolean baselinesReady,
@@ -470,7 +524,7 @@ private void openPaperPosition(SymbolState state,
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
 		LocalDate dayFromTimeMs = timeTr.toLocalDate();
-		boolean baselinesReady = state.indicators.baselinesReady(props.warmupMin5mBars());
+		boolean baselinesReady = isBaselinesReady(state, metrics);
 		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
 		node.put("strategy", "ELITE_V1");
@@ -493,7 +547,7 @@ private void openPaperPosition(SymbolState state,
 			effectiveAction = "INPUTS_NOT_READY";
 			effectiveMatchedSetup = null;
 			effectiveBlockReason = "INPUTS_NOT_READY";
-			applyWarmupNotReadyFields(node, props.warmupMin5mBars(), state.indicators.barCount());
+			applyWarmupNotReadyFields(node, requiredWarmup1m, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
 		} else {
 			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
 			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
@@ -544,7 +598,7 @@ private void openPaperPosition(SymbolState state,
 			return blockReason;
 		}
 		if ("ENTER_LONG".equals(action) || "ENTER_SHORT".equals(action)) {
-			return "ALLOWED";
+			return "NONE";
 		}
 		if ("NO_ENTRY".equals(action)) {
 			return "NO_ENTRY";
@@ -564,14 +618,17 @@ private void openPaperPosition(SymbolState state,
 		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
 	}
 
-	static void applyWarmupNotReadyFields(ObjectNode node, int required5mBars, int have5mBars) {
+	static void applyWarmupNotReadyFields(ObjectNode node, int required1mBars, long have1mBars, int required5mBars, long have5mBars) {
 		node.put("rawRegimeTag", "UNKNOWN");
 		node.put("activeRegimeTag", "UNKNOWN");
 		node.putNull("metrics");
 		ObjectNode warmup = node.putObject("warmup");
+		warmup.put("required1mBars", required1mBars);
+		warmup.put("have1mBars", have1mBars);
+		warmup.put("missing1mBars", Math.max(0L, required1mBars - have1mBars));
 		warmup.put("required5mBars", required5mBars);
 		warmup.put("have5mBars", have5mBars);
-		warmup.put("missing5mBars", Math.max(0, required5mBars - have5mBars));
+		warmup.put("missing5mBars", Math.max(0L, required5mBars - have5mBars));
 		node.put("inputsValid", false);
 		var invalid = node.putArray("inputsInvalidReasons");
 		invalid.add("WARMUP");
@@ -679,6 +736,11 @@ private Path decisionPath(String symbol, LocalDate day) {
 		TIME_STOP_20M
 	}
 
+	enum WarmupMode {
+		DERIVE_5M_FROM_1M,
+		DIRECT_5M
+	}
+
 	enum DecisionAction {
 		CONTINUE,
 		INPUTS_NOT_READY,
@@ -728,6 +790,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 
 	private static final class SymbolState {
 		private final String symbol;
+		private long seen1mCloses;
+		private long seen5mCloses;
+		private boolean baselinesReady;
 		private boolean warmupDoneLogged;
 		private LocalDate dayKey;
 		private int entriesToday;
@@ -921,8 +986,8 @@ private Path decisionPath(String symbol, LocalDate day) {
 			return latest;
 		}
 
-		private boolean baselinesReady(int warmupMin5mBars) {
-			return bars >= warmupMin5mBars && bwEma.initialized() && atrEma.initialized() && macdAbsEma.initialized();
+		private boolean baselineIndicatorsSeeded() {
+			return bwEma.initialized() && atrEma.initialized() && macdAbsEma.initialized();
 		}
 
 		private double updateAtr(Candle bar) {
@@ -1045,9 +1110,6 @@ private Path decisionPath(String symbol, LocalDate day) {
 			}
 		}
 
-		private int barCount() {
-			return bars;
-		}
 	}
 
 	private record Metrics(

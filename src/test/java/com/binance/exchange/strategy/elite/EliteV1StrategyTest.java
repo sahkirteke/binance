@@ -9,6 +9,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 import com.binance.strategy.Candle;
+import com.binance.strategy.WarmupProperties;
 
 class EliteV1StrategyTest {
 
@@ -189,8 +190,8 @@ class EliteV1StrategyTest {
 		assertEquals("TRADDED_TODAY", EliteV1Strategy.resolveDecisionBlockReason("TRADDED_TODAY", null));
 		assertEquals("SOME_GATE", EliteV1Strategy.resolveDecisionBlockReason("NO_ENTRY", "SOME_GATE"));
 		assertEquals("NO_ENTRY", EliteV1Strategy.resolveDecisionBlockReason("NO_ENTRY", null));
-		assertEquals("ALLOWED", EliteV1Strategy.resolveDecisionBlockReason("ENTER_LONG", null));
-		assertEquals("ALLOWED", EliteV1Strategy.resolveDecisionBlockReason("ENTER_SHORT", null));
+		assertEquals("NONE", EliteV1Strategy.resolveDecisionBlockReason("ENTER_LONG", null));
+		assertEquals("NONE", EliteV1Strategy.resolveDecisionBlockReason("ENTER_SHORT", null));
 		assertEquals("GLOBAL_MAX_OPEN_POS", EliteV1Strategy.resolveDecisionBlockReason("GLOBAL_MAX_OPEN_POS", null));
 	}
 
@@ -198,10 +199,13 @@ class EliteV1StrategyTest {
 	void warmupNotReadyFieldsShouldSetUnknownRegimesAndNullMetrics() {
 		var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
 		var node = mapper.createObjectNode();
-		EliteV1Strategy.applyWarmupNotReadyFields(node, 60, 12);
+		EliteV1Strategy.applyWarmupNotReadyFields(node, 300, 75, 60, 12);
 		assertEquals("UNKNOWN", node.get("rawRegimeTag").asText());
 		assertEquals("UNKNOWN", node.get("activeRegimeTag").asText());
 		assertTrue(node.get("metrics").isNull());
+		assertEquals(300, node.get("warmup").get("required1mBars").asInt());
+		assertEquals(75, node.get("warmup").get("have1mBars").asInt());
+		assertEquals(225, node.get("warmup").get("missing1mBars").asInt());
 		assertEquals(60, node.get("warmup").get("required5mBars").asInt());
 		assertEquals(12, node.get("warmup").get("have5mBars").asInt());
 		assertEquals(48, node.get("warmup").get("missing5mBars").asInt());
@@ -213,12 +217,31 @@ class EliteV1StrategyTest {
 		var node = mapper.createObjectNode();
 		node.put("action", "INPUTS_NOT_READY");
 		node.put("blockReason", EliteV1Strategy.resolveDecisionBlockReason("INPUTS_NOT_READY", null));
-		EliteV1Strategy.applyWarmupNotReadyFields(node, 60, 0);
+		EliteV1Strategy.applyWarmupNotReadyFields(node, 300, 0, 60, 0);
 		String json = mapper.writeValueAsString(node);
 		var parsed = mapper.readTree(json);
 		assertEquals("INPUTS_NOT_READY", parsed.get("action").asText());
 		assertEquals("INPUTS_NOT_READY", parsed.get("blockReason").asText());
 		assertTrue(parsed.get("metrics").isNull());
+	}
+
+	@Test
+	void requiredWarmup1mShouldUseCandles1mWhenLargerThan5mDerivedRequirement() {
+		WarmupProperties warmup = new WarmupProperties(true, 1200, 200, 3, false, 0);
+		assertEquals(1200, EliteV1Strategy.resolveRequiredWarmup1m(warmup));
+	}
+
+	@Test
+	void requiredWarmup1mShouldUseFiveMinuteDerivedRequirementWhenLarger() {
+		WarmupProperties warmup = new WarmupProperties(true, 250, 200, 3, false, 0);
+		assertEquals(1000, EliteV1Strategy.resolveRequiredWarmup1m(warmup));
+	}
+
+	@Test
+	void requiredWarmup1mShouldGuardAgainstNegativeInputs() {
+		WarmupProperties warmup = new WarmupProperties(true, -1, -5, 3, false, 0);
+		assertEquals(0, EliteV1Strategy.resolveRequiredWarmup1m(warmup));
+		assertEquals(0, EliteV1Strategy.resolveRequiredWarmup5m(warmup));
 	}
 
 	private EliteV1Properties.ShortEliteMomentum momentumCfg() {
