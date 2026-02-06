@@ -237,6 +237,11 @@ public class EliteV1Strategy implements Strategy {
 					bar5m.closeTime(),
 					at.toString(),
 					ISO_OFFSET_FMT.format(atTr));
+			LOGGER.info("warm up bitti strategy=ELITE_V1 symbol={} seen1m={} seen5m={} atMs={}",
+					state.symbol,
+					state.seen1mCloses,
+					state.seen5mCloses,
+					bar5m.closeTime());
 			LOGGER.info("EVENT=ATR_BASELINE_OK strategy=ELITE_V1 symbol={} atr14={} atrEma={} atrRatio={}",
 					state.symbol,
 					metrics.atr14,
