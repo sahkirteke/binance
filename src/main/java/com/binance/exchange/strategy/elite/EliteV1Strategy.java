@@ -217,15 +217,16 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 		boolean seeded = state.indicators.baselineIndicatorsSeeded();
-		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={}/{} seen5m={}/{} seeded={} baselinesReady={}",
+		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={}/{} seen5m={}/{} seeded={} baselinesReady={} nextLogAt1m={}",
 				state.symbol,
 				state.seen1mCloses,
 				requiredWarmup1m,
 				state.seen5mCloses,
 				requiredWarmup5m,
 				seeded,
-				state.baselinesReady);
-		state.nextWarmupProgressLogAt1m += 60;
+				state.baselinesReady,
+				state.nextWarmupProgressLogAt1m);
+		state.nextWarmupProgressLogAt1m += state.nextWarmupProgressLogAt1m < 60 ? 10 : 60;
 	}
 
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
@@ -808,7 +809,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private long seen5mCloses;
 		private boolean baselinesReady;
 		private boolean warmupDoneLogged;
-		private long nextWarmupProgressLogAt1m = 60;
+		private long nextWarmupProgressLogAt1m = 10;
 		private LocalDate dayKey;
 		private int entriesToday;
 		private Side positionSide = Side.NONE;
