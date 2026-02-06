@@ -53,6 +53,9 @@ public class EliteV1Strategy implements Strategy {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(EliteV1Strategy.class);
 	private static final DateTimeFormatter DAY_FMT = DateTimeFormatter.BASIC_ISO_DATE;
+	private static final DateTimeFormatter ISO_OFFSET_FMT = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
+	private static final long ONE_MIN_MS = 60_000L;
+	private static final long FIVE_MIN_MS = 300_000L;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
@@ -165,7 +168,14 @@ public class EliteV1Strategy implements Strategy {
 		}
 		checkPaperExit(state, bar1m);
 
-		Candle bar5m = state.aggregator.addFinalOneMinute(bar1m);
+		BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
+		if (transition.incompleteBucketStartMs != null) {
+			LOGGER.debug("EVENT=INCOMPLETE_5M_BUCKET symbol={} bucketStartMs={} count={}",
+					state.symbol,
+					transition.incompleteBucketStartMs,
+					transition.incompleteCount);
+		}
+		Candle bar5m = transition.completedCandle;
 		if (bar5m == null) {
 			return;
 		}
@@ -449,10 +459,15 @@ private void openPaperPosition(SymbolState state,
 			Metrics metrics,
 			ShortEvalResult shortEvalResult) {
 		ObjectNode node = objectMapper.createObjectNode();
+		long timeMs = bar5m.closeTime();
+		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
+		LocalDate dayFromTimeMs = timeTr.toLocalDate();
 		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
-		node.put("dayKey", DAY_FMT.format(state.dayKey));
+		node.put("timeMs", timeMs);
+		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
+		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
 		node.put("entriesToday", state.entriesToday);
 		node.put("baselinesReady", state.indicators.baselinesReady(props.warmupMin5mBars()));
 		if (metrics != null) {
@@ -475,7 +490,7 @@ private void openPaperPosition(SymbolState state,
 		node.put("shortEliteMatchedSetup", resolvedShort.matchedSetup);
 		var failArr = node.putArray("shortEliteFailReasons");
 		resolvedShort.failReasons.forEach(failArr::add);
-		writer.write(decisionPath(state.symbol, state.dayKey), node.toString(), false);
+		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
 	}
 
 	private Path decisionPath(String symbol, LocalDate day) {
@@ -618,7 +633,7 @@ private void openPaperPosition(SymbolState state,
 		}
 	}
 
-private static final class SymbolState {
+	private static final class SymbolState {
 		private final String symbol;
 		private LocalDate dayKey;
 		private int entriesToday;
@@ -631,7 +646,7 @@ private static final class SymbolState {
 		private String bracketId;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
-		private final FiveBarAggregator aggregator = new FiveBarAggregator();
+		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
 		private final IndicatorState indicators = new IndicatorState();
 		private final RegimeState regimeState = new RegimeState();
 
@@ -640,22 +655,71 @@ private static final class SymbolState {
 		}
 	}
 
-	private static final class FiveBarAggregator {
-		private final List<Candle> buffer = new ArrayList<>(5);
+	static final class BucketTransition {
+		private final Candle completedCandle;
+		private final Long incompleteBucketStartMs;
+		private final int incompleteCount;
 
-		private Candle addFinalOneMinute(Candle candle1m) {
-			buffer.add(candle1m);
-			if (buffer.size() < 5) {
-				return null;
+		private BucketTransition(Candle completedCandle, Long incompleteBucketStartMs, int incompleteCount) {
+			this.completedCandle = completedCandle;
+			this.incompleteBucketStartMs = incompleteBucketStartMs;
+			this.incompleteCount = incompleteCount;
+		}
+
+		Candle completedCandle() {
+			return completedCandle;
+		}
+
+		Long incompleteBucketStartMs() {
+			return incompleteBucketStartMs;
+		}
+
+		int incompleteCount() {
+			return incompleteCount;
+		}
+	}
+
+	static final class BucketedFiveMinuteAggregator {
+		private Long currentBucketStartMs;
+		private final List<Candle> currentBucketCandles = new ArrayList<>(5);
+
+		private BucketTransition addFinalOneMinute(Candle candle1m) {
+			long openTimeMs = inferOpenTimeMsFromClose(candle1m.closeTime());
+			long candleBucketStartMs = bucketStartMs(openTimeMs);
+			if (currentBucketStartMs == null) {
+				currentBucketStartMs = candleBucketStartMs;
+				currentBucketCandles.add(candle1m);
+				return new BucketTransition(null, null, 0);
 			}
-			Candle first = buffer.get(0);
-			Candle last = buffer.get(4);
-			double high = buffer.stream().mapToDouble(Candle::high).max().orElse(first.high());
-			double low = buffer.stream().mapToDouble(Candle::low).min().orElse(first.low());
-			double volume = buffer.stream().mapToDouble(Candle::volume).sum();
-			Candle candle5m = new Candle(first.open(), high, low, last.close(), volume, last.closeTime());
-			buffer.clear();
-			return candle5m;
+			if (candleBucketStartMs < currentBucketStartMs) {
+				return new BucketTransition(null, null, 0);
+			}
+			if (candleBucketStartMs == currentBucketStartMs) {
+				currentBucketCandles.add(candle1m);
+				return new BucketTransition(null, null, 0);
+			}
+
+			BucketTransition finalized = finalizeCurrentBucket();
+			currentBucketStartMs = candleBucketStartMs;
+			currentBucketCandles.clear();
+			currentBucketCandles.add(candle1m);
+			return finalized;
+		}
+
+		private BucketTransition finalizeCurrentBucket() {
+			if (currentBucketStartMs == null) {
+				return new BucketTransition(null, null, 0);
+			}
+			if (currentBucketCandles.size() != 5) {
+				return new BucketTransition(null, currentBucketStartMs, currentBucketCandles.size());
+			}
+			Candle first = currentBucketCandles.get(0);
+			Candle last = currentBucketCandles.get(4);
+			double high = currentBucketCandles.stream().mapToDouble(Candle::high).max().orElse(first.high());
+			double low = currentBucketCandles.stream().mapToDouble(Candle::low).min().orElse(first.low());
+			double volume = currentBucketCandles.stream().mapToDouble(Candle::volume).sum();
+			Candle candle5m = new Candle(first.open(), high, low, last.close(), volume, bucketEndMs(currentBucketStartMs));
+			return new BucketTransition(candle5m, null, 0);
 		}
 	}
 
@@ -994,5 +1058,16 @@ private static final class SymbolState {
 
 		private record LogItem(Path path, String line) {
 		}
+	}
+	static long bucketStartMs(long openTimeMs) {
+		return (openTimeMs / FIVE_MIN_MS) * FIVE_MIN_MS;
+	}
+
+	static long bucketEndMs(long bucketStartMs) {
+		return bucketStartMs + FIVE_MIN_MS - 1;
+	}
+
+	static long inferOpenTimeMsFromClose(long closeTimeMs) {
+		return closeTimeMs - (ONE_MIN_MS - 1);
 	}
 }

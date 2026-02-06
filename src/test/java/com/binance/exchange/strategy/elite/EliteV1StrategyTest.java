@@ -153,6 +153,35 @@ class EliteV1StrategyTest {
 		assertTrue(fails.contains("VOL"));
 	}
 
+	@Test
+	void bucketAlignmentShouldUseExchangeFiveMinuteBoundary() {
+		long openMs = 1_700_000_000_000L;
+		long bucketStart = EliteV1Strategy.bucketStartMs(openMs);
+		long bucketEnd = EliteV1Strategy.bucketEndMs(bucketStart);
+		var utc = java.time.Instant.ofEpochMilli(bucketEnd).atZone(java.time.ZoneOffset.UTC);
+		var tr = java.time.Instant.ofEpochMilli(bucketEnd).atZone(java.time.ZoneId.of("Europe/Istanbul"));
+		assertEquals(59, utc.getSecond());
+		assertEquals(999_000_000, utc.getNano());
+		assertEquals(59, tr.getSecond());
+		assertEquals(999_000_000, tr.getNano());
+		assertTrue(java.util.Set.of(4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59).contains(utc.getMinute()));
+		assertTrue(java.util.Set.of(4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59).contains(tr.getMinute()));
+	}
+
+	@Test
+	void incompleteBucketShouldNotFinalizeFiveMinuteCandle() {
+		EliteV1Strategy.BucketedFiveMinuteAggregator agg = new EliteV1Strategy.BucketedFiveMinuteAggregator();
+		long baseClose = 1_700_000_099_999L;
+		agg.addFinalOneMinute(new Candle(1, 1, 1, 1, 1, baseClose));
+		agg.addFinalOneMinute(new Candle(1, 1, 1, 1, 1, baseClose + 60_000L));
+		agg.addFinalOneMinute(new Candle(1, 1, 1, 1, 1, baseClose + 120_000L));
+		agg.addFinalOneMinute(new Candle(1, 1, 1, 1, 1, baseClose + 180_000L));
+		EliteV1Strategy.BucketTransition transition = agg.addFinalOneMinute(new Candle(1, 1, 1, 1, 1, baseClose + 300_000L));
+		assertEquals(null, transition.completedCandle());
+		assertTrue(transition.incompleteBucketStartMs() != null);
+		assertEquals(4, transition.incompleteCount());
+	}
+
 	private EliteV1Properties.ShortEliteMomentum momentumCfg() {
 		return new EliteV1Properties.ShortEliteMomentum(
 				0.35,
