@@ -194,6 +194,33 @@ class EliteV1StrategyTest {
 		assertEquals("GLOBAL_MAX_OPEN_POS", EliteV1Strategy.resolveDecisionBlockReason("GLOBAL_MAX_OPEN_POS", null));
 	}
 
+	@Test
+	void warmupNotReadyFieldsShouldSetUnknownRegimesAndNullMetrics() {
+		var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+		var node = mapper.createObjectNode();
+		EliteV1Strategy.applyWarmupNotReadyFields(node, 60, 12);
+		assertEquals("UNKNOWN", node.get("rawRegimeTag").asText());
+		assertEquals("UNKNOWN", node.get("activeRegimeTag").asText());
+		assertTrue(node.get("metrics").isNull());
+		assertEquals(60, node.get("warmup").get("required5mBars").asInt());
+		assertEquals(12, node.get("warmup").get("have5mBars").asInt());
+		assertEquals(48, node.get("warmup").get("missing5mBars").asInt());
+	}
+
+	@Test
+	void decisionNodeSerializationShouldBeValidJson() throws Exception {
+		var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+		var node = mapper.createObjectNode();
+		node.put("action", "INPUTS_NOT_READY");
+		node.put("blockReason", EliteV1Strategy.resolveDecisionBlockReason("INPUTS_NOT_READY", null));
+		EliteV1Strategy.applyWarmupNotReadyFields(node, 60, 0);
+		String json = mapper.writeValueAsString(node);
+		var parsed = mapper.readTree(json);
+		assertEquals("INPUTS_NOT_READY", parsed.get("action").asText());
+		assertEquals("INPUTS_NOT_READY", parsed.get("blockReason").asText());
+		assertTrue(parsed.get("metrics").isNull());
+	}
+
 	private EliteV1Properties.ShortEliteMomentum momentumCfg() {
 		return new EliteV1Properties.ShortEliteMomentum(
 				0.35,

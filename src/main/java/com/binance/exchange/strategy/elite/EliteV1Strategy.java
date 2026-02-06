@@ -197,13 +197,14 @@ public class EliteV1Strategy implements Strategy {
 
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
 		rollDay(state, bar5m.closeTime());
+		boolean baselinesReady = state.indicators.baselinesReady(props.warmupMin5mBars());
 		Metrics metrics = state.indicators.metrics();
-		if (metrics == null) {
+		if (!baselinesReady || metrics == null) {
 			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
 			return;
 		}
 
-		PreCheckAction preCheck = evaluatePreChecks(state.indicators.baselinesReady(props.warmupMin5mBars()),
+		PreCheckAction preCheck = evaluatePreChecks(baselinesReady,
 				state.positionSide,
 				state.entriesToday >= props.maxEntriesPerSymbolPerDay(),
 				globalOpenPositions.get(),
@@ -462,29 +463,66 @@ private void openPaperPosition(SymbolState state,
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
 		LocalDate dayFromTimeMs = timeTr.toLocalDate();
+		boolean baselinesReady = state.indicators.baselinesReady(props.warmupMin5mBars());
 		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
+		node.put("strategy", "ELITE_V1");
+		node.put("tfDecision", "5m");
+		node.put("tfExecution", "1m");
+		node.put("version", "20260207-elitev1-logv2");
 		node.put("timeMs", timeMs);
 		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
 		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
 		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
 		node.put("entriesToday", state.entriesToday);
-		node.put("baselinesReady", state.indicators.baselinesReady(props.warmupMin5mBars()));
-		if (metrics != null) {
+		node.put("baselinesReady", baselinesReady);
+
+		String effectiveAction = action;
+		String effectiveMatchedSetup = matchedSetup;
+		String effectiveBlockReason = blockReason;
+		List<String> invalidReasons = new ArrayList<>();
+
+		if (!baselinesReady) {
+			effectiveAction = "INPUTS_NOT_READY";
+			effectiveMatchedSetup = null;
+			effectiveBlockReason = "INPUTS_NOT_READY";
+			applyWarmupNotReadyFields(node, props.warmupMin5mBars(), state.indicators.barCount());
+		} else {
 			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
 			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
 			ObjectNode metricNode = node.putObject("metrics");
-			metricNode.put("bbWidth", metrics.bbWidth_5m);
-			metricNode.put("bwRatio", metrics.bwRatio5m);
-			metricNode.put("volRatio", metrics.volRatio);
-			metricNode.put("ema20DistPct", metrics.ema20DistPct);
-			metricNode.put("percentB", metrics.bbPercentB_5m);
-			metricNode.put("macdRatio", metrics.macdRatio5m);
-			metricNode.put("atrRatio", metrics.atrRatio5m);
+			putMetric(metricNode, "bbWidth_5m", metrics.bbWidth_5m, invalidReasons, "bbWidth_5m");
+			putMetric(metricNode, "bwEma_5m", metrics.bwEma_5m, invalidReasons, "bwEma_5m");
+			putMetric(metricNode, "bwRatio_5m", metrics.bwRatio5m, invalidReasons, "bwRatio_5m");
+			putMetric(metricNode, "volRatio", metrics.volRatio, invalidReasons, "volRatio");
+			putMetric(metricNode, "volEma_5m", metrics.volEma_5m, invalidReasons, "volEma_5m");
+			putMetric(metricNode, "volRatioOfEma", metrics.volRatioOfEma, invalidReasons, "volRatioOfEma");
+			putMetric(metricNode, "ema20", metrics.ema20_5m, invalidReasons, "ema20");
+			putMetric(metricNode, "ema20DistPct", metrics.ema20DistPct, invalidReasons, "ema20DistPct");
+			putMetric(metricNode, "rsi9", metrics.rsi9_5m, invalidReasons, "rsi9");
+			putMetric(metricNode, "bbLower", metrics.bbLower, invalidReasons, "bbLower");
+			putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
+			putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
+			putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
+			putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
+			putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
+			putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
+			putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
+			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
+			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
+			node.put("inputsValid", invalidReasons.isEmpty());
+			var invalid = node.putArray("inputsInvalidReasons");
+			invalidReasons.forEach(invalid::add);
+			if (!invalidReasons.isEmpty()) {
+				effectiveAction = "INPUTS_NOT_READY";
+				effectiveMatchedSetup = null;
+				effectiveBlockReason = "INPUTS_NOT_READY";
+			}
 		}
-		node.put("action", action);
-		node.put("matchedSetup", matchedSetup);
-		node.put("blockReason", resolveDecisionBlockReason(action, blockReason));
+
+		node.put("action", effectiveAction);
+		node.put("matchedSetup", effectiveMatchedSetup);
+		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
 		ShortEvalResult resolvedShort = shortEvalResult == null ? ShortEvalResult.ofNotEvaluated() : shortEvalResult;
 		node.put("shortEliteMatched", resolvedShort.matched);
 		node.put("shortEliteMatchedSetup", resolvedShort.matchedSetup);
@@ -494,29 +532,29 @@ private void openPaperPosition(SymbolState state,
 	}
 
 
-	static String resolveDecisionBlockReason(String action, String blockReason) {
-		if (blockReason != null && !blockReason.isBlank()) {
-			return blockReason;
-		}
-		if ("ENTER_LONG".equals(action) || "ENTER_SHORT".equals(action)) {
-			return "ALLOWED";
-		}
-		if ("NO_ENTRY".equals(action)) {
-			return "NO_ENTRY";
-		}
-		if ("INPUTS_NOT_READY".equals(action)) {
-			return "INPUTS_NOT_READY";
-		}
-		if ("IN_POSITION".equals(action)) {
-			return "IN_POSITION";
-		}
-		if ("TRADDED_TODAY".equals(action)) {
-			return "TRADDED_TODAY";
-		}
-		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
+	static void applyWarmupNotReadyFields(ObjectNode node, int required5mBars, int have5mBars) {
+		node.put("rawRegimeTag", "UNKNOWN");
+		node.put("activeRegimeTag", "UNKNOWN");
+		node.putNull("metrics");
+		ObjectNode warmup = node.putObject("warmup");
+		warmup.put("required5mBars", required5mBars);
+		warmup.put("have5mBars", have5mBars);
+		warmup.put("missing5mBars", Math.max(0, required5mBars - have5mBars));
+		node.put("inputsValid", false);
+		var invalid = node.putArray("inputsInvalidReasons");
+		invalid.add("WARMUP");
 	}
 
-	private Path decisionPath(String symbol, LocalDate day) {
+	static void putMetric(ObjectNode metricNode, String key, double value, List<String> invalidReasons, String reasonKey) {
+		if (Double.isFinite(value)) {
+			metricNode.put(key, value);
+		} else {
+			metricNode.putNull(key);
+			invalidReasons.add(reasonKey);
+		}
+	}
+
+private Path decisionPath(String symbol, LocalDate day) {
 		return DECISION_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
 	}
 
@@ -776,8 +814,7 @@ private void openPaperPosition(SymbolState state,
 
 	private static final class IndicatorState {
 		private final Deque<Double> closeWindow20 = new ArrayDeque<>();
-		private final Deque<Double> volumeWindow20 = new ArrayDeque<>();
-		private final Deque<Double> trWindow14 = new ArrayDeque<>();
+				private final Deque<Double> trWindow14 = new ArrayDeque<>();
 		private double ema20;
 		private double ema20Prev;
 		private boolean ema20Ready;
@@ -807,18 +844,22 @@ private void openPaperPosition(SymbolState state,
 			updateEma20(bar.close());
 			updateRsi(bar.close());
 			double atr14 = updateAtr(bar);
-			double atrRatio = ratio(atr14, atrEma.update(atr14));
+			double atrEmaValue = atrEma.update(atr14);
+			double atrRatio = ratioOrNaN(atr14, atrEmaValue);
 			double bbWidth = computeBbWidth(bar.close());
-			double bwRatio = ratio(bbWidth, bwEma.update(bbWidth));
+			double bwEmaValue = bwEma.update(bbWidth);
+			double bwRatio = ratioOrNaN(bbWidth, bwEmaValue);
 
 			updateMacd(bar.close());
 			double macd = ema12 - ema26;
 			double macdDelta = macd - macdSignal;
-			double macdRatio = ratio(Math.abs(macdDelta), macdAbsEma.update(Math.abs(macdDelta)));
+			double macdAbsEmaValue = macdAbsEma.update(Math.abs(macdDelta));
+			double macdRatio = ratioOrNaN(Math.abs(macdDelta), macdAbsEmaValue);
 			double ema20Prev = this.ema20Prev;
 
-			double volRatio = ratio(bar.volume(), volEma.update(bar.volume()));
-			double volRatioOfEma = volRatioEma.initialized() ? ratio(volRatio, volRatioEma.update(volRatio)) : 1.0;
+			double volEmaValue = volEma.update(bar.volume());
+			double volRatio = ratioOrNaN(bar.volume(), volEmaValue);
+			double volRatioOfEma = volRatioEma.initialized() ? ratioOrNaN(volRatio, volRatioEma.update(volRatio)) : 1.0;
 			if (!volRatioEma.initialized()) {
 				volRatioEma.update(volRatio);
 			}
@@ -827,14 +868,14 @@ private void openPaperPosition(SymbolState state,
 			double sma = average(closeWindow20);
 			double bbUpper = sma + 2.0 * std;
 			double bbLower = sma - 2.0 * std;
-			double percentB = ratio(bar.close() - bbLower, Math.max(bbUpper - bbLower, 1e-9));
+			double percentB = ratioOrNaN(bar.close() - bbLower, Math.max(bbUpper - bbLower, 1e-9));
 			boolean bbOutside = bar.close() > bbUpper || bar.close() < bbLower;
 			double ema20DistPct = ratio(Math.abs(bar.close() - ema20), Math.max(bar.close(), 1e-9));
 			boolean ema20SlopeDown = ema20Ready && ema20 < ema20Prev;
 			double rsi = computeRsi();
 
-			latest = new Metrics(bbWidth, bwRatio, volRatio, volRatioOfEma, macdRatio, atrRatio,
-					ema20DistPct, percentB, rsi, bbOutside, bar.close(), ema20, ema20SlopeDown, macdDelta, RegimeTag.CHOP, RegimeTag.CHOP);
+			latest = new Metrics(bbWidth, bwEmaValue, bwRatio, volRatio, volEmaValue, volRatioOfEma, macdRatio, atrRatio,
+					ema20DistPct, percentB, rsi, bbLower, sma, bbUpper, bbOutside, bar.close(), ema20, ema20SlopeDown, macdDelta, macdAbsEmaValue, atr14, atrEmaValue, RegimeTag.CHOP, RegimeTag.CHOP);
 		}
 
 		private void setRegimes(RegimeTag raw, RegimeTag active) {
@@ -875,7 +916,6 @@ private void openPaperPosition(SymbolState state,
 				ema20 = ema(ema20, close, 20);
 			}
 			push(closeWindow20, close, 20);
-			push(volumeWindow20, close, 20);
 		}
 
 		private void updateRsi(double close) {
@@ -961,39 +1001,56 @@ private void openPaperPosition(SymbolState state,
 			return base <= 1e-9 ? 1.0 : value / base;
 		}
 
+		private double ratioOrNaN(double value, double base) {
+			return base <= 1e-9 ? Double.NaN : value / base;
+		}
+
 		private void push(Deque<Double> values, double value, int maxSize) {
 			values.addLast(value);
 			if (values.size() > maxSize) {
 				values.removeFirst();
 			}
 		}
+
+		private int barCount() {
+			return bars;
+		}
 	}
 
 	private record Metrics(
 			double bbWidth_5m,
+			double bwEma_5m,
 			double bwRatio5m,
 			double volRatio,
+			double volEma_5m,
 			double volRatioOfEma,
 			double macdRatio5m,
 			double atrRatio5m,
 			double ema20DistPct,
 			double bbPercentB_5m,
 			double rsi9_5m,
+			double bbLower,
+			double bbMiddle,
+			double bbUpper,
 			boolean bbOutside_5m,
 			double close5m,
 			double ema20_5m,
 			boolean ema20SlopeDown,
 			double macdDelta,
+			double macdAbsEma_5m,
+			double atr14,
+			double atrEma_5m,
 			RegimeTag rawRegimeTag,
 			RegimeTag activeRegimeTag) {
 
 		private Metrics withRegimes(RegimeTag raw, RegimeTag active) {
-			return new Metrics(bbWidth_5m, bwRatio5m, volRatio, volRatioOfEma, macdRatio5m, atrRatio5m,
-					ema20DistPct, bbPercentB_5m, rsi9_5m, bbOutside_5m, close5m, ema20_5m, ema20SlopeDown, macdDelta, raw, active);
+			return new Metrics(bbWidth_5m, bwEma_5m, bwRatio5m, volRatio, volEma_5m, volRatioOfEma, macdRatio5m, atrRatio5m,
+					ema20DistPct, bbPercentB_5m, rsi9_5m, bbLower, bbMiddle, bbUpper, bbOutside_5m,
+					close5m, ema20_5m, ema20SlopeDown, macdDelta, macdAbsEma_5m, atr14, atrEma_5m, raw, active);
 		}
 	}
 
-	private static final class Ewma {
+private static final class Ewma {
 		private final double alpha;
 		private boolean initialized;
 		private double value;
