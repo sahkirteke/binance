@@ -532,6 +532,31 @@ private void openPaperPosition(SymbolState state,
 	}
 
 
+	static String resolveDecisionBlockReason(String action, String blockReason) {
+		if (blockReason != null && !blockReason.isBlank()) {
+			return blockReason;
+		}
+		if ("ENTER_LONG".equals(action) || "ENTER_SHORT".equals(action)) {
+			return "ALLOWED";
+		}
+		if ("NO_ENTRY".equals(action)) {
+			return "NO_ENTRY";
+		}
+		if ("INPUTS_NOT_READY".equals(action)) {
+			return "INPUTS_NOT_READY";
+		}
+		if ("IN_POSITION".equals(action)) {
+			return "IN_POSITION";
+		}
+		if ("TRADDED_TODAY".equals(action)) {
+			return "TRADDED_TODAY";
+		}
+		if ("GLOBAL_MAX_OPEN_POS".equals(action)) {
+			return "GLOBAL_MAX_OPEN_POS";
+		}
+		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
+	}
+
 	static void applyWarmupNotReadyFields(ObjectNode node, int required5mBars, int have5mBars) {
 		node.put("rawRegimeTag", "UNKNOWN");
 		node.put("activeRegimeTag", "UNKNOWN");
