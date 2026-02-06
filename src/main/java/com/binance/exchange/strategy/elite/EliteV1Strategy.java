@@ -484,13 +484,36 @@ private void openPaperPosition(SymbolState state,
 		}
 		node.put("action", action);
 		node.put("matchedSetup", matchedSetup);
-		node.put("blockReason", blockReason);
+		node.put("blockReason", resolveDecisionBlockReason(action, blockReason));
 		ShortEvalResult resolvedShort = shortEvalResult == null ? ShortEvalResult.notEvaluated() : shortEvalResult;
 		node.put("shortEliteMatched", resolvedShort.matched);
 		node.put("shortEliteMatchedSetup", resolvedShort.matchedSetup);
 		var failArr = node.putArray("shortEliteFailReasons");
 		resolvedShort.failReasons.forEach(failArr::add);
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+	}
+
+
+	static String resolveDecisionBlockReason(String action, String blockReason) {
+		if (blockReason != null && !blockReason.isBlank()) {
+			return blockReason;
+		}
+		if ("ENTER_LONG".equals(action) || "ENTER_SHORT".equals(action)) {
+			return "ALLOWED";
+		}
+		if ("NO_ENTRY".equals(action)) {
+			return "NO_ENTRY";
+		}
+		if ("INPUTS_NOT_READY".equals(action)) {
+			return "INPUTS_NOT_READY";
+		}
+		if ("IN_POSITION".equals(action)) {
+			return "IN_POSITION";
+		}
+		if ("TRADDED_TODAY".equals(action)) {
+			return "TRADDED_TODAY";
+		}
+		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
 	}
 
 	private Path decisionPath(String symbol, LocalDate day) {

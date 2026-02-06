@@ -182,6 +182,18 @@ class EliteV1StrategyTest {
 		assertEquals(4, transition.incompleteCount());
 	}
 
+	@Test
+	void decisionBlockReasonShouldNeverBeBlank() {
+		assertEquals("INPUTS_NOT_READY", EliteV1Strategy.resolveDecisionBlockReason("INPUTS_NOT_READY", null));
+		assertEquals("IN_POSITION", EliteV1Strategy.resolveDecisionBlockReason("IN_POSITION", null));
+		assertEquals("TRADDED_TODAY", EliteV1Strategy.resolveDecisionBlockReason("TRADDED_TODAY", null));
+		assertEquals("SOME_GATE", EliteV1Strategy.resolveDecisionBlockReason("NO_ENTRY", "SOME_GATE"));
+		assertEquals("NO_ENTRY", EliteV1Strategy.resolveDecisionBlockReason("NO_ENTRY", null));
+		assertEquals("ALLOWED", EliteV1Strategy.resolveDecisionBlockReason("ENTER_LONG", null));
+		assertEquals("ALLOWED", EliteV1Strategy.resolveDecisionBlockReason("ENTER_SHORT", null));
+		assertEquals("GLOBAL_MAX_OPEN_POS", EliteV1Strategy.resolveDecisionBlockReason("GLOBAL_MAX_OPEN_POS", null));
+	}
+
 	private EliteV1Properties.ShortEliteMomentum momentumCfg() {
 		return new EliteV1Properties.ShortEliteMomentum(
 				0.35,
