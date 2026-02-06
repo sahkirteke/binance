@@ -182,6 +182,7 @@ public class EliteV1Strategy implements Strategy {
 			state.last1m.removeFirst();
 		}
 		checkPaperExit(state, bar1m);
+		logWarmupProgressIfDue(state);
 
 		BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
 		if (transition.incompleteBucketStartMs != null) {
@@ -211,19 +212,27 @@ public class EliteV1Strategy implements Strategy {
 		evaluateAt5m(state, bar5m);
 	}
 
+	private void logWarmupProgressIfDue(SymbolState state) {
+		if (state.warmupDoneLogged || state.seen1mCloses < state.nextWarmupProgressLogAt1m) {
+			return;
+		}
+		boolean seeded = state.indicators.baselineIndicatorsSeeded();
+		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={}/{} seen5m={}/{} seeded={} baselinesReady={}",
+				state.symbol,
+				state.seen1mCloses,
+				requiredWarmup1m,
+				state.seen5mCloses,
+				requiredWarmup5m,
+				seeded,
+				state.baselinesReady);
+		state.nextWarmupProgressLogAt1m += 60;
+	}
+
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
 		rollDay(state, bar5m.closeTime());
 		Metrics metrics = state.indicators.metrics();
 		boolean baselinesReady = isBaselinesReady(state, metrics);
 		state.baselinesReady = baselinesReady;
-		if (!baselinesReady && state.seen1mCloses > 0 && state.seen1mCloses % 60 == 0) {
-			LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={}/{} seen5m={}/{} baselinesReady=false",
-					state.symbol,
-					state.seen1mCloses,
-					requiredWarmup1m,
-					state.seen5mCloses,
-					requiredWarmup5m);
-		}
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
 			var at = Instant.ofEpochMilli(bar5m.closeTime());
@@ -799,6 +808,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private long seen5mCloses;
 		private boolean baselinesReady;
 		private boolean warmupDoneLogged;
+		private long nextWarmupProgressLogAt1m = 60;
 		private LocalDate dayKey;
 		private int entriesToday;
 		private Side positionSide = Side.NONE;
