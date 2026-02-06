@@ -16,7 +16,7 @@ binance:
   handshake-timeout-ms: 30000
 
 strategy:
-  active: CTI_LB
+  active: ELITE_V1
   reference-symbol: MANAUSDT
   trade-symbol: MANAUSDT
   trade-symbols:
@@ -233,6 +233,80 @@ strategy:
       bbWidthMin: 0.020
       ema20DistMin: 0.010
       adxMin: 25
+
+
+eliteV1:
+  mode: PAPER
+  timeframe: 1m
+  eval-every: 5m
+  symbols:
+    - ETHUSDT
+    - XRPUSDT
+    - DOGEUSDT
+    - LTCUSDT
+    - ADAUSDT
+    - AVAXUSDT
+    - ARBUSDT
+    - MANAUSDT
+    - XLMUSDT
+    - CHZUSDT
+    - ALGOUSDT
+    - BANDUSDT
+    - BATUSDT
+    - CHRUSDT
+    - POLUSDT
+    - BTCUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - AAVEUSDT
+    - TRXUSDT
+    - DOTUSDT
+    - ATOMUSDT
+    - NEARUSDT
+    - OPUSDT
+    - SANDUSDT
+    - APEUSDT
+  max-open-positions: 1
+  max-entries-per-symbol-per-day: 1
+  tp-pct: 0.004
+  sl-pct: 0.002
+  paper-notional: 50
+  time-stop-minutes: 20
+  conflict-resolution: SL_FIRST
+  inputs-not-ready-policy: NO_TRADE
+  long:
+    enabled: true
+    only-regime: CHOP
+    rsi-min: 35
+    rsi-max: 45
+    ema20-dist-min: 0.004
+    bb-percent-b-max: 0.62
+    enable-setup5-safety-gate: true
+    setup5:
+      max-bb-width: 0.0448
+      max-vol-ratio: 5.37
+      chop-max-bw-ratio: 0.95
+  short:
+    enabled: true
+    only-regime: TREND
+    veto:
+      bb-percent-b-min-exclusive: 0.15
+      ema20-dist-pct-max: 0.008
+      require-bb-outside-false: true
+    elite1:
+      pb-min: 0.40
+      pb-max: 0.65
+      bw-ratio-min: 1.40
+      bw-ratio-max: 2.50
+      vol-ratio-of-ema-max: 0.70
+      macd-ratio-min: 2.00
+    elite2:
+      pb-min: 0.35
+      pb-max: 0.40
+      bw-ratio-min: 1.40
+      bw-ratio-max: 2.50
+      vol-ratio-of-ema-max: 0.60
+      macd-ratio-min: 2.50
 
 warmup:
   enabled: true
