@@ -11,7 +11,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 
 @Validated
-@ConfigurationProperties(prefix = "eliteV1")
+@ConfigurationProperties(prefix = "elite-v1")
 public record EliteV1Properties(
 		@NotNull Mode mode,
 		@NotNull String zoneId,

@@ -235,7 +235,7 @@ strategy:
       adxMin: 25
 
 
-eliteV1:
+elite-v1:
   mode: PAPER
   zone-id: Europe/Istanbul
   symbols:
