@@ -189,7 +189,7 @@ public class EliteV1Strategy implements Strategy {
 		rollDay(state, bar5m.closeTime());
 		Metrics metrics = state.indicators.metrics();
 		if (metrics == null) {
-			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null);
+			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
 			return;
 		}
 
@@ -199,7 +199,7 @@ public class EliteV1Strategy implements Strategy {
 				globalOpenPositions.get(),
 				props.maxOpenPositionsGlobal());
 		if (preCheck.action != DecisionAction.CONTINUE) {
-			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics);
+			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null);
 			return;
 		}
 
@@ -207,21 +207,21 @@ public class EliteV1Strategy implements Strategy {
 		Candidate shortCandidate = evaluateShort(metrics);
 
 		if (longCandidate.enter && shortCandidate.enter) {
-			writeDecision(state, bar5m, "NO_ENTRY", null, "BOTH_SIDES_MATCHED", metrics);
+			writeDecision(state, bar5m, "NO_ENTRY", null, "BOTH_SIDES_MATCHED", metrics, ShortEvalResult.conflict());
 			return;
 		}
 		if (longCandidate.enter) {
 			openPaperPosition(state, bar5m, Side.LONG, longCandidate.setup, metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_LONG", longCandidate.setup, null, metrics);
+			writeDecision(state, bar5m, "ENTER_LONG", longCandidate.setup, null, metrics, null);
 			return;
 		}
 		if (shortCandidate.enter) {
 			openPaperPosition(state, bar5m, Side.SHORT, shortCandidate.setup, metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_SHORT", shortCandidate.setup, null, metrics);
+			writeDecision(state, bar5m, "ENTER_SHORT", shortCandidate.setup, null, metrics, shortCandidate.shortEvalResult);
 			return;
 		}
 		String blockReason = shortCandidate.blockReason != null ? shortCandidate.blockReason : longCandidate.blockReason;
-		writeDecision(state, bar5m, "NO_ENTRY", null, blockReason, metrics);
+		writeDecision(state, bar5m, "NO_ENTRY", null, blockReason, metrics, shortCandidate.shortEvalResult);
 	}
 
 	private void rollDay(SymbolState state, long closeTimeMs) {
@@ -254,61 +254,101 @@ public class EliteV1Strategy implements Strategy {
 
 	private Candidate evaluateLong(Metrics m) {
 		if (!props.longConfig().enabled() || m.activeRegimeTag != RegimeTag.CHOP) {
-			return Candidate.noEntry(null);
+			return Candidate.noEntry(null, null);
 		}
 		boolean match = m.rsi9_5m >= props.longConfig().rsiMin()
 				&& m.rsi9_5m <= props.longConfig().rsiMax()
 				&& m.ema20DistPct >= props.longConfig().ema20DistMin()
 				&& m.bbPercentB_5m <= props.longConfig().bbPercentBMax();
 		if (!match) {
-			return Candidate.noEntry(null);
+			return Candidate.noEntry(null, null);
 		}
 		if (props.longConfig().enableSetup5SafetyGate()) {
 			if (m.bbWidth_5m >= props.longConfig().setup5().maxBbWidth()) {
-				return Candidate.noEntry("SETUP5_BLOCK_BBWIDTH_TOO_WIDE");
+				return Candidate.noEntry("SETUP5_BLOCK_BBWIDTH_TOO_WIDE", null);
 			}
 			if (m.volRatio >= props.longConfig().setup5().maxVolRatio()) {
-				return Candidate.noEntry("SETUP5_BLOCK_VOL_SPIKE");
+				return Candidate.noEntry("SETUP5_BLOCK_VOL_SPIKE", null);
 			}
 			if (m.bwRatio5m > props.longConfig().setup5().chopMaxBwRatio()) {
-				return Candidate.noEntry("SETUP5_BLOCK_CHOP_BWRATIO");
+				return Candidate.noEntry("SETUP5_BLOCK_CHOP_BWRATIO", null);
 			}
 		}
-		return Candidate.enter("SETUP5_ELITE");
+		return Candidate.enter("SETUP5_ELITE", null);
+	}
+
+	static List<String> evaluateShortMomentumFailures(double pb,
+			double bwRatio,
+			double volRatioOfEma,
+			double close5m,
+			double ema20_5m,
+			boolean ema20SlopeDown,
+			double macdDelta,
+			double macdRatio5m,
+			EliteV1Properties.ShortEliteMomentum cfg) {
+		List<String> fails = new ArrayList<>();
+		if (!(pb >= cfg.pbMin() && pb < cfg.pbMax())) {
+			fails.add("PB");
+		}
+		if (!(bwRatio >= cfg.bwRatioMin() && bwRatio < cfg.bwRatioMax())) {
+			fails.add("BWRATIO");
+		}
+		if (!(volRatioOfEma >= cfg.volRatioOfEmaMin() && volRatioOfEma <= cfg.volRatioOfEmaMax())) {
+			fails.add("VOL");
+		}
+		if (cfg.requireCloseBelowEma20() && !(close5m < ema20_5m)) {
+			fails.add("CLOSE_BELOW_EMA20");
+		}
+		if (cfg.requireEma20SlopeDown() && !ema20SlopeDown) {
+			fails.add("EMA20_SLOPE");
+		}
+		if (cfg.requireMacdDeltaNegative() && !(macdDelta < 0.0)) {
+			fails.add("MACD_DELTA");
+		}
+		if (macdRatio5m < cfg.macdRatioMin()) {
+			fails.add("MACD_RATIO");
+		}
+		return fails;
 	}
 
 	private Candidate evaluateShort(Metrics m) {
-		if (!props.shortConfig().enabled() || m.activeRegimeTag != RegimeTag.TREND) {
-			return Candidate.noEntry(null);
+		if (!props.shortConfig().enabled()) {
+			return Candidate.noEntry(null, ShortEvalResult.notEvaluated());
+		}
+		if (m.rawRegimeTag != m.activeRegimeTag) {
+			return Candidate.noEntry("SHORT_DISABLE_REGIME_LAG", ShortEvalResult.regimeFail());
+		}
+		if (m.activeRegimeTag != RegimeTag.TREND) {
+			return Candidate.noEntry(null, ShortEvalResult.regimeFail());
 		}
 		if (m.bbOutside_5m && props.shortConfig().veto().requireBbOutsideFalse()) {
-			return Candidate.noEntry("SHORT_VETO_BB_OUTSIDE");
+			return Candidate.noEntry("SHORT_VETO_BB_OUTSIDE", ShortEvalResult.veto());
 		}
 		if (m.bbPercentB_5m <= props.shortConfig().veto().bbPercentBMinExclusive()) {
-			return Candidate.noEntry("SHORT_VETO_PB_TOO_LOW");
+			return Candidate.noEntry("SHORT_VETO_PB_TOO_LOW", ShortEvalResult.veto());
 		}
 		if (m.ema20DistPct > props.shortConfig().veto().ema20DistPctMax()) {
-			return Candidate.noEntry("SHORT_VETO_EMA20_CHASE");
+			return Candidate.noEntry("SHORT_VETO_EMA20_CHASE", ShortEvalResult.veto());
 		}
-		if (matchShortBand(m, props.shortConfig().elite1())) {
-			return Candidate.enter("SHORT_ELITE_1");
+
+		EliteV1Properties.ShortEliteMomentum cfg = props.shortConfig().eliteMomentum();
+		List<String> fails = evaluateShortMomentumFailures(
+				m.bbPercentB_5m,
+				m.bwRatio5m,
+				m.volRatioOfEma,
+				m.close5m,
+				m.ema20_5m,
+				m.ema20SlopeDown,
+				m.macdDelta,
+				m.macdRatio5m,
+				cfg);
+		if (!fails.isEmpty()) {
+			return Candidate.noEntry("NO_SHORT_ELITE_MATCH", ShortEvalResult.fail(fails));
 		}
-		if (matchShortBand(m, props.shortConfig().elite2())) {
-			return Candidate.enter("SHORT_ELITE_2");
-		}
-		return Candidate.noEntry("NO_SHORT_ELITE_MATCH");
+		return Candidate.enter("SHORT_ELITE_MOMENTUM", ShortEvalResult.matched());
 	}
 
-	private boolean matchShortBand(Metrics m, EliteV1Properties.ShortEliteBand band) {
-		return m.bbPercentB_5m >= band.pbMin()
-				&& m.bbPercentB_5m < band.pbMax()
-				&& m.bwRatio5m >= band.bwRatioMin()
-				&& m.bwRatio5m < band.bwRatioMax()
-				&& m.volRatioOfEma <= band.volRatioOfEmaMax()
-				&& m.macdRatio5m >= band.macdRatioMin();
-	}
-
-	private void openPaperPosition(SymbolState state,
+private void openPaperPosition(SymbolState state,
 			Candle bar5m,
 			Side side,
 			String matchedSetup,
@@ -406,7 +446,8 @@ public class EliteV1Strategy implements Strategy {
 			String action,
 			String matchedSetup,
 			String blockReason,
-			Metrics metrics) {
+			Metrics metrics,
+			ShortEvalResult shortEvalResult) {
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
@@ -429,6 +470,11 @@ public class EliteV1Strategy implements Strategy {
 		node.put("action", action);
 		node.put("matchedSetup", matchedSetup);
 		node.put("blockReason", blockReason);
+		ShortEvalResult resolvedShort = shortEvalResult == null ? ShortEvalResult.notEvaluated() : shortEvalResult;
+		node.put("shortEliteMatched", resolvedShort.matched);
+		node.put("shortEliteMatchedSetup", resolvedShort.matchedSetup);
+		var failArr = node.putArray("shortEliteFailReasons");
+		resolvedShort.failReasons.forEach(failArr::add);
 		writer.write(decisionPath(state.symbol, state.dayKey), node.toString(), false);
 	}
 
@@ -536,17 +582,43 @@ public class EliteV1Strategy implements Strategy {
 	record PreCheckAction(DecisionAction action, String blockReason) {
 	}
 
-	private record Candidate(boolean enter, String setup, String blockReason) {
-		private static Candidate enter(String setup) {
-			return new Candidate(true, setup, null);
+	private record Candidate(boolean enter, String setup, String blockReason, ShortEvalResult shortEvalResult) {
+		private static Candidate enter(String setup, ShortEvalResult shortEvalResult) {
+			return new Candidate(true, setup, null, shortEvalResult);
 		}
 
-		private static Candidate noEntry(String blockReason) {
-			return new Candidate(false, null, blockReason);
+		private static Candidate noEntry(String blockReason, ShortEvalResult shortEvalResult) {
+			return new Candidate(false, null, blockReason, shortEvalResult);
 		}
 	}
 
-	private static final class SymbolState {
+	private record ShortEvalResult(boolean matched, String matchedSetup, List<String> failReasons) {
+		private static ShortEvalResult matched() {
+			return new ShortEvalResult(true, "SHORT_ELITE_MOMENTUM", List.of());
+		}
+
+		private static ShortEvalResult fail(List<String> failReasons) {
+			return new ShortEvalResult(false, null, failReasons);
+		}
+
+		private static ShortEvalResult veto() {
+			return new ShortEvalResult(false, null, List.of());
+		}
+
+		private static ShortEvalResult regimeFail() {
+			return new ShortEvalResult(false, null, List.of("REGIME"));
+		}
+
+		private static ShortEvalResult notEvaluated() {
+			return new ShortEvalResult(false, null, List.of());
+		}
+
+		private static ShortEvalResult conflict() {
+			return new ShortEvalResult(false, null, List.of("REGIME"));
+		}
+	}
+
+private static final class SymbolState {
 		private final String symbol;
 		private LocalDate dayKey;
 		private int entriesToday;
@@ -620,6 +692,7 @@ public class EliteV1Strategy implements Strategy {
 		private final Deque<Double> volumeWindow20 = new ArrayDeque<>();
 		private final Deque<Double> trWindow14 = new ArrayDeque<>();
 		private double ema20;
+		private double ema20Prev;
 		private boolean ema20Ready;
 		private double prevClose;
 		private boolean prevCloseReady;
@@ -655,6 +728,7 @@ public class EliteV1Strategy implements Strategy {
 			double macd = ema12 - ema26;
 			double macdDelta = macd - macdSignal;
 			double macdRatio = ratio(Math.abs(macdDelta), macdAbsEma.update(Math.abs(macdDelta)));
+			double ema20Prev = this.ema20Prev;
 
 			double volRatio = ratio(bar.volume(), volEma.update(bar.volume()));
 			double volRatioOfEma = volRatioEma.initialized() ? ratio(volRatio, volRatioEma.update(volRatio)) : 1.0;
@@ -669,10 +743,11 @@ public class EliteV1Strategy implements Strategy {
 			double percentB = ratio(bar.close() - bbLower, Math.max(bbUpper - bbLower, 1e-9));
 			boolean bbOutside = bar.close() > bbUpper || bar.close() < bbLower;
 			double ema20DistPct = ratio(Math.abs(bar.close() - ema20), Math.max(bar.close(), 1e-9));
+			boolean ema20SlopeDown = ema20Ready && ema20 < ema20Prev;
 			double rsi = computeRsi();
 
 			latest = new Metrics(bbWidth, bwRatio, volRatio, volRatioOfEma, macdRatio, atrRatio,
-					ema20DistPct, percentB, rsi, bbOutside, RegimeTag.CHOP, RegimeTag.CHOP);
+					ema20DistPct, percentB, rsi, bbOutside, bar.close(), ema20, ema20SlopeDown, macdDelta, RegimeTag.CHOP, RegimeTag.CHOP);
 		}
 
 		private void setRegimes(RegimeTag raw, RegimeTag active) {
@@ -706,8 +781,10 @@ public class EliteV1Strategy implements Strategy {
 		private void updateEma20(double close) {
 			if (!ema20Ready) {
 				ema20 = close;
+				ema20Prev = close;
 				ema20Ready = true;
 			} else {
+				ema20Prev = ema20;
 				ema20 = ema(ema20, close, 20);
 			}
 			push(closeWindow20, close, 20);
@@ -816,6 +893,10 @@ public class EliteV1Strategy implements Strategy {
 			double bbPercentB_5m,
 			double rsi9_5m,
 			boolean bbOutside_5m,
+			double close5m,
+			double ema20_5m,
+			boolean ema20SlopeDown,
+			double macdDelta,
 			RegimeTag rawRegimeTag,
 			RegimeTag activeRegimeTag) {
 

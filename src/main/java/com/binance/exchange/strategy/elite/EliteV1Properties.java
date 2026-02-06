@@ -71,8 +71,7 @@ public record EliteV1Properties(
 			boolean enabled,
 			@NotNull Regime onlyRegime,
 			@NotNull ShortVeto veto,
-			@NotNull ShortEliteBand elite1,
-			@NotNull ShortEliteBand elite2) {
+			@NotNull ShortEliteMomentum eliteMomentum) {
 	}
 
 	public record ShortVeto(
@@ -81,12 +80,16 @@ public record EliteV1Properties(
 			boolean requireBbOutsideFalse) {
 	}
 
-	public record ShortEliteBand(
+	public record ShortEliteMomentum(
 			double pbMin,
 			double pbMax,
 			double bwRatioMin,
 			double bwRatioMax,
+			double volRatioOfEmaMin,
 			double volRatioOfEmaMax,
-			double macdRatioMin) {
+			double macdRatioMin,
+			boolean requireCloseBelowEma20,
+			boolean requireEma20SlopeDown,
+			boolean requireMacdDeltaNegative) {
 	}
 }

@@ -1,7 +1,10 @@
 package com.binance.exchange.strategy.elite;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
@@ -82,5 +85,85 @@ class EliteV1StrategyTest {
 				1);
 		assertEquals(EliteV1Strategy.DecisionAction.TRADDED_TODAY, action.action());
 		assertEquals("TRADDED_TODAY", action.blockReason());
+	}
+
+	@Test
+	void shortEliteMomentumAllMatchShouldPass() {
+		var cfg = momentumCfg();
+		List<String> fails = EliteV1Strategy.evaluateShortMomentumFailures(
+				0.40,
+				1.60,
+				1.40,
+				99.0,
+				100.0,
+				true,
+				-0.1,
+				2.60,
+				cfg);
+		assertTrue(fails.isEmpty());
+	}
+
+	@Test
+	void shortEliteMomentumCloseAboveEmaShouldFailCloseBelowEma20() {
+		var cfg = momentumCfg();
+		List<String> fails = EliteV1Strategy.evaluateShortMomentumFailures(
+				0.40,
+				1.60,
+				1.40,
+				100.0,
+				100.0,
+				true,
+				-0.1,
+				2.60,
+				cfg);
+		assertTrue(fails.contains("CLOSE_BELOW_EMA20"));
+	}
+
+	@Test
+	void shortEliteMomentumEma20SlopeUpShouldFailSlope() {
+		var cfg = momentumCfg();
+		List<String> fails = EliteV1Strategy.evaluateShortMomentumFailures(
+				0.40,
+				1.60,
+				1.40,
+				99.0,
+				100.0,
+				false,
+				-0.1,
+				2.60,
+				cfg);
+		assertTrue(fails.contains("EMA20_SLOPE"));
+	}
+
+	@Test
+	void shortEliteMomentumMissingVolRatioShouldFailVol() {
+		var cfg = momentumCfg();
+		double missingVolRatioOfEma = 1.0;
+		List<String> fails = EliteV1Strategy.evaluateShortMomentumFailures(
+				0.40,
+				1.60,
+				missingVolRatioOfEma,
+				99.0,
+				100.0,
+				true,
+				-0.1,
+				2.60,
+				cfg);
+		assertFalse(fails.isEmpty());
+		assertTrue(fails.contains("VOL"));
+	}
+
+	private EliteV1Properties.ShortEliteMomentum momentumCfg() {
+		return new EliteV1Properties.ShortEliteMomentum(
+				0.35,
+				0.60,
+				1.40,
+				2.80,
+				1.10,
+				2.50,
+				2.50,
+				true,
+				true,
+				true);
 	}
 }

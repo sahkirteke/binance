@@ -297,20 +297,17 @@ elite-v1:
       bb-percent-b-min-exclusive: 0.15
       ema20-dist-pct-max: 0.008
       require-bb-outside-false: true
-    elite1:
-      pb-min: 0.40
-      pb-max: 0.65
-      bw-ratio-min: 1.40
-      bw-ratio-max: 2.50
-      vol-ratio-of-ema-max: 0.70
-      macd-ratio-min: 2.00
-    elite2:
+    elite-momentum:
       pb-min: 0.35
-      pb-max: 0.40
+      pb-max: 0.60
       bw-ratio-min: 1.40
-      bw-ratio-max: 2.50
-      vol-ratio-of-ema-max: 0.60
+      bw-ratio-max: 2.80
+      vol-ratio-of-ema-min: 1.10
+      vol-ratio-of-ema-max: 2.50
       macd-ratio-min: 2.50
+      require-close-below-ema20: true
+      require-ema20-slope-down: true
+      require-macd-delta-negative: true
 warmup:
   enabled: true
   candles1m: 250
