@@ -92,6 +92,7 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 		writer.start();
+		validateConfig();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
 
@@ -179,12 +180,13 @@ public class EliteV1Strategy implements Strategy {
 		if (!Objects.equals(dayKey, state.dayKey)) {
 			state.dayKey = dayKey;
 			state.tradedToday = false;
+			state.entriesToday = 0;
 		}
 
 		PreCheckAction preCheck = evaluatePreChecks(
-				state.indicators.barCount() >= MIN_5M_BARS,
+				state.indicators.baselinesReady(),
 				state.positionSide,
-				state.tradedToday,
+				state.tradedToday || state.entriesToday >= props.maxEntriesPerSymbolPerDay(),
 				openPositionCount(),
 				props.maxOpenPositions());
 		if (preCheck.action() != DecisionAction.CONTINUE) {
@@ -260,7 +262,7 @@ public class EliteV1Strategy implements Strategy {
 		}
 
 		if (props.shortConfig().enabled() && activeRegime == RegimeTag.TREND) {
-			if (m.bbOutside_5m) {
+			if (props.shortConfig().veto().requireBbOutsideFalse() && m.bbOutside_5m) {
 				return Candidate.blocked("SHORT_VETO_BB_OUTSIDE");
 			}
 			if (m.bbPercentB_5m <= props.shortConfig().veto().bbPercentBMinExclusive()) {
@@ -327,6 +329,7 @@ public class EliteV1Strategy implements Strategy {
 		state.qty = qty;
 		state.entryTimeMs = bar5m.closeTime();
 		state.order = new VirtualBracketOrder(UUID.randomUUID().toString(), tpPrice, slPrice, state.entryTimeMs);
+		state.entriesToday++;
 		state.tpRaw = tpRaw;
 		state.slRaw = slRaw;
 		writeTradeEntry(state, candidate.setup);
@@ -495,6 +498,18 @@ public class EliteV1Strategy implements Strategy {
 		return DAY_FMT.format(date);
 	}
 
+	private void validateConfig() {
+		if (!"1m".equalsIgnoreCase(props.timeframe())) {
+			throw new IllegalStateException("ELITE_V1 timeframe must be 1m");
+		}
+		if (!"5m".equalsIgnoreCase(props.evalEvery())) {
+			throw new IllegalStateException("ELITE_V1 evalEvery must be 5m");
+		}
+		if (props.inputsNotReadyPolicy() != EliteV1Properties.InputsNotReadyPolicy.NO_TRADE) {
+			throw new IllegalStateException("ELITE_V1 supports only inputsNotReadyPolicy=NO_TRADE");
+		}
+	}
+
 	enum Side {
 		NONE,
 		LONG,
@@ -579,6 +594,7 @@ public class EliteV1Strategy implements Strategy {
 		private final RegimeState regimeState = new RegimeState();
 		private String dayKey;
 		private boolean tradedToday;
+		private int entriesToday;
 		private Side positionSide = Side.NONE;
 		private double entryPrice;
 		private double qty;
@@ -645,6 +661,8 @@ public class EliteV1Strategy implements Strategy {
 		private boolean ema20Ready;
 		private double prevClose;
 		private boolean prevCloseReady;
+		private double prevCloseAtr;
+		private boolean prevCloseAtrReady;
 		private double avgGain;
 		private double avgLoss;
 		private int rsiCounter;
@@ -661,6 +679,8 @@ public class EliteV1Strategy implements Strategy {
 		private final Ewma volumeEma = new Ewma(20);
 		private final Ewma volRatioEma = new Ewma(20);
 		private Metrics latest;
+		private boolean baselinesReady;
+		private int regimeReadyBars;
 
 		private void update(Candle bar) {
 			barCount++;
@@ -700,10 +720,13 @@ public class EliteV1Strategy implements Strategy {
 			double ema20DistPct = ratio(Math.abs(close - ema20), Math.max(close, 1e-9));
 			double rsi = computeRsi();
 
-			boolean readyForRegime = barCount >= MIN_5M_BARS
-					&& bwEma.initialized()
+			boolean readyForRegime = bwEma.initialized()
 					&& atrEma.initialized()
 					&& macdAbsEma.initialized();
+			if (readyForRegime) {
+				regimeReadyBars++;
+			}
+			baselinesReady = readyForRegime && regimeReadyBars >= MIN_5M_BARS;
 
 			latest = new Metrics(
 					bbWidth,
@@ -753,12 +776,14 @@ public class EliteV1Strategy implements Strategy {
 
 		private double updateAtr(Candle bar) {
 			double tr;
-			if (!prevCloseReady) {
+			if (!prevCloseAtrReady) {
 				tr = bar.high() - bar.low();
+				prevCloseAtrReady = true;
 			} else {
 				tr = Math.max(bar.high() - bar.low(),
-						Math.max(Math.abs(bar.high() - prevClose), Math.abs(bar.low() - prevClose)));
+						Math.max(Math.abs(bar.high() - prevCloseAtr), Math.abs(bar.low() - prevCloseAtr)));
 			}
+			prevCloseAtr = bar.close();
 			push(trWindow14, tr, 14);
 			return tr;
 		}
@@ -839,6 +864,10 @@ public class EliteV1Strategy implements Strategy {
 
 		private int barCount() {
 			return barCount;
+		}
+
+		private boolean baselinesReady() {
+			return baselinesReady;
 		}
 	}
 
