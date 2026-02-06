@@ -198,6 +198,13 @@ public class EliteV1Strategy implements Strategy {
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
 		rollDay(state, bar5m.closeTime());
 		boolean baselinesReady = state.indicators.baselinesReady(props.warmupMin5mBars());
+		if (baselinesReady && !state.warmupDoneLogged) {
+			state.warmupDoneLogged = true;
+			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} required5mBars={} have5mBars={}",
+					state.symbol,
+					props.warmupMin5mBars(),
+					state.indicators.barCount());
+		}
 		Metrics metrics = state.indicators.metrics();
 		if (!baselinesReady || metrics == null) {
 			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
@@ -721,6 +728,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 
 	private static final class SymbolState {
 		private final String symbol;
+		private boolean warmupDoneLogged;
 		private LocalDate dayKey;
 		private int entriesToday;
 		private Side positionSide = Side.NONE;
