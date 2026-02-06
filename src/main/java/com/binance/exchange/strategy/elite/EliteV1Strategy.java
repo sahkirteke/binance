@@ -217,7 +217,7 @@ public class EliteV1Strategy implements Strategy {
 		Candidate shortCandidate = evaluateShort(metrics);
 
 		if (longCandidate.enter && shortCandidate.enter) {
-			writeDecision(state, bar5m, "NO_ENTRY", null, "BOTH_SIDES_MATCHED", metrics, ShortEvalResult.conflict());
+			writeDecision(state, bar5m, "NO_ENTRY", null, "BOTH_SIDES_MATCHED", metrics, ShortEvalResult.ofConflict());
 			return;
 		}
 		if (longCandidate.enter) {
@@ -323,22 +323,22 @@ public class EliteV1Strategy implements Strategy {
 
 	private Candidate evaluateShort(Metrics m) {
 		if (!props.shortConfig().enabled()) {
-			return Candidate.noEntry(null, ShortEvalResult.notEvaluated());
+			return Candidate.noEntry(null, ShortEvalResult.ofNotEvaluated());
 		}
 		if (m.rawRegimeTag != m.activeRegimeTag) {
-			return Candidate.noEntry("SHORT_DISABLE_REGIME_LAG", ShortEvalResult.regimeFail());
+			return Candidate.noEntry("SHORT_DISABLE_REGIME_LAG", ShortEvalResult.ofRegimeFail());
 		}
 		if (m.activeRegimeTag != RegimeTag.TREND) {
-			return Candidate.noEntry(null, ShortEvalResult.regimeFail());
+			return Candidate.noEntry(null, ShortEvalResult.ofRegimeFail());
 		}
 		if (m.bbOutside_5m && props.shortConfig().veto().requireBbOutsideFalse()) {
-			return Candidate.noEntry("SHORT_VETO_BB_OUTSIDE", ShortEvalResult.veto());
+			return Candidate.noEntry("SHORT_VETO_BB_OUTSIDE", ShortEvalResult.ofVeto());
 		}
 		if (m.bbPercentB_5m <= props.shortConfig().veto().bbPercentBMinExclusive()) {
-			return Candidate.noEntry("SHORT_VETO_PB_TOO_LOW", ShortEvalResult.veto());
+			return Candidate.noEntry("SHORT_VETO_PB_TOO_LOW", ShortEvalResult.ofVeto());
 		}
 		if (m.ema20DistPct > props.shortConfig().veto().ema20DistPctMax()) {
-			return Candidate.noEntry("SHORT_VETO_EMA20_CHASE", ShortEvalResult.veto());
+			return Candidate.noEntry("SHORT_VETO_EMA20_CHASE", ShortEvalResult.ofVeto());
 		}
 
 		EliteV1Properties.ShortEliteMomentum cfg = props.shortConfig().eliteMomentum();
@@ -353,9 +353,9 @@ public class EliteV1Strategy implements Strategy {
 				m.macdRatio5m,
 				cfg);
 		if (!fails.isEmpty()) {
-			return Candidate.noEntry("NO_SHORT_ELITE_MATCH", ShortEvalResult.fail(fails));
+			return Candidate.noEntry("NO_SHORT_ELITE_MATCH", ShortEvalResult.ofFail(fails));
 		}
-		return Candidate.enter("SHORT_ELITE_MOMENTUM", ShortEvalResult.matched());
+		return Candidate.enter("SHORT_ELITE_MOMENTUM", ShortEvalResult.ofMatched());
 	}
 
 private void openPaperPosition(SymbolState state,
@@ -485,7 +485,7 @@ private void openPaperPosition(SymbolState state,
 		node.put("action", action);
 		node.put("matchedSetup", matchedSetup);
 		node.put("blockReason", resolveDecisionBlockReason(action, blockReason));
-		ShortEvalResult resolvedShort = shortEvalResult == null ? ShortEvalResult.notEvaluated() : shortEvalResult;
+		ShortEvalResult resolvedShort = shortEvalResult == null ? ShortEvalResult.ofNotEvaluated() : shortEvalResult;
 		node.put("shortEliteMatched", resolvedShort.matched);
 		node.put("shortEliteMatchedSetup", resolvedShort.matchedSetup);
 		var failArr = node.putArray("shortEliteFailReasons");
@@ -631,27 +631,27 @@ private void openPaperPosition(SymbolState state,
 	}
 
 	private record ShortEvalResult(boolean matched, String matchedSetup, List<String> failReasons) {
-		private static ShortEvalResult matched() {
+		private static ShortEvalResult ofMatched() {
 			return new ShortEvalResult(true, "SHORT_ELITE_MOMENTUM", List.of());
 		}
 
-		private static ShortEvalResult fail(List<String> failReasons) {
+		private static ShortEvalResult ofFail(List<String> failReasons) {
 			return new ShortEvalResult(false, null, failReasons);
 		}
 
-		private static ShortEvalResult veto() {
+		private static ShortEvalResult ofVeto() {
 			return new ShortEvalResult(false, null, List.of());
 		}
 
-		private static ShortEvalResult regimeFail() {
+		private static ShortEvalResult ofRegimeFail() {
 			return new ShortEvalResult(false, null, List.of("REGIME"));
 		}
 
-		private static ShortEvalResult notEvaluated() {
+		private static ShortEvalResult ofNotEvaluated() {
 			return new ShortEvalResult(false, null, List.of());
 		}
 
-		private static ShortEvalResult conflict() {
+		private static ShortEvalResult ofConflict() {
 			return new ShortEvalResult(false, null, List.of("REGIME"));
 		}
 	}
@@ -989,7 +989,7 @@ private void openPaperPosition(SymbolState state,
 
 		private Metrics withRegimes(RegimeTag raw, RegimeTag active) {
 			return new Metrics(bbWidth_5m, bwRatio5m, volRatio, volRatioOfEma, macdRatio5m, atrRatio5m,
-					ema20DistPct, bbPercentB_5m, rsi9_5m, bbOutside_5m, raw, active);
+					ema20DistPct, bbPercentB_5m, rsi9_5m, bbOutside_5m, close5m, ema20_5m, ema20SlopeDown, macdDelta, raw, active);
 		}
 	}
 
