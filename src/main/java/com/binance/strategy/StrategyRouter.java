@@ -7,6 +7,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import com.binance.exchange.strategy.elite.EliteV1Strategy;
+
 @Component
 public class StrategyRouter {
 
@@ -16,6 +18,7 @@ public class StrategyRouter {
 	private final CtiLbStrategy ctiLbStrategy;
 	private final TimeSyncService timeSyncService;
 	private final WarmupProperties warmupProperties;
+	private final EliteV1Strategy eliteV1Strategy;
 	private final CtiScoreCalculator scoreCalculator = new CtiScoreCalculator();
 	private final Map<String, ScoreSignalIndicator> indicators = new ConcurrentHashMap<>();
 	private final Map<String, Long> warmupFinishedAtMs = new ConcurrentHashMap<>();
@@ -23,37 +26,38 @@ public class StrategyRouter {
  	public StrategyRouter(StrategyProperties strategyProperties,
                           CtiLbStrategy ctiLbStrategy,
                           TimeSyncService timeSyncService,
-                          WarmupProperties warmupProperties ) {
+                          WarmupProperties warmupProperties,
+                          EliteV1Strategy eliteV1Strategy ) {
 		this.strategyProperties = strategyProperties;
 		this.ctiLbStrategy = ctiLbStrategy;
 		this.timeSyncService = timeSyncService;
 		this.warmupProperties = warmupProperties;
+		this.eliteV1Strategy = eliteV1Strategy;
     }
 
 	public void onClosedOneMinuteCandle(String symbol, Candle candle) {
-
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
-			LOGGER.debug("Closed candle ignored (active={}, closeTime={})",
-					strategyProperties.active(),
-					candle.closeTime());
+		StrategyType active = strategyProperties.active();
+		if (active == StrategyType.CTI_LB) {
+			ScoreSignalIndicator indicator = resolveIndicator(symbol);
+			Long warmupFinishedAt = warmupFinishedAtMs.get(symbol);
+			if (warmupFinishedAt != null
+					&& System.currentTimeMillis() - warmupFinishedAt < WARMUP_DUPLICATE_WINDOW_MS
+					&& indicator.isDuplicate1mClose(candle.closeTime())) {
+				return;
+			}
+			indicator.onClosedOneMinuteCandle(candle);
+			ctiLbStrategy.onClosedOneMinuteCandle(symbol, candle);
+			if (shouldSyncLive(symbol)) {
+				timeSyncService.recordClosedOneMinute(symbol, candle)
+						.ifPresent(closed5m -> handleClosedFiveMinute(symbol, closed5m));
+			}
 			return;
 		}
-
-		ScoreSignalIndicator indicator = resolveIndicator(symbol);
-		Long warmupFinishedAt = warmupFinishedAtMs.get(symbol);
-		if (warmupFinishedAt != null
-				&& System.currentTimeMillis() - warmupFinishedAt < WARMUP_DUPLICATE_WINDOW_MS
-				&& indicator.isDuplicate1mClose(candle.closeTime())) {
+		if (active == StrategyType.ELITE_V1) {
+			eliteV1Strategy.onExternalClosedOneMinuteCandle(symbol, candle);
 			return;
 		}
-		indicator.onClosedOneMinuteCandle(candle);
-		ctiLbStrategy.onClosedOneMinuteCandle(symbol, candle);
-		if (shouldSyncLive(symbol)) {
-			timeSyncService.recordClosedOneMinute(symbol, candle)
-					.ifPresent(closed5m -> {
-						handleClosedFiveMinute(symbol, closed5m);
-					});
-		}
+		LOGGER.debug("Closed candle ignored (active={}, closeTime={})", active, candle.closeTime());
 	}
 
 	public void onClosedFiveMinuteCandle(String symbol, Candle candle) {
@@ -67,22 +71,28 @@ public class StrategyRouter {
 	}
 
 	public void warmupOneMinuteCandle(String symbol, Candle candle) {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
+		StrategyType active = strategyProperties.active();
+		if (active == StrategyType.CTI_LB) {
+			resolveIndicator(symbol).warmupOneMinuteCandle(candle);
 			return;
 		}
-		resolveIndicator(symbol).warmupOneMinuteCandle(candle);
+		if (active == StrategyType.ELITE_V1) {
+			eliteV1Strategy.onExternalClosedOneMinuteCandle(symbol, candle);
+		}
 	}
 
 	public void warmupFiveMinuteCandle(String symbol, Candle candle) {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
-			return;
+		if (strategyProperties.active() == StrategyType.CTI_LB) {
+			ScoreSignalIndicator indicator = resolveIndicator(symbol);
+			ScoreSignal signal = indicator.onClosedFiveMinuteCandle(candle);
+			ctiLbStrategy.onWarmupFiveMinuteCandle(symbol, candle, signal);
 		}
-		ScoreSignalIndicator indicator = resolveIndicator(symbol);
-		ScoreSignal signal = indicator.onClosedFiveMinuteCandle(candle);
-		ctiLbStrategy.onWarmupFiveMinuteCandle(symbol, candle, signal);
 	}
 
 	public boolean isWarmupReady(String symbol) {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			return eliteV1Strategy.isWarmupReady(symbol);
+		}
 		ScoreSignalIndicator indicator = indicators.get(symbol);
 		return indicator != null && indicator.isWarmupReady();
 	}
@@ -94,6 +104,40 @@ public class StrategyRouter {
 
 	public void markWarmupFinished(String symbol, long finishedAtMs) {
 		warmupFinishedAtMs.put(symbol, finishedAtMs);
+	}
+
+	public boolean needsKlines() {
+		return needsKlines(strategyProperties.active());
+	}
+
+	public static boolean needsKlines(StrategyType type) {
+		return type == StrategyType.CTI_LB || type == StrategyType.ELITE_V1;
+	}
+
+	public void setWarmupMode(boolean warmupMode) {
+		if (strategyProperties.active() == StrategyType.CTI_LB) {
+			ctiLbStrategy.setWarmupMode(warmupMode);
+		} else if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			eliteV1Strategy.setWarmupMode(warmupMode);
+		}
+	}
+
+	public void enableOrdersAfterWarmup(boolean enable) {
+		if (!enable) {
+			return;
+		}
+		if (strategyProperties.active() == StrategyType.CTI_LB) {
+			ctiLbStrategy.enableOrdersAfterWarmup();
+		} else if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			eliteV1Strategy.enableOrdersAfterWarmup();
+		}
+	}
+
+	public reactor.core.publisher.Mono<Void> refreshAfterWarmup(String symbol) {
+		if (strategyProperties.active() == StrategyType.CTI_LB) {
+			return ctiLbStrategy.refreshAfterWarmup(symbol);
+		}
+		return reactor.core.publisher.Mono.empty();
 	}
 
 	private boolean shouldSyncLive(String symbol) {

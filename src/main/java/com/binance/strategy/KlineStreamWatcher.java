@@ -54,7 +54,7 @@ public class KlineStreamWatcher {
 
 	@PostConstruct
 	public void start() {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
+		if (!strategyRouter.needsKlines()) {
 			LOGGER.info("Kline stream not started (active={})", strategyProperties.active());
 			return;
 		}
@@ -67,7 +67,7 @@ public class KlineStreamWatcher {
 	}
 
 	public void startStreams() {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
+		if (!strategyRouter.needsKlines()) {
 			return;
 		}
 		if (!warmupComplete.get()) {

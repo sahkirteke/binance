@@ -3,7 +3,6 @@ package com.binance.exchange.strategy.elite;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,29 +24,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
 
 import com.binance.config.BinanceProperties;
-import com.binance.market.dto.KlineEvent;
 import com.binance.strategy.Candle;
 import com.binance.strategy.Strategy;
 import com.binance.strategy.StrategyType;
 import com.binance.strategy.SymbolFilterService;
 import com.binance.strategy.WarmupProperties;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import jakarta.annotation.PreDestroy;
-import reactor.core.Disposable;
-import reactor.core.scheduler.Scheduler;
-import reactor.core.scheduler.Schedulers;
-import reactor.util.retry.Retry;
 
 @Component
 public class EliteV1Strategy implements Strategy {
@@ -66,17 +57,15 @@ public class EliteV1Strategy implements Strategy {
 	private final ObjectMapper objectMapper;
 	private final SymbolFilterService symbolFilterService;
 	private final WarmupProperties warmupProperties;
-	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
-	private final Scheduler loop = Schedulers.newSingle("elite-v1-loop", true);
 	private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
-	private volatile Disposable wsSubscription;
 	private ZoneId zoneId;
 	private int requiredWarmup1m;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
+	private final AtomicBoolean warmupModeEnabled = new AtomicBoolean(false);
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
 			EliteV1Properties props,
@@ -97,6 +86,10 @@ public class EliteV1Strategy implements Strategy {
 
 	@Override
 	public void start() {
+		ensureInitialized();
+	}
+
+	private void ensureInitialized() {
 		if (!started.compareAndSet(false, true)) {
 			return;
 		}
@@ -115,23 +108,7 @@ public class EliteV1Strategy implements Strategy {
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
-
-		String streams = props.symbols().stream()
-				.map(symbol -> symbol.toLowerCase() + "@kline_1m")
-				.collect(Collectors.joining("/"));
-		String base = binanceProperties.useTestnet()
-				? "wss://stream.binancefuture.com/stream?streams="
-				: "wss://fstream.binance.com/stream?streams=";
-		URI uri = URI.create(base + streams);
-
-		wsSubscription = webSocketClient.execute(uri, session -> session.receive()
-				.map(message -> message.getPayloadAsText())
-				.publishOn(loop)
-				.doOnNext(this::onWsMessage)
-				.then())
-				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
-				.subscribe();
-		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={}", props.mode(), props.symbols().size(), props.zoneId());
+		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
 	}
 
 	@Override
@@ -139,11 +116,7 @@ public class EliteV1Strategy implements Strategy {
 		if (!started.compareAndSet(true, false)) {
 			return;
 		}
-		if (wsSubscription != null) {
-			wsSubscription.dispose();
-		}
 		writer.stop();
-		loop.dispose();
 	}
 
 	@PreDestroy
@@ -151,29 +124,31 @@ public class EliteV1Strategy implements Strategy {
 		stop();
 	}
 
-	private void onWsMessage(String payload) {
-		try {
-			JsonNode root = objectMapper.readTree(payload);
-			JsonNode data = root.path("data");
-			KlineEvent event = objectMapper.treeToValue(data.isMissingNode() ? root : data, KlineEvent.class);
-			if (event == null || event.kline() == null || !event.kline().closed()) {
-				return;
-			}
-			SymbolState state = states.get(event.symbol());
-			if (state == null) {
-				return;
-			}
-			Candle candle = new Candle(event.kline().open(),
-					event.kline().high(),
-					event.kline().low(),
-					event.kline().close(),
-					event.kline().volume(),
-					event.kline().closeTime());
-			onClosed1m(state, candle);
-		} catch (Exception ex) {
-			LOGGER.warn("ELITE_V1 parse error", ex);
+	public void onExternalClosedOneMinuteCandle(String symbol, Candle candle) {
+		ensureInitialized();
+		SymbolState state = states.get(symbol);
+		if (state == null) {
+			return;
 		}
+		onClosed1m(state, candle);
 	}
+
+	public void setWarmupMode(boolean warmupMode) {
+		warmupModeEnabled.set(warmupMode);
+	}
+
+	public void enableOrdersAfterWarmup() {
+		warmupModeEnabled.set(false);
+	}
+
+	public boolean isWarmupReady(String symbol) {
+		SymbolState state = states.get(symbol);
+		if (state == null) {
+			return false;
+		}
+		return isBaselinesReady(state, state.indicators.metrics());
+	}
+
 
 	private void onClosed1m(SymbolState state, Candle bar1m) {
 		state.seen1mCloses++;
@@ -260,6 +235,11 @@ public class EliteV1Strategy implements Strategy {
 		}
 		if (!baselinesReady || metrics == null) {
 			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
+			return;
+		}
+
+		if (warmupModeEnabled.get()) {
+			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", metrics, null);
 			return;
 		}
 
