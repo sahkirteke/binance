@@ -285,11 +285,15 @@ elite-v1:
     rsi-max: 45
     ema20-dist-min: 0.004
     bb-percent-b-max: 0.62
+    max-tick-pct-allowed: 0.0010
     enable-setup5-safety-gate: true
     setup5:
-      max-bb-width: 0.0448
+      max-bb-width: 0.022
       max-vol-ratio: 5.37
       chop-max-bw-ratio: 0.95
+      min-vol-ratio-of-ema: 0.40
+      max-atr-ratio: 1.00
+      require-stable-regime: false
   short:
     enabled: true
     only-regime: TREND
@@ -310,7 +314,7 @@ elite-v1:
       require-macd-delta-negative: true
 warmup:
   enabled: true
-  candles1m: 250
+  candles1m: 1000
   candles5m: 200
   concurrency: 3
   log-decisions: false

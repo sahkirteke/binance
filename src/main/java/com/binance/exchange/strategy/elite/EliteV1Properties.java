@@ -57,6 +57,7 @@ public record EliteV1Properties(
 			double rsiMax,
 			double ema20DistMin,
 			double bbPercentBMax,
+			double maxTickPctAllowed,
 			boolean enableSetup5SafetyGate,
 			@NotNull Setup5SafetyGate setup5) {
 	}
@@ -64,7 +65,10 @@ public record EliteV1Properties(
 	public record Setup5SafetyGate(
 			double maxBbWidth,
 			double maxVolRatio,
-			double chopMaxBwRatio) {
+			double chopMaxBwRatio,
+			double minVolRatioOfEma,
+			double maxAtrRatio,
+			boolean requireStableRegime) {
 	}
 
 	public record ShortConfig(

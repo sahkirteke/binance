@@ -149,6 +149,28 @@ public class EliteV1Strategy implements Strategy {
 		return isBaselinesReady(state, state.indicators.metrics());
 	}
 
+	public WarmupReadiness warmupReadiness(String symbol) {
+		SymbolState state = states.get(symbol);
+		if (state == null) {
+			return WarmupReadiness.statusNull(symbol);
+		}
+		Metrics metrics = state.indicators.metrics();
+		boolean seeded = state.indicators.baselineIndicatorsSeeded();
+		if (state.seen1mCloses < requiredWarmup1m) {
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m,
+					"INSUFFICIENT_1M_BARS " + state.seen1mCloses + "/" + requiredWarmup1m);
+		}
+		if (state.seen5mCloses < requiredWarmup5m) {
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m,
+					"INSUFFICIENT_5M_BARS " + state.seen5mCloses + "/" + requiredWarmup5m);
+		}
+		if (!seeded || metrics == null) {
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m,
+					"BASELINE_NOT_SEEDED");
+		}
+		return WarmupReadiness.ready(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m);
+	}
+
 
 	private void onClosed1m(SymbolState state, Candle bar1m) {
 		state.seen1mCloses++;
@@ -233,13 +255,12 @@ public class EliteV1Strategy implements Strategy {
 					metrics.atrEma_5m,
 					metrics.atrRatio5m);
 		}
-		if (!baselinesReady || metrics == null) {
-			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
+		if (warmupModeEnabled.get()) {
 			return;
 		}
 
-		if (warmupModeEnabled.get()) {
-			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", metrics, null);
+		if (!baselinesReady || metrics == null) {
+			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
 			return;
 		}
 
@@ -253,7 +274,7 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 
-		Candidate longCandidate = evaluateLong(metrics);
+		Candidate longCandidate = evaluateLong(state.symbol, metrics);
 		Candidate shortCandidate = evaluateShort(metrics);
 
 		if (longCandidate.enter && shortCandidate.enter) {
@@ -319,7 +340,7 @@ public class EliteV1Strategy implements Strategy {
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
 	}
 
-	private Candidate evaluateLong(Metrics m) {
+	private Candidate evaluateLong(String symbol, Metrics m) {
 		if (!props.longConfig().enabled() || m.activeRegimeTag != RegimeTag.CHOP) {
 			return Candidate.noEntry(null, null);
 		}
@@ -332,7 +353,7 @@ public class EliteV1Strategy implements Strategy {
 		}
 		if (props.longConfig().enableSetup5SafetyGate()) {
 			if (m.bbWidth_5m >= props.longConfig().setup5().maxBbWidth()) {
-				return Candidate.noEntry("SETUP5_BLOCK_BBWIDTH_TOO_WIDE", null);
+				return Candidate.noEntry("SETUP5_BLOCK_BBWIDTH_WIDE", null);
 			}
 			if (m.volRatio >= props.longConfig().setup5().maxVolRatio()) {
 				return Candidate.noEntry("SETUP5_BLOCK_VOL_SPIKE", null);
@@ -340,6 +361,19 @@ public class EliteV1Strategy implements Strategy {
 			if (m.bwRatio5m > props.longConfig().setup5().chopMaxBwRatio()) {
 				return Candidate.noEntry("SETUP5_BLOCK_CHOP_BWRATIO", null);
 			}
+			if (m.volRatioOfEma < props.longConfig().setup5().minVolRatioOfEma()) {
+				return Candidate.noEntry("SETUP5_BLOCK_LOW_VOLRATIO_OF_EMA", null);
+			}
+			if (m.atrRatio5m > props.longConfig().setup5().maxAtrRatio()) {
+				return Candidate.noEntry("SETUP5_BLOCK_ATR_SPIKE", null);
+			}
+			if (props.longConfig().setup5().requireStableRegime() && m.rawRegimeTag != m.activeRegimeTag) {
+				return Candidate.noEntry("SETUP5_BLOCK_REGIME_UNSTABLE", null);
+			}
+		}
+		double tickPct = resolveTickSize(symbol) / Math.max(m.close5m, 1e-9);
+		if (tickPct > props.longConfig().maxTickPctAllowed()) {
+			return Candidate.noEntry("LONG_TICK_TOO_COARSE", null);
 		}
 		return Candidate.enter("SETUP5_ELITE", null);
 	}
@@ -736,7 +770,22 @@ private Path decisionPath(String symbol, LocalDate day) {
 		DIRECT_5M
 	}
 
-	enum DecisionAction {
+
+	public record WarmupReadiness(String symbol, boolean ready, long have1m, int required1m, long have5m, int required5m, String reason) {
+		static WarmupReadiness ready(String symbol, long have1m, int required1m, long have5m, int required5m) {
+			return new WarmupReadiness(symbol, true, have1m, required1m, have5m, required5m, "READY");
+		}
+
+		static WarmupReadiness notReady(String symbol, long have1m, int required1m, long have5m, int required5m, String reason) {
+			return new WarmupReadiness(symbol, false, have1m, required1m, have5m, required5m, reason);
+		}
+
+		static WarmupReadiness statusNull(String symbol) {
+			return new WarmupReadiness(symbol, false, 0, 0, 0, 0, "STATUS_NULL");
+		}
+	}
+
+		enum DecisionAction {
 		CONTINUE,
 		INPUTS_NOT_READY,
 		IN_POSITION,

@@ -106,6 +106,13 @@ public class StrategyRouter {
 		warmupFinishedAtMs.put(symbol, finishedAtMs);
 	}
 
+	public EliteV1Strategy.WarmupReadiness eliteWarmupReadiness(String symbol) {
+		if (strategyProperties.active() != StrategyType.ELITE_V1) {
+			return null;
+		}
+		return eliteV1Strategy.warmupReadiness(symbol);
+	}
+
 	public boolean needsKlines() {
 		return needsKlines(strategyProperties.active());
 	}
