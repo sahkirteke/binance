@@ -123,6 +123,7 @@ public class HistoricalWarmupService {
 		return warmupSymbolInterval(symbol, "5m", resolveCandles5m())
 				.flatMap(count5m -> warmupSymbolInterval(symbol, "1m", resolveCandles1m())
 						.map(count1m -> new WarmupCounts(count1m, count5m)))
+				.doOnNext(counts -> strategyRouter.flushWarmup(symbol))
 				.map(counts -> {
 					WarmupReport report;
 					if (strategyProperties.active() == StrategyType.CTI_LB) {

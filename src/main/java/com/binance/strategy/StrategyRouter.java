@@ -106,6 +106,12 @@ public class StrategyRouter {
 		warmupFinishedAtMs.put(symbol, finishedAtMs);
 	}
 
+	public void flushWarmup(String symbol) {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			eliteV1Strategy.flushWarmup(symbol);
+		}
+	}
+
 	public EliteV1Strategy.WarmupReadiness eliteWarmupReadiness(String symbol) {
 		if (strategyProperties.active() != StrategyType.ELITE_V1) {
 			return null;

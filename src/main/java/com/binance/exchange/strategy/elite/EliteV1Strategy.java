@@ -133,6 +133,16 @@ public class EliteV1Strategy implements Strategy {
 		onClosed1m(state, candle);
 	}
 
+	public void flushWarmup(String symbol) {
+		ensureInitialized();
+		SymbolState state = states.get(symbol);
+		if (state == null) {
+			return;
+		}
+		BucketTransition transition = state.aggregator.flush();
+		applyCompletedFiveMinute(state, transition);
+	}
+
 	public void setWarmupMode(boolean warmupMode) {
 		warmupModeEnabled.set(warmupMode);
 	}
@@ -182,6 +192,13 @@ public class EliteV1Strategy implements Strategy {
 		logWarmupProgressIfDue(state);
 
 		BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
+		applyCompletedFiveMinute(state, transition);
+	}
+
+	private void applyCompletedFiveMinute(SymbolState state, BucketTransition transition) {
+		if (transition == null) {
+			return;
+		}
 		if (transition.incompleteBucketStartMs != null) {
 			LOGGER.debug("EVENT=INCOMPLETE_5M_BUCKET symbol={} bucketStartMs={} count={}",
 					state.symbol,
@@ -372,7 +389,7 @@ public class EliteV1Strategy implements Strategy {
 			}
 		}
 		double tickPct = resolveTickSize(symbol) / Math.max(m.close5m, 1e-9);
-		if (tickPct > props.longConfig().maxTickPctAllowed()) {
+		if (tickPct > props.longConfig().setup5().maxTickPctAllowed()) {
 			return Candidate.noEntry("LONG_TICK_TOO_COARSE", null);
 		}
 		return Candidate.enter("SETUP5_ELITE", null);
@@ -924,6 +941,10 @@ private Path decisionPath(String symbol, LocalDate day) {
 			double volume = currentBucketCandles.stream().mapToDouble(Candle::volume).sum();
 			Candle candle5m = new Candle(first.open(), high, low, last.close(), volume, bucketEndMs(currentBucketStartMs));
 			return new BucketTransition(candle5m, null, 0);
+		}
+
+		private BucketTransition flush() {
+			return finalizeCurrentBucket();
 		}
 	}
 
