@@ -124,29 +124,20 @@ public class EliteV1Strategy implements Strategy {
 
 	public void onExternalClosedOneMinuteCandle(String symbol, Candle candle) {
 		ensureInitialized();
-		SymbolState state = states.get(symbol);
-		if (state == null) {
-			return;
-		}
+		SymbolState state = resolveState(symbol);
 		onClosed1m(state, candle);
 	}
 
 	public void flushWarmup(String symbol) {
 		ensureInitialized();
-		SymbolState state = states.get(symbol);
-		if (state == null) {
-			return;
-		}
+		SymbolState state = resolveState(symbol);
 		BucketTransition transition = state.aggregator.flush();
 		applyCompletedFiveMinute(state, transition);
 	}
 
 	public void warmupFiveMinuteCandle(String symbol, Candle bar5m) {
 		ensureInitialized();
-		SymbolState state = states.get(symbol);
-		if (state == null) {
-			return;
-		}
+		SymbolState state = resolveState(symbol);
 		applyCompletedFiveMinute(state, new BucketTransition(bar5m, null, 0));
 	}
 
@@ -163,18 +154,12 @@ public class EliteV1Strategy implements Strategy {
 	}
 
 	public boolean isWarmupReady(String symbol) {
-		SymbolState state = states.get(symbol);
-		if (state == null) {
-			return false;
-		}
+		SymbolState state = resolveState(symbol);
 		return isBaselinesReady(state, state.indicators.metrics());
 	}
 
 	public WarmupReadiness warmupReadiness(String symbol) {
-		SymbolState state = states.get(symbol);
-		if (state == null) {
-			return WarmupReadiness.statusNull(symbol);
-		}
+		SymbolState state = resolveState(symbol);
 		Metrics metrics = state.indicators.metrics();
 		boolean seeded = state.indicators.baselineIndicatorsSeeded();
 		if (state.seen5mCloses < requiredWarmup5m) {
@@ -186,6 +171,10 @@ public class EliteV1Strategy implements Strategy {
 					"BASELINE_NOT_SEEDED");
 		}
 		return WarmupReadiness.ready(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m);
+	}
+
+	private SymbolState resolveState(String symbol) {
+		return states.computeIfAbsent(symbol, SymbolState::new);
 	}
 
 
