@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import com.binance.exchange.strategy.elite.EliteV1Properties;
 import com.binance.market.BinanceMarketClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,6 +35,7 @@ public class HistoricalWarmupService {
 	private final MarkPriceStreamWatcher markPriceStreamWatcher;
 	private final ObjectMapper objectMapper;
 	private final SymbolFilterService symbolFilterService;
+	private final EliteV1Properties eliteV1Properties;
 
 	public HistoricalWarmupService(BinanceMarketClient marketClient,
 			StrategyRouter strategyRouter,
@@ -42,7 +44,8 @@ public class HistoricalWarmupService {
 			KlineStreamWatcher klineStreamWatcher,
 			MarkPriceStreamWatcher markPriceStreamWatcher,
 			ObjectMapper objectMapper,
-			SymbolFilterService symbolFilterService) {
+			SymbolFilterService symbolFilterService,
+			EliteV1Properties eliteV1Properties) {
 		this.marketClient = marketClient;
 		this.strategyRouter = strategyRouter;
 		this.strategyProperties = strategyProperties;
@@ -51,17 +54,25 @@ public class HistoricalWarmupService {
 		this.markPriceStreamWatcher = markPriceStreamWatcher;
 		this.objectMapper = objectMapper;
 		this.symbolFilterService = symbolFilterService;
+		this.eliteV1Properties = eliteV1Properties;
 	}
 
 	@PostConstruct
 	public void start() {
-		if (!warmupProperties.enabled() || !strategyRouter.needsKlines()) {
+		if (!isWarmupEnabled() || !strategyRouter.needsKlines()) {
 			return;
 		}
 		List<String> symbols = strategyProperties.resolvedTradeSymbols();
 		symbolFilterService.preloadFilters(symbols)
 				.then(warmupAllSymbols(symbols))
 				.subscribe();
+	}
+
+	private boolean isWarmupEnabled() {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			return eliteV1Properties.warmup() != null && eliteV1Properties.warmup().enabled();
+		}
+		return warmupProperties.enabled();
 	}
 
 	public Mono<Void> warmupAllSymbols(List<String> symbols) {
@@ -120,28 +131,33 @@ public class HistoricalWarmupService {
 
 
 	public Mono<WarmupReport> warmupSymbol(String symbol) {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			return warmupSymbolInterval(symbol, "5m", resolveCandles5m())
+					.map(count5m -> {
+						var readiness = strategyRouter.eliteWarmupReadiness(symbol);
+						WarmupReport report = readiness == null
+								? new WarmupReport(symbol, false, "STATUS_NULL")
+								: new WarmupReport(symbol, readiness.ready(), readiness.reason());
+						if (report.ready()) {
+							LOGGER.info("EVENT=WARMUP_READY symbol={} have5m={} required5m={}", symbol, count5m, resolveCandles5m());
+						}
+						strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
+						return report;
+					});
+		}
 		return warmupSymbolInterval(symbol, "5m", resolveCandles5m())
 				.flatMap(count5m -> warmupSymbolInterval(symbol, "1m", resolveCandles1m())
 						.map(count1m -> new WarmupCounts(count1m, count5m)))
 				.doOnNext(counts -> strategyRouter.flushWarmup(symbol))
 				.map(counts -> {
-					WarmupReport report;
-					if (strategyProperties.active() == StrategyType.CTI_LB) {
-						ScoreSignalIndicator.WarmupStatus status = strategyRouter.warmupStatus(symbol);
-						boolean ready = status != null && status.cti5mReady() && status.adx5mReady();
-						report = new WarmupReport(symbol, ready, ready ? "READY" : (status == null ? "STATUS_NULL" : "BASELINE_NOT_SEEDED"));
-					} else {
-						var readiness = strategyRouter.eliteWarmupReadiness(symbol);
-						if (readiness == null) {
-							report = new WarmupReport(symbol, false, "STATUS_NULL");
-						} else {
-							report = new WarmupReport(symbol, readiness.ready(), readiness.reason());
-						}
-					}
+					ScoreSignalIndicator.WarmupStatus status = strategyRouter.warmupStatus(symbol);
+					boolean ready = status != null && status.cti5mReady() && status.adx5mReady();
+					WarmupReport report = new WarmupReport(symbol, ready, ready ? "READY" : (status == null ? "STATUS_NULL" : "BASELINE_NOT_SEEDED"));
 					strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
 					return report;
 				});
 	}
+
 
 	private Mono<Integer> warmupSymbolInterval(String symbol, String interval, int limit) {
 		return marketClient.fetchFuturesKlinesRaw(symbol, interval, limit)
@@ -164,7 +180,7 @@ public class HistoricalWarmupService {
 								kline.closeTime());
 						if ("5m".equals(interval)) {
 							strategyRouter.warmupFiveMinuteCandle(symbol, candle);
-						} else {
+						} else if (strategyProperties.active() == StrategyType.CTI_LB) {
 							strategyRouter.warmupOneMinuteCandle(symbol, candle);
 						}
 					}
@@ -184,6 +200,9 @@ public class HistoricalWarmupService {
 	}
 
 	private int resolveCandles5m() {
+		if (strategyProperties.active() == StrategyType.ELITE_V1 && eliteV1Properties.warmup() != null && eliteV1Properties.warmup().enabled()) {
+			return eliteV1Properties.warmup().candles5m();
+		}
 		return warmupProperties.candles5m() > 0 ? warmupProperties.candles5m() : DEFAULT_CANDLES_5M;
 	}
 

@@ -24,6 +24,7 @@ public record EliteV1Properties(
 		@Positive int timeStopMinutes,
 		@NotNull ConflictResolution conflictResolution,
 		@Positive int warmupMin5mBars,
+		@NotNull WarmupConfig warmup,
 		@NotNull RegimeConfig regime,
 		@Name("long") @NotNull LongConfig longConfig,
 		@Name("short") @NotNull ShortConfig shortConfig) {
@@ -50,6 +51,11 @@ public record EliteV1Properties(
 			@Positive int cooldownBars) {
 	}
 
+	public record WarmupConfig(
+			boolean enabled,
+			@Positive int candles5m) {
+	}
+
 	public record LongConfig(
 			boolean enabled,
 			@NotNull Regime onlyRegime,
@@ -57,6 +63,7 @@ public record EliteV1Properties(
 			double rsiMax,
 			double ema20DistMin,
 			double bbPercentBMax,
+			double maxTickPctAllowed,
 			boolean enableSetup5SafetyGate,
 			@NotNull Setup5SafetyGate setup5) {
 	}
@@ -67,7 +74,6 @@ public record EliteV1Properties(
 			double chopMaxBwRatio,
 			double minVolRatioOfEma,
 			double maxAtrRatio,
-			double maxTickPctAllowed,
 			boolean requireStableRegime) {
 	}
 

@@ -226,22 +226,39 @@ class EliteV1StrategyTest {
 	}
 
 	@Test
-	void requiredWarmup1mShouldUseCandles1mWhenLargerThan5mDerivedRequirement() {
-		WarmupProperties warmup = new WarmupProperties(true, 1200, 200, 3, false, 0);
-		assertEquals(1200, EliteV1Strategy.resolveRequiredWarmup1m(warmup));
+	void requiredWarmup5mShouldPreferEliteWarmupConfigWhenEnabled() {
+		WarmupProperties warmup = new WarmupProperties(true, 1000, 200, 3, false, 0);
+		EliteV1Properties props = eliteProps(new EliteV1Properties.WarmupConfig(true, 220));
+		assertEquals(220, EliteV1Strategy.resolveRequiredWarmup5m(props, warmup));
 	}
 
 	@Test
-	void requiredWarmup1mShouldUseFiveMinuteDerivedRequirementWhenLarger() {
-		WarmupProperties warmup = new WarmupProperties(true, 250, 200, 3, false, 0);
-		assertEquals(1000, EliteV1Strategy.resolveRequiredWarmup1m(warmup));
+	void requiredWarmup5mShouldFallbackToGlobalWhenEliteWarmupDisabled() {
+		WarmupProperties warmup = new WarmupProperties(true, 1000, 200, 3, false, 0);
+		EliteV1Properties props = eliteProps(new EliteV1Properties.WarmupConfig(false, 220));
+		assertEquals(200, EliteV1Strategy.resolveRequiredWarmup5m(props, warmup));
 	}
 
-	@Test
-	void requiredWarmup1mShouldGuardAgainstNegativeInputs() {
-		WarmupProperties warmup = new WarmupProperties(true, -1, -5, 3, false, 0);
-		assertEquals(0, EliteV1Strategy.resolveRequiredWarmup1m(warmup));
-		assertEquals(0, EliteV1Strategy.resolveRequiredWarmup5m(warmup));
+	private EliteV1Properties eliteProps(EliteV1Properties.WarmupConfig warmup) {
+		return new EliteV1Properties(
+				EliteV1Properties.Mode.PAPER,
+				"Europe/Istanbul",
+				java.util.List.of("BTCUSDT"),
+				50.0,
+				1,
+				1,
+				0.004,
+				0.002,
+				20,
+				EliteV1Properties.ConflictResolution.SL_FIRST,
+				60,
+				warmup,
+				new EliteV1Properties.RegimeConfig(1.15, 1.5, 2, 3),
+				new EliteV1Properties.LongConfig(true, EliteV1Properties.Regime.CHOP, 35, 45, 0.004, 0.62, 0.001, true,
+						new EliteV1Properties.Setup5SafetyGate(0.022, 5.37, 0.95, 0.40, 1.0, false)),
+				new EliteV1Properties.ShortConfig(true, EliteV1Properties.Regime.TREND,
+						new EliteV1Properties.ShortVeto(0.15, 0.008, true),
+						new EliteV1Properties.ShortEliteMomentum(0.35, 0.6, 1.4, 2.8, 1.1, 2.5, 2.5, true, true, true)));
 	}
 
 	private EliteV1Properties.ShortEliteMomentum momentumCfg() {

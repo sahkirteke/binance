@@ -71,13 +71,8 @@ public class StrategyRouter {
 	}
 
 	public void warmupOneMinuteCandle(String symbol, Candle candle) {
-		StrategyType active = strategyProperties.active();
-		if (active == StrategyType.CTI_LB) {
+		if (strategyProperties.active() == StrategyType.CTI_LB) {
 			resolveIndicator(symbol).warmupOneMinuteCandle(candle);
-			return;
-		}
-		if (active == StrategyType.ELITE_V1) {
-			eliteV1Strategy.onExternalClosedOneMinuteCandle(symbol, candle);
 		}
 	}
 
@@ -86,6 +81,10 @@ public class StrategyRouter {
 			ScoreSignalIndicator indicator = resolveIndicator(symbol);
 			ScoreSignal signal = indicator.onClosedFiveMinuteCandle(candle);
 			ctiLbStrategy.onWarmupFiveMinuteCandle(symbol, candle, signal);
+			return;
+		}
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			eliteV1Strategy.warmupFiveMinuteCandle(symbol, candle);
 		}
 	}
 

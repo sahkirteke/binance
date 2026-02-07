@@ -273,6 +273,9 @@ elite-v1:
   time-stop-minutes: 20
   conflict-resolution: SL_FIRST
   warmup-min5m-bars: 60
+  warmup:
+    enabled: true
+    candles5m: 220
   regime:
     chop-bw-ratio-max: 1.15
     chop-macd-ratio-max: 1.50
@@ -285,6 +288,7 @@ elite-v1:
     rsi-max: 45
     ema20-dist-min: 0.004
     bb-percent-b-max: 0.62
+    max-tick-pct-allowed: 0.0010
     enable-setup5-safety-gate: true
     setup5:
       max-bb-width: 0.022
@@ -292,7 +296,6 @@ elite-v1:
       chop-max-bw-ratio: 0.95
       min-vol-ratio-of-ema: 0.40
       max-atr-ratio: 1.00
-      max-tick-pct-allowed: 0.0010
       require-stable-regime: false
   short:
     enabled: true

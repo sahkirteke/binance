@@ -62,10 +62,10 @@ public class EliteV1Strategy implements Strategy {
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
 	private ZoneId zoneId;
-	private int requiredWarmup1m;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
 	private final AtomicBoolean warmupModeEnabled = new AtomicBoolean(false);
+	private volatile boolean warmupCompleted;
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
 			EliteV1Properties props,
@@ -94,11 +94,9 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 		validateConfig();
-		requiredWarmup5m = resolveRequiredWarmup5m(warmupProperties);
-		requiredWarmup1m = resolveRequiredWarmup1m(warmupProperties);
-		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup1m={} warmup5m={} mode={}",
+		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
+		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
 				props.symbols().size(),
-				requiredWarmup1m,
 				requiredWarmup5m,
 				warmupMode.name());
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
@@ -143,12 +141,25 @@ public class EliteV1Strategy implements Strategy {
 		applyCompletedFiveMinute(state, transition);
 	}
 
+	public void warmupFiveMinuteCandle(String symbol, Candle bar5m) {
+		ensureInitialized();
+		SymbolState state = states.get(symbol);
+		if (state == null) {
+			return;
+		}
+		applyCompletedFiveMinute(state, new BucketTransition(bar5m, null, 0));
+	}
+
 	public void setWarmupMode(boolean warmupMode) {
 		warmupModeEnabled.set(warmupMode);
+		if (warmupMode) {
+			warmupCompleted = false;
+		}
 	}
 
 	public void enableOrdersAfterWarmup() {
 		warmupModeEnabled.set(false);
+		warmupCompleted = true;
 	}
 
 	public boolean isWarmupReady(String symbol) {
@@ -166,19 +177,15 @@ public class EliteV1Strategy implements Strategy {
 		}
 		Metrics metrics = state.indicators.metrics();
 		boolean seeded = state.indicators.baselineIndicatorsSeeded();
-		if (state.seen1mCloses < requiredWarmup1m) {
-			return WarmupReadiness.notReady(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m,
-					"INSUFFICIENT_1M_BARS " + state.seen1mCloses + "/" + requiredWarmup1m);
-		}
 		if (state.seen5mCloses < requiredWarmup5m) {
-			return WarmupReadiness.notReady(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m,
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
 					"INSUFFICIENT_5M_BARS " + state.seen5mCloses + "/" + requiredWarmup5m);
 		}
 		if (!seeded || metrics == null) {
-			return WarmupReadiness.notReady(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m,
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
 					"BASELINE_NOT_SEEDED");
 		}
-		return WarmupReadiness.ready(symbol, state.seen1mCloses, requiredWarmup1m, state.seen5mCloses, requiredWarmup5m);
+		return WarmupReadiness.ready(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m);
 	}
 
 
@@ -231,10 +238,9 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 		boolean seeded = state.indicators.baselineIndicatorsSeeded();
-		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={}/{} seen5m={}/{} seeded={} baselinesReady={} nextLogAt1m={}",
+		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={} seen5m={}/{} seeded={} baselinesReady={} nextLogAt1m={}",
 				state.symbol,
 				state.seen1mCloses,
-				requiredWarmup1m,
 				state.seen5mCloses,
 				requiredWarmup5m,
 				seeded,
@@ -252,11 +258,10 @@ public class EliteV1Strategy implements Strategy {
 			state.warmupDoneLogged = true;
 			var at = Instant.ofEpochMilli(bar5m.closeTime());
 			var atTr = at.atZone(zoneId);
-			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required1m={} required5m={} atMs={} timeUtc={} timeTr={}",
+			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} timeUtc={} timeTr={}",
 					state.symbol,
 					state.seen1mCloses,
 					state.seen5mCloses,
-					requiredWarmup1m,
 					requiredWarmup5m,
 					bar5m.closeTime(),
 					at.toString(),
@@ -272,7 +277,7 @@ public class EliteV1Strategy implements Strategy {
 					metrics.atrEma_5m,
 					metrics.atrRatio5m);
 		}
-		if (warmupModeEnabled.get()) {
+		if (warmupModeEnabled.get() || !warmupCompleted) {
 			return;
 		}
 
@@ -321,19 +326,16 @@ public class EliteV1Strategy implements Strategy {
 	}
 
 	private boolean isBaselinesReady(SymbolState state, Metrics metrics) {
-		return state.seen1mCloses >= requiredWarmup1m
-				&& state.seen5mCloses >= requiredWarmup5m
+		return state.seen5mCloses >= requiredWarmup5m
 				&& metrics != null
 				&& state.indicators.baselineIndicatorsSeeded();
 	}
 
-	static int resolveRequiredWarmup1m(WarmupProperties warmupProperties) {
-		int required5m = resolveRequiredWarmup5m(warmupProperties);
-		int from1m = Math.max(warmupProperties.candles1m(), 0);
-		return Math.max(from1m, required5m * 5);
-	}
 
-	static int resolveRequiredWarmup5m(WarmupProperties warmupProperties) {
+	static int resolveRequiredWarmup5m(EliteV1Properties props, WarmupProperties warmupProperties) {
+		if (props.warmup() != null && props.warmup().enabled()) {
+			return Math.max(props.warmup().candles5m(), 0);
+		}
 		return Math.max(warmupProperties.candles5m(), 0);
 	}
 
@@ -389,7 +391,7 @@ public class EliteV1Strategy implements Strategy {
 			}
 		}
 		double tickPct = resolveTickSize(symbol) / Math.max(m.close5m, 1e-9);
-		if (tickPct > props.longConfig().setup5().maxTickPctAllowed()) {
+		if (tickPct > props.longConfig().maxTickPctAllowed()) {
 			return Candidate.noEntry("LONG_TICK_TOO_COARSE", null);
 		}
 		return Candidate.enter("SETUP5_ELITE", null);
@@ -593,7 +595,7 @@ private void openPaperPosition(SymbolState state,
 			effectiveAction = "INPUTS_NOT_READY";
 			effectiveMatchedSetup = null;
 			effectiveBlockReason = "INPUTS_NOT_READY";
-			applyWarmupNotReadyFields(node, requiredWarmup1m, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
+			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
 		} else {
 			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
 			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
