@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.lang.reflect.Method;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -27,12 +28,12 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 
 import com.binance.config.BinanceProperties;
 import com.binance.strategy.Candle;
 import com.binance.strategy.Strategy;
-import com.binance.strategy.BookTickerStreamWatcher;
 import com.binance.strategy.StrategyType;
 import com.binance.strategy.SymbolFilterService;
 import com.binance.strategy.WarmupProperties;
@@ -59,7 +60,7 @@ public class EliteV1Strategy implements Strategy {
 	private final ObjectMapper objectMapper;
 	private final SymbolFilterService symbolFilterService;
 	private final WarmupProperties warmupProperties;
-	private final BookTickerStreamWatcher bookTickerStreamWatcher;
+	private final ApplicationContext applicationContext;
 	private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
@@ -75,13 +76,13 @@ public class EliteV1Strategy implements Strategy {
 			ObjectMapper objectMapper,
 			SymbolFilterService symbolFilterService,
 			WarmupProperties warmupProperties,
-			BookTickerStreamWatcher bookTickerStreamWatcher) {
+			ApplicationContext applicationContext) {
 		this.binanceProperties = binanceProperties;
 		this.props = props;
 		this.objectMapper = objectMapper;
 		this.symbolFilterService = symbolFilterService;
 		this.warmupProperties = warmupProperties;
-		this.bookTickerStreamWatcher = bookTickerStreamWatcher;
+		this.applicationContext = applicationContext;
 	}
 
 	@Override
@@ -758,8 +759,8 @@ private void openPaperPosition(SymbolState state,
 	private void putOrderflow(ObjectNode parent, Candle bar5m) {
 		ObjectNode orderflow = parent.putObject("orderflow5m");
 		orderflow.put("baseVolume", bar5m.volume());
-		if (bar5m.quoteVolume() == null || bar5m.tradeCount() == null || bar5m.takerBuyBaseVolume() == null
-				|| bar5m.takerBuyQuoteVolume() == null) {
+		OrderflowSnapshot of = OrderflowSnapshot.fromCandle(bar5m);
+		if (!of.available()) {
 			orderflow.put("reason", "KLINE_TAKER_FIELDS_MISSING");
 			orderflow.putNull("quoteVolume");
 			orderflow.putNull("trades");
@@ -770,11 +771,11 @@ private void openPaperPosition(SymbolState state,
 			return;
 		}
 
-		double takerBuyBase = bar5m.takerBuyBaseVolume();
+		double takerBuyBase = of.takerBuyBaseVolume();
 		double takerSellBase = bar5m.volume() - takerBuyBase;
 		double deltaBase = takerBuyBase - takerSellBase;
-		orderflow.put("quoteVolume", bar5m.quoteVolume());
-		orderflow.put("trades", bar5m.tradeCount());
+		orderflow.put("quoteVolume", of.quoteVolume());
+		orderflow.put("trades", of.tradeCount());
 		orderflow.put("takerBuyBase", takerBuyBase);
 		orderflow.put("takerSellBase", takerSellBase);
 		orderflow.put("deltaBase", deltaBase);
@@ -786,7 +787,7 @@ private void openPaperPosition(SymbolState state,
 	}
 
 	private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
-		BookTickerStreamWatcher.BookTickerSnapshot snapshot = bookTickerStreamWatcher.getSnapshot(symbol);
+		LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
 		if (snapshot == null) {
 			parent.putNull("liquidity");
 			parent.put("liquidityReason", "MISSING");
@@ -980,6 +981,85 @@ private Path decisionPath(String symbol, LocalDate day) {
 	private record HitSnapshot(double open, double high, double low, double close, double volume, long closeTimeMs) {
 		static HitSnapshot fromCandle(Candle c) {
 			return new HitSnapshot(c.open(), c.high(), c.low(), c.close(), c.volume(), c.closeTime());
+		}
+	}
+
+	private record OrderflowSnapshot(Double quoteVolume, Long tradeCount, Double takerBuyBaseVolume,
+			Double takerBuyQuoteVolume) {
+
+		boolean available() {
+			return quoteVolume != null && tradeCount != null && takerBuyBaseVolume != null && takerBuyQuoteVolume != null;
+		}
+
+		static OrderflowSnapshot fromCandle(Candle candle) {
+			return new OrderflowSnapshot(
+					readDoubleAccessor(candle, "quoteVolume"),
+					readLongAccessor(candle, "tradeCount"),
+					readDoubleAccessor(candle, "takerBuyBaseVolume"),
+					readDoubleAccessor(candle, "takerBuyQuoteVolume"));
+		}
+	}
+
+	private record LiquiditySnapshot(double bestBidPrice, double bestBidQty, double bestAskPrice, double bestAskQty,
+			long eventTimeMs) {
+
+		static LiquiditySnapshot fromContext(ApplicationContext context, String symbol) {
+			if (context == null || symbol == null || symbol.isBlank()) {
+				return null;
+			}
+			try {
+				Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
+				Object bean = context.getBean(watcherClass);
+				Method getSnapshot = watcherClass.getMethod("getSnapshot", String.class);
+				Object snapshot = getSnapshot.invoke(bean, symbol);
+				if (snapshot == null) {
+					return null;
+				}
+				Double bid = readDoubleAccessor(snapshot, "bestBidPrice");
+				Double bidQty = readDoubleAccessor(snapshot, "bestBidQty");
+				Double ask = readDoubleAccessor(snapshot, "bestAskPrice");
+				Double askQty = readDoubleAccessor(snapshot, "bestAskQty");
+				Long eventTime = readLongAccessor(snapshot, "eventTimeMs");
+				if (bid == null || bidQty == null || ask == null || askQty == null || eventTime == null) {
+					return null;
+				}
+				return new LiquiditySnapshot(bid, bidQty, ask, askQty, eventTime);
+			} catch (ReflectiveOperationException | RuntimeException ex) {
+				LOGGER.debug("BookTicker reflection lookup unavailable: {}", ex.getMessage());
+				return null;
+			}
+		}
+	}
+
+	private static Double readDoubleAccessor(Object target, String accessorName) {
+		if (target == null) {
+			return null;
+		}
+		try {
+			Method method = target.getClass().getMethod(accessorName);
+			Object value = method.invoke(target);
+			if (value == null) {
+				return null;
+			}
+			return value instanceof Number number ? number.doubleValue() : null;
+		} catch (ReflectiveOperationException ex) {
+			return null;
+		}
+	}
+
+	private static Long readLongAccessor(Object target, String accessorName) {
+		if (target == null) {
+			return null;
+		}
+		try {
+			Method method = target.getClass().getMethod(accessorName);
+			Object value = method.invoke(target);
+			if (value == null) {
+				return null;
+			}
+			return value instanceof Number number ? number.longValue() : null;
+		} catch (ReflectiveOperationException ex) {
+			return null;
 		}
 	}
 
