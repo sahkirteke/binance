@@ -266,12 +266,7 @@ public class EliteV1Strategy implements Strategy {
 					metrics.atrEma_5m,
 					metrics.atrRatio5m);
 		}
-		if (warmupModeEnabled.get() || !warmupCompleted) {
-			return;
-		}
-
-		if (!baselinesReady || metrics == null) {
-			writeDecision(state, bar5m, "INPUTS_NOT_READY", null, "INPUTS_NOT_READY", null, null);
+		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
 			return;
 		}
 
@@ -574,6 +569,11 @@ private void openPaperPosition(SymbolState state,
 		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
 		node.put("entriesToday", state.entriesToday);
 		node.put("baselinesReady", baselinesReady);
+		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
+		Candle last1m = state.last1m.peekLast();
+		if (last1m != null) {
+			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
+		}
 
 		String effectiveAction = action;
 		String effectiveMatchedSetup = matchedSetup;
@@ -653,6 +653,18 @@ private void openPaperPosition(SymbolState state,
 			return "GLOBAL_MAX_OPEN_POS";
 		}
 		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
+	}
+
+	private static void putBar(ObjectNode parent, String field, Candle c, long tfMs) {
+		ObjectNode b = parent.putObject(field);
+		b.put("open", c.open());
+		b.put("high", c.high());
+		b.put("low", c.low());
+		b.put("close", c.close());
+		b.put("volume", c.volume());
+		long closeTimeMs = c.closeTime();
+		b.put("closeTimeMs", closeTimeMs);
+		b.put("openTimeMs", closeTimeMs - tfMs + 1);
 	}
 
 	static void applyWarmupNotReadyFields(ObjectNode node, int required1mBars, long have1mBars, int required5mBars, long have5mBars) {
