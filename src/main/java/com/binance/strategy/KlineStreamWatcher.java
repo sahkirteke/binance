@@ -118,6 +118,13 @@ public class KlineStreamWatcher {
 			}
 			Candle candle = toCandle(kline);
 			if (KLINE_INTERVAL_5M.equals(message.interval())) {
+				LOGGER.debug("KLINE_5M_PARSED symbol={} v={} q={} n={} V={} Q={}",
+					event.symbol(),
+					candle.volume(),
+					candle.quoteVolume(),
+					candle.tradeCount(),
+					candle.takerBuyBaseVolume(),
+					candle.takerBuyQuoteVolume());
 				strategyRouter.onClosedFiveMinuteCandle(event.symbol(), candle);
 			} else {
 				strategyRouter.onClosedOneMinuteCandle(event.symbol(), candle);

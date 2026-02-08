@@ -760,11 +760,12 @@ private void openPaperPosition(SymbolState state,
 		ObjectNode orderflow = parent.putObject("orderflow5m");
 		orderflow.put("baseVolume", bar5m.volume());
 		OrderflowSnapshot of = OrderflowSnapshot.fromCandle(bar5m);
-		if (!of.available()) {
+		if (!of.available() || bar5m.volume() <= 0.0) {
 			orderflow.put("reason", "KLINE_TAKER_FIELDS_MISSING");
 			orderflow.putNull("quoteVolume");
 			orderflow.putNull("trades");
 			orderflow.putNull("takerBuyBase");
+			orderflow.putNull("takerBuyQuote");
 			orderflow.putNull("takerSellBase");
 			orderflow.putNull("deltaBase");
 			orderflow.putNull("takerBuyRatio");
@@ -777,13 +778,11 @@ private void openPaperPosition(SymbolState state,
 		orderflow.put("quoteVolume", of.quoteVolume());
 		orderflow.put("trades", of.tradeCount());
 		orderflow.put("takerBuyBase", takerBuyBase);
+		orderflow.put("takerBuyQuote", of.takerBuyQuoteVolume());
 		orderflow.put("takerSellBase", takerSellBase);
 		orderflow.put("deltaBase", deltaBase);
-		if (bar5m.volume() > 0) {
-			orderflow.put("takerBuyRatio", takerBuyBase / bar5m.volume());
-		} else {
-			orderflow.putNull("takerBuyRatio");
-		}
+		orderflow.put("takerBuyRatio", takerBuyBase / bar5m.volume());
+		orderflow.put("reason", "OK");
 	}
 
 	private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
@@ -1193,13 +1192,51 @@ private Path decisionPath(String symbol, LocalDate day) {
 			double high = currentBucketCandles.stream().mapToDouble(Candle::high).max().orElse(first.high());
 			double low = currentBucketCandles.stream().mapToDouble(Candle::low).min().orElse(first.low());
 			double volume = currentBucketCandles.stream().mapToDouble(Candle::volume).sum();
-			Candle candle5m = new Candle(first.open(), high, low, last.close(), volume, bucketEndMs(currentBucketStartMs));
+			Double quoteVolume = sumNullableDouble(currentBucketCandles, Candle::quoteVolume);
+			Long tradeCount = sumNullableLong(currentBucketCandles, Candle::tradeCount);
+			Double takerBuyBaseVolume = sumNullableDouble(currentBucketCandles, Candle::takerBuyBaseVolume);
+			Double takerBuyQuoteVolume = sumNullableDouble(currentBucketCandles, Candle::takerBuyQuoteVolume);
+			Candle candle5m = new Candle(
+					first.open(),
+					high,
+					low,
+					last.close(),
+					volume,
+					bucketEndMs(currentBucketStartMs),
+					quoteVolume,
+					tradeCount,
+					takerBuyBaseVolume,
+					takerBuyQuoteVolume);
 			return new BucketTransition(candle5m, null, 0);
 		}
 
 		private BucketTransition flush() {
 			return finalizeCurrentBucket();
 		}
+	}
+
+	private static Double sumNullableDouble(List<Candle> candles, java.util.function.Function<Candle, Double> getter) {
+		double sum = 0.0;
+		for (Candle candle : candles) {
+			Double value = getter.apply(candle);
+			if (value == null) {
+				return null;
+			}
+			sum += value;
+		}
+		return sum;
+	}
+
+	private static Long sumNullableLong(List<Candle> candles, java.util.function.Function<Candle, Long> getter) {
+		long sum = 0L;
+		for (Candle candle : candles) {
+			Long value = getter.apply(candle);
+			if (value == null) {
+				return null;
+			}
+			sum += value;
+		}
+		return sum;
 	}
 
 	private static final class RegimeState {
