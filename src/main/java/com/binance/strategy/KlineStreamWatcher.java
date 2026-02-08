@@ -115,7 +115,8 @@ public class KlineStreamWatcher {
 				return;
 			}
 			Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.volume(),
-					kline.closeTime());
+					kline.closeTime(), kline.quoteVolume(), kline.tradeCount(), kline.takerBuyBaseVolume(),
+					kline.takerBuyQuoteVolume());
 			if (KLINE_INTERVAL_5M.equals(message.interval())) {
 				strategyRouter.onClosedFiveMinuteCandle(event.symbol(), candle);
 			} else {

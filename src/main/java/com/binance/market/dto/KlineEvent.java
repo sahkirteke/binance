@@ -16,6 +16,10 @@ public record KlineEvent(
 			@JsonProperty("l") double low,
 			@JsonProperty("c") double close,
 			@JsonProperty("v") double volume,
+			@JsonProperty("q") Double quoteVolume,
+			@JsonProperty("n") Long tradeCount,
+			@JsonProperty("V") Double takerBuyBaseVolume,
+			@JsonProperty("Q") Double takerBuyQuoteVolume,
 			@JsonProperty("T") long closeTime,
 			@JsonProperty("x") boolean closed) {
 	}

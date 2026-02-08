@@ -32,6 +32,7 @@ import org.springframework.stereotype.Component;
 import com.binance.config.BinanceProperties;
 import com.binance.strategy.Candle;
 import com.binance.strategy.Strategy;
+import com.binance.strategy.BookTickerStreamWatcher;
 import com.binance.strategy.StrategyType;
 import com.binance.strategy.SymbolFilterService;
 import com.binance.strategy.WarmupProperties;
@@ -49,6 +50,7 @@ public class EliteV1Strategy implements Strategy {
 	private static final long ONE_MIN_MS = 60_000L;
 	private static final long FIVE_MIN_MS = 300_000L;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
+	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
 
@@ -57,6 +59,7 @@ public class EliteV1Strategy implements Strategy {
 	private final ObjectMapper objectMapper;
 	private final SymbolFilterService symbolFilterService;
 	private final WarmupProperties warmupProperties;
+	private final BookTickerStreamWatcher bookTickerStreamWatcher;
 	private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
@@ -71,12 +74,14 @@ public class EliteV1Strategy implements Strategy {
 			EliteV1Properties props,
 			ObjectMapper objectMapper,
 			SymbolFilterService symbolFilterService,
-			WarmupProperties warmupProperties) {
+			WarmupProperties warmupProperties,
+			BookTickerStreamWatcher bookTickerStreamWatcher) {
 		this.binanceProperties = binanceProperties;
 		this.props = props;
 		this.objectMapper = objectMapper;
 		this.symbolFilterService = symbolFilterService;
 		this.warmupProperties = warmupProperties;
+		this.bookTickerStreamWatcher = bookTickerStreamWatcher;
 	}
 
 	@Override
@@ -651,6 +656,8 @@ private void openPaperPosition(SymbolState state,
 		node.put("entriesToday", state.entriesToday);
 		node.put("baselinesReady", baselinesReady);
 		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
+		putOrderflow(node, bar5m);
+		putLiquidity(node, state.symbol, timeMs);
 		Candle last1m = state.last1m.peekLast();
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
@@ -746,6 +753,76 @@ private void openPaperPosition(SymbolState state,
 		long closeTimeMs = c.closeTime();
 		b.put("closeTimeMs", closeTimeMs);
 		b.put("openTimeMs", closeTimeMs - tfMs + 1);
+	}
+
+	private void putOrderflow(ObjectNode parent, Candle bar5m) {
+		ObjectNode orderflow = parent.putObject("orderflow5m");
+		orderflow.put("baseVolume", bar5m.volume());
+		if (bar5m.quoteVolume() == null || bar5m.tradeCount() == null || bar5m.takerBuyBaseVolume() == null
+				|| bar5m.takerBuyQuoteVolume() == null) {
+			orderflow.put("reason", "KLINE_TAKER_FIELDS_MISSING");
+			orderflow.putNull("quoteVolume");
+			orderflow.putNull("trades");
+			orderflow.putNull("takerBuyBase");
+			orderflow.putNull("takerSellBase");
+			orderflow.putNull("deltaBase");
+			orderflow.putNull("takerBuyRatio");
+			return;
+		}
+
+		double takerBuyBase = bar5m.takerBuyBaseVolume();
+		double takerSellBase = bar5m.volume() - takerBuyBase;
+		double deltaBase = takerBuyBase - takerSellBase;
+		orderflow.put("quoteVolume", bar5m.quoteVolume());
+		orderflow.put("trades", bar5m.tradeCount());
+		orderflow.put("takerBuyBase", takerBuyBase);
+		orderflow.put("takerSellBase", takerSellBase);
+		orderflow.put("deltaBase", deltaBase);
+		if (bar5m.volume() > 0) {
+			orderflow.put("takerBuyRatio", takerBuyBase / bar5m.volume());
+		} else {
+			orderflow.putNull("takerBuyRatio");
+		}
+	}
+
+	private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
+		BookTickerStreamWatcher.BookTickerSnapshot snapshot = bookTickerStreamWatcher.getSnapshot(symbol);
+		if (snapshot == null) {
+			parent.putNull("liquidity");
+			parent.put("liquidityReason", "MISSING");
+			return;
+		}
+		long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
+		if (ageMs > LIQUIDITY_MAX_AGE_MS) {
+			parent.putNull("liquidity");
+			parent.put("liquidityReason", "STALE");
+			return;
+		}
+		double spread = snapshot.bestAskPrice() - snapshot.bestBidPrice();
+		double mid = (snapshot.bestAskPrice() + snapshot.bestBidPrice()) / 2.0;
+		double spreadPct = mid > 0 ? spread / mid : Double.NaN;
+		double qtyTotal = snapshot.bestBidQty() + snapshot.bestAskQty();
+		double imbalance = qtyTotal > 0 ? (snapshot.bestBidQty() - snapshot.bestAskQty()) / qtyTotal : Double.NaN;
+
+		ObjectNode liquidity = parent.putObject("liquidity");
+		liquidity.put("bid", snapshot.bestBidPrice());
+		liquidity.put("ask", snapshot.bestAskPrice());
+		liquidity.put("bidQty", snapshot.bestBidQty());
+		liquidity.put("askQty", snapshot.bestAskQty());
+		liquidity.put("spread", spread);
+		if (Double.isFinite(spreadPct)) {
+			liquidity.put("spreadPct", spreadPct);
+		} else {
+			liquidity.putNull("spreadPct");
+		}
+		if (Double.isFinite(imbalance)) {
+			liquidity.put("imbalance", imbalance);
+		} else {
+			liquidity.putNull("imbalance");
+		}
+		liquidity.put("ageMs", ageMs);
+		parent.put("liquidityReason", "ATTACHED");
+		LOGGER.debug("DECISION liquidity attached symbol={} spreadPct={} imbalance={}", symbol, spreadPct, imbalance);
 	}
 
 	static void applyWarmupNotReadyFields(ObjectNode node, int required1mBars, long have1mBars, int required5mBars, long have5mBars) {
