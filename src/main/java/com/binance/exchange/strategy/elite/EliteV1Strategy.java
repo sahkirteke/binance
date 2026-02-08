@@ -483,6 +483,10 @@ private void openPaperPosition(SymbolState state,
 		state.entryTimeMs = bar5m.closeTime();
 		state.tpPrice = tpPrice;
 		state.slPrice = slPrice;
+		state.tpHitTimeMs = null;
+		state.slHitTimeMs = null;
+		state.tpHitBar1m = null;
+		state.slHitBar1m = null;
 		state.bracketId = UUID.randomUUID().toString();
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
@@ -508,22 +512,20 @@ private void openPaperPosition(SymbolState state,
 		if (state.positionSide == Side.NONE || state.bracketId == null) {
 			return;
 		}
-		ExitReason touchReason = resolveTouchExit(state.positionSide,
-				state.tpPrice,
-				state.slPrice,
-				oneMinuteBar,
-				props.conflictResolution());
-		if (touchReason != null) {
-			double exitPrice = touchReason == ExitReason.TAKE_PROFIT ? state.tpPrice : state.slPrice;
-			exitPosition(state, touchReason, exitPrice, oneMinuteBar.closeTime());
+		updateHitTracking(state, oneMinuteBar);
+		ExitEvaluation evaluation = evaluateExit(state);
+		if (evaluation != null && evaluation.exitReason != null) {
+			double exitPrice = evaluation.exitReason == ExitReason.TAKE_PROFIT ? state.tpPrice : state.slPrice;
+			exitPosition(state, evaluation.exitReason, exitPrice, oneMinuteBar.closeTime(), evaluation);
 			return;
 		}
 		if (shouldTimeStop(state.entryTimeMs, oneMinuteBar.closeTime(), props.timeStopMinutes())) {
-			exitPosition(state, ExitReason.TIME_STOP_20M, oneMinuteBar.close(), oneMinuteBar.closeTime());
+			exitPosition(state, ExitReason.TIME_STOP_20M, oneMinuteBar.close(), oneMinuteBar.closeTime(),
+					new ExitEvaluation(ExitReason.TIME_STOP_20M, "NONE", "TIME_STOP", null));
 		}
 	}
 
-	private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs) {
+	private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs, ExitEvaluation evaluation) {
 		double pnl = state.positionSide == Side.LONG
 				? (exitPrice - state.entryPrice) * state.qty
 				: (state.entryPrice - exitPrice) * state.qty;
@@ -538,12 +540,91 @@ private void openPaperPosition(SymbolState state,
 		node.put("qty", state.qty);
 		node.put("realizedPnl", pnl);
 		node.put("exitReason", reason.name());
+		node.put("tpPrice", state.tpPrice);
+		node.put("slPrice", state.slPrice);
+		if (state.tpHitTimeMs != null) {
+			node.put("tpHitTimeMs", state.tpHitTimeMs);
+		} else {
+			node.putNull("tpHitTimeMs");
+		}
+		if (state.slHitTimeMs != null) {
+			node.put("slHitTimeMs", state.slHitTimeMs);
+		} else {
+			node.putNull("slHitTimeMs");
+		}
+		node.put("firstHit", evaluation == null ? "NONE" : evaluation.firstHit);
+		node.put("exitTrigger", evaluation == null ? "TIME_STOP" : evaluation.exitTrigger);
+		if (evaluation != null && evaluation.ambiguityRule != null) {
+			node.put("ambiguityRule", evaluation.ambiguityRule);
+		}
+		if (state.tpHitBar1m != null) {
+			putHitBar(node, "tpHitBar1m", state.tpHitBar1m);
+		}
+		if (state.slHitBar1m != null) {
+			putHitBar(node, "slHitBar1m", state.slHitBar1m);
+		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 
 		state.positionSide = Side.NONE;
 		state.bracketId = null;
+		state.tpHitTimeMs = null;
+		state.slHitTimeMs = null;
+		state.tpHitBar1m = null;
+		state.slHitBar1m = null;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 	}
+
+	private void updateHitTracking(SymbolState state, Candle oneMinuteBar) {
+		if (state.positionSide == Side.LONG) {
+			if (state.tpHitTimeMs == null && oneMinuteBar.high() >= state.tpPrice) {
+				state.tpHitTimeMs = oneMinuteBar.closeTime();
+				state.tpHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
+			}
+			if (state.slHitTimeMs == null && oneMinuteBar.low() <= state.slPrice) {
+				state.slHitTimeMs = oneMinuteBar.closeTime();
+				state.slHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
+			}
+		} else if (state.positionSide == Side.SHORT) {
+			if (state.tpHitTimeMs == null && oneMinuteBar.low() <= state.tpPrice) {
+				state.tpHitTimeMs = oneMinuteBar.closeTime();
+				state.tpHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
+			}
+			if (state.slHitTimeMs == null && oneMinuteBar.high() >= state.slPrice) {
+				state.slHitTimeMs = oneMinuteBar.closeTime();
+				state.slHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
+			}
+		}
+	}
+
+	private ExitEvaluation evaluateExit(SymbolState state) {
+		if (state.tpHitTimeMs == null && state.slHitTimeMs == null) {
+			return null;
+		}
+		if (state.tpHitTimeMs != null && state.slHitTimeMs == null) {
+			return new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null);
+		}
+		if (state.slHitTimeMs != null && state.tpHitTimeMs == null) {
+			return new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null);
+		}
+		if (state.tpHitTimeMs < state.slHitTimeMs) {
+			return new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null);
+		}
+		if (state.slHitTimeMs < state.tpHitTimeMs) {
+			return new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null);
+		}
+		return new ExitEvaluation(ExitReason.STOP_LOSS, "AMBIGUOUS_SAME_1M", "SL", "CONSERVATIVE_SL_WINS");
+	}
+
+	private static void putHitBar(ObjectNode parent, String field, HitSnapshot c) {
+		ObjectNode b = parent.putObject(field);
+		b.put("open", c.open());
+		b.put("high", c.high());
+		b.put("low", c.low());
+		b.put("close", c.close());
+		b.put("volume", c.volume());
+		b.put("closeTimeMs", c.closeTimeMs());
+	}
+
 
 	private void writeDecision(SymbolState state,
 			Candle bar5m,
@@ -816,6 +897,15 @@ private Path decisionPath(String symbol, LocalDate day) {
 	record PreCheckAction(DecisionAction action, String blockReason) {
 	}
 
+	private record ExitEvaluation(ExitReason exitReason, String firstHit, String exitTrigger, String ambiguityRule) {
+	}
+
+	private record HitSnapshot(double open, double high, double low, double close, double volume, long closeTimeMs) {
+		static HitSnapshot fromCandle(Candle c) {
+			return new HitSnapshot(c.open(), c.high(), c.low(), c.close(), c.volume(), c.closeTime());
+		}
+	}
+
 	private record Candidate(boolean enter, String setup, String blockReason, ShortEvalResult shortEvalResult) {
 		private static Candidate enter(String setup, ShortEvalResult shortEvalResult) {
 			return new Candidate(true, setup, null, shortEvalResult);
@@ -867,6 +957,10 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private double qty;
 		private double tpPrice;
 		private double slPrice;
+		private Long tpHitTimeMs;
+		private Long slHitTimeMs;
+		private HitSnapshot tpHitBar1m;
+		private HitSnapshot slHitBar1m;
 		private String bracketId;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
