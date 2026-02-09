@@ -2,6 +2,7 @@ package com.binance.exchange.strategy.elite;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -32,6 +33,8 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 
 import com.binance.config.BinanceProperties;
+import com.binance.exchange.BinanceFuturesOrderClient;
+import com.binance.exchange.dto.OrderResponse;
 import com.binance.strategy.Candle;
 import com.binance.strategy.Strategy;
 import com.binance.strategy.StrategyType;
@@ -61,6 +64,7 @@ public class EliteV1Strategy implements Strategy {
 	private final SymbolFilterService symbolFilterService;
 	private final WarmupProperties warmupProperties;
 	private final ApplicationContext applicationContext;
+	private final BinanceFuturesOrderClient orderClient;
 	private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
@@ -76,13 +80,15 @@ public class EliteV1Strategy implements Strategy {
 			ObjectMapper objectMapper,
 			SymbolFilterService symbolFilterService,
 			WarmupProperties warmupProperties,
-			ApplicationContext applicationContext) {
+			ApplicationContext applicationContext,
+			BinanceFuturesOrderClient orderClient) {
 		this.binanceProperties = binanceProperties;
 		this.props = props;
 		this.objectMapper = objectMapper;
 		this.symbolFilterService = symbolFilterService;
 		this.warmupProperties = warmupProperties;
 		this.applicationContext = applicationContext;
+		this.orderClient = orderClient;
 	}
 
 	@Override
@@ -105,9 +111,6 @@ public class EliteV1Strategy implements Strategy {
 				props.symbols().size(),
 				requiredWarmup5m,
 				warmupMode.name());
-		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			LOGGER.warn("ELITE_V1 LIVE mode not implemented; falling back to PAPER behavior.");
-		}
 		zoneId = ZoneId.of(props.zoneId());
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
@@ -190,7 +193,11 @@ public class EliteV1Strategy implements Strategy {
 		if (state.last1m.size() > 300) {
 			state.last1m.removeFirst();
 		}
-		checkPaperExit(state, bar1m);
+		if (props.mode() == EliteV1Properties.Mode.PAPER) {
+			checkPaperExit(state, bar1m);
+		} else {
+			checkLiveBracketExit(state, bar1m);
+		}
 		logWarmupProgressIfDue(state);
 
 		BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
@@ -294,12 +301,12 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 		if (longCandidate.enter) {
-			openPaperPosition(state, bar5m, Side.LONG, longCandidate.setup, metrics.activeRegimeTag);
+			openPosition(state, bar5m, Side.LONG, longCandidate.setup, metrics.activeRegimeTag);
 			writeDecision(state, bar5m, "ENTER_LONG", longCandidate.setup, null, metrics, null);
 			return;
 		}
 		if (shortCandidate.enter) {
-			openPaperPosition(state, bar5m, Side.SHORT, shortCandidate.setup, metrics.activeRegimeTag);
+			openPosition(state, bar5m, Side.SHORT, shortCandidate.setup, metrics.activeRegimeTag);
 			writeDecision(state, bar5m, "ENTER_SHORT", shortCandidate.setup, null, metrics, shortCandidate.shortEvalResult);
 			return;
 		}
@@ -458,14 +465,36 @@ public class EliteV1Strategy implements Strategy {
 		return Candidate.enter("SHORT_ELITE_MOMENTUM", ShortEvalResult.ofMatched());
 	}
 
-private void openPaperPosition(SymbolState state,
+private void openPosition(SymbolState state,
 			Candle bar5m,
 			Side side,
 			String matchedSetup,
 			RegimeTag activeRegimeTag) {
-		double entryPrice = bar5m.close();
-		double qty = props.paperNotionalUsd() / Math.max(entryPrice, 1e-9);
 		double tickSize = resolveTickSize(state.symbol);
+		String bracketId = UUID.randomUUID().toString();
+		double estimatedEntryPrice = bar5m.close();
+		double qty = props.paperNotionalUsd() / Math.max(estimatedEntryPrice, 1e-9);
+		double entryPrice = estimatedEntryPrice;
+		String entryOrderClientId = "ELITE_ENTRY_" + state.symbol + "_" + bracketId;
+		Long entryOrderId = null;
+
+		if (props.mode() == EliteV1Properties.Mode.LIVE) {
+			String entrySide = side == Side.LONG ? "BUY" : "SELL";
+			OrderResponse entryResponse = orderClient.placeMarketOrder(
+					state.symbol,
+					entrySide,
+					BigDecimal.valueOf(qty),
+					null,
+					entryOrderClientId).block();
+			if (entryResponse == null || entryResponse.orderId() == null) {
+				LOGGER.warn("EVENT=ENTRY_FAILED symbol={} side={} reason=NULL_RESPONSE", state.symbol, side);
+				return;
+			}
+			entryOrderId = entryResponse.orderId();
+			if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
+				entryPrice = entryResponse.avgPrice().doubleValue();
+			}
+		}
 
 		double tpRaw;
 		double slRaw;
@@ -483,6 +512,39 @@ private void openPaperPosition(SymbolState state,
 			slPrice = roundUp(slRaw, tickSize);
 		}
 
+		Long slOrderId = null;
+		Long tpOrderId = null;
+		String slClientOrderId = "ELITE_SL_" + state.symbol + "_" + bracketId;
+		String tpClientOrderId = "ELITE_TP_" + state.symbol + "_" + bracketId;
+		if (props.mode() == EliteV1Properties.Mode.LIVE) {
+			String exitSide = side == Side.LONG ? "SELL" : "BUY";
+			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(slPrice),
+					"MARK_PRICE",
+					slClientOrderId).block();
+			OrderResponse tpResponse = orderClient.placeTakeProfitMarketClosePositionOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(tpPrice),
+					"MARK_PRICE",
+					tpClientOrderId).block();
+			if (slResponse == null || slResponse.orderId() == null || tpResponse == null || tpResponse.orderId() == null) {
+				LOGGER.warn("EVENT=BRACKET_PLACE_FAIL symbol={} bracketId={}", state.symbol, bracketId);
+				return;
+			}
+			slOrderId = slResponse.orderId();
+			tpOrderId = tpResponse.orderId();
+			LOGGER.info("EVENT=BRACKET_PLACED symbol={} bracketId={} slStop={} tpStop={} slOrderId={} tpOrderId={}",
+					state.symbol,
+					bracketId,
+					slPrice,
+					tpPrice,
+					slOrderId,
+					tpOrderId);
+		}
+
 		state.positionSide = side;
 		state.entryPrice = entryPrice;
 		state.qty = qty;
@@ -493,7 +555,13 @@ private void openPaperPosition(SymbolState state,
 		state.slHitTimeMs = null;
 		state.tpHitBar1m = null;
 		state.slHitBar1m = null;
-		state.bracketId = UUID.randomUUID().toString();
+		state.bracketId = bracketId;
+		state.entryOrderId = entryOrderId;
+		state.entryClientOrderId = entryOrderClientId;
+		state.slOrderId = slOrderId;
+		state.slClientOrderId = slClientOrderId;
+		state.tpOrderId = tpOrderId;
+		state.tpClientOrderId = tpClientOrderId;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
 
@@ -511,7 +579,67 @@ private void openPaperPosition(SymbolState state,
 		node.put("tickSize", tickSize);
 		node.put("matchedSetup", matchedSetup);
 		node.put("activeRegimeTag", activeRegimeTag.name());
+		if (entryOrderId != null) {
+			node.put("entryOrderId", entryOrderId);
+		}
+		if (slOrderId != null) {
+			node.put("slOrderId", slOrderId);
+		}
+		if (tpOrderId != null) {
+			node.put("tpOrderId", tpOrderId);
+		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+	}
+
+	private void checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
+		if (state.positionSide == Side.NONE || state.bracketId == null || state.slOrderId == null || state.tpOrderId == null) {
+			return;
+		}
+		Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(state.symbol).block();
+		if (openOrders == null) {
+			return;
+		}
+		boolean slOpen = openOrders.containsKey(state.slOrderId);
+		boolean tpOpen = openOrders.containsKey(state.tpOrderId);
+		if (slOpen && tpOpen) {
+			return;
+		}
+		if (!slOpen) {
+			OrderResponse sl = orderClient.fetchOrder(state.symbol, state.slOrderId).block();
+			if (sl != null && "FILLED".equalsIgnoreCase(sl.status())) {
+				handleBracketFill(state, "SL_ORDER_FILLED", state.slOrderId, state.slClientOrderId, state.tpOrderId, sl, oneMinuteBar.closeTime());
+				return;
+			}
+		}
+		if (!tpOpen) {
+			OrderResponse tp = orderClient.fetchOrder(state.symbol, state.tpOrderId).block();
+			if (tp != null && "FILLED".equalsIgnoreCase(tp.status())) {
+				handleBracketFill(state, "TP_ORDER_FILLED", state.tpOrderId, state.tpClientOrderId, state.slOrderId, tp, oneMinuteBar.closeTime());
+			}
+		}
+	}
+
+	private void handleBracketFill(SymbolState state,
+			String reason,
+			Long exitOrderId,
+			String exitClientOrderId,
+			Long otherOrderId,
+			OrderResponse filledOrder,
+			long closeTimeMs) {
+		if (otherOrderId != null) {
+			try {
+				orderClient.cancelOrder(state.symbol, otherOrderId).block();
+				LOGGER.info("EVENT=BRACKET_CANCEL_OTHER symbol={} canceledOrderId={}", state.symbol, otherOrderId);
+			} catch (Exception ignored) {
+			}
+		}
+		double exitPrice = filledOrder != null && filledOrder.avgPrice() != null && filledOrder.avgPrice().doubleValue() > 0
+				? filledOrder.avgPrice().doubleValue()
+				: ("TP_ORDER_FILLED".equals(reason) ? state.tpPrice : state.slPrice);
+		LOGGER.info("EVENT=BRACKET_EXIT symbol={} by={} exitOrderId={}", state.symbol, reason, exitOrderId);
+		ExitReason exitReason = "TP_ORDER_FILLED".equals(reason) ? ExitReason.TP_ORDER_FILLED : ExitReason.SL_ORDER_FILLED;
+		exitPosition(state, exitReason, exitPrice, closeTimeMs,
+				new ExitEvaluation(exitReason, "NONE", reason, null));
 	}
 
 	private void checkPaperExit(SymbolState state, Candle oneMinuteBar) {
@@ -546,6 +674,9 @@ private void openPaperPosition(SymbolState state,
 		node.put("qty", state.qty);
 		node.put("realizedPnl", pnl);
 		node.put("exitReason", reason.name());
+		if (state.entryOrderId != null) { node.put("entryOrderId", state.entryOrderId); }
+		if (state.slOrderId != null) { node.put("slOrderId", state.slOrderId); }
+		if (state.tpOrderId != null) { node.put("tpOrderId", state.tpOrderId); }
 		node.put("tpPrice", state.tpPrice);
 		node.put("slPrice", state.slPrice);
 		if (state.tpHitTimeMs != null) {
@@ -577,6 +708,12 @@ private void openPaperPosition(SymbolState state,
 		state.slHitTimeMs = null;
 		state.tpHitBar1m = null;
 		state.slHitBar1m = null;
+		state.entryOrderId = null;
+		state.entryClientOrderId = null;
+		state.slOrderId = null;
+		state.slClientOrderId = null;
+		state.tpOrderId = null;
+		state.tpClientOrderId = null;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 	}
 
@@ -940,7 +1077,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 	enum ExitReason {
 		TAKE_PROFIT,
 		STOP_LOSS,
-		TIME_STOP_20M
+		TIME_STOP_20M,
+		TP_ORDER_FILLED,
+		SL_ORDER_FILLED
 	}
 
 	enum WarmupMode {
@@ -1118,6 +1257,12 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private HitSnapshot tpHitBar1m;
 		private HitSnapshot slHitBar1m;
 		private String bracketId;
+		private Long entryOrderId;
+		private String entryClientOrderId;
+		private Long slOrderId;
+		private String slClientOrderId;
+		private Long tpOrderId;
+		private String tpClientOrderId;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
 		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();

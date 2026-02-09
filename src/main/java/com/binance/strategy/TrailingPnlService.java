@@ -37,6 +37,7 @@ public class TrailingPnlService {
 	private final Map<String, Object> fileLocks = new ConcurrentHashMap<>();
 	private final int exitConfirmTicksDefault = 2;
 	private static final int POSITION_SYNC_CONCURRENCY = 10;
+	private boolean trailingExitEnabled = false;
 
 	public TrailingPnlService(StrategyProperties strategyProperties,
 			BinanceFuturesOrderClient orderClient,
@@ -48,12 +49,14 @@ public class TrailingPnlService {
 		this.ctiLbStrategy = ctiLbStrategy;
 		this.objectMapper = objectMapper;
 		this.stopLossAuditService = stopLossAuditService;
-		startPositionSync();
 	}
 
 	// TrailingPnlService.java içinde onMarkPrice metodunu güncelleyin
 
 	public void onMarkPrice(String symbol, double markPrice) {
+		if (!trailingExitEnabled) {
+			return;
+		}
 		boolean roiEnabled = strategyProperties.roiExitEnabled()
 				&& strategyProperties.roiTakeProfitPct() > 0
 				&& strategyProperties.roiStopLossPct() > 0;
@@ -243,6 +246,9 @@ public class TrailingPnlService {
 		}
 	}
 	public void onPositionUpdate(String symbol, double entryPrice, double qty, String side, Integer leverage) {
+		if (!trailingExitEnabled) {
+			return;
+		}
 		if (qty == 0 || entryPrice <= 0) {
 			resetState(symbol);
 			positionMap.remove(symbol);
