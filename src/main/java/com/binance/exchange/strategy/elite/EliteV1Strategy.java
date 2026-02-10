@@ -2,7 +2,6 @@ package com.binance.exchange.strategy.elite;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -53,6 +52,10 @@ public class EliteV1Strategy implements Strategy {
 	private static final DateTimeFormatter ISO_OFFSET_FMT = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 	private static final long ONE_MIN_MS = 60_000L;
 	private static final long FIVE_MIN_MS = 300_000L;
+	private static final double TP_PCT = 0.0075;
+	private static final double SL_PCT = 0.0050;
+	private static final int LOOKAHEAD_BARS = 36;
+	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
@@ -283,35 +286,19 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 
-		PreCheckAction preCheck = evaluatePreChecks(baselinesReady,
-				state.positionSide,
-				state.entriesToday >= props.maxEntriesPerSymbolPerDay(),
-				globalOpenPositions.get(),
-				props.maxOpenPositionsGlobal());
+		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
 		if (preCheck.action != DecisionAction.CONTINUE) {
 			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null);
 			return;
 		}
 
-		Candidate longCandidate = evaluateLong(state.symbol, metrics);
-		Candidate shortCandidate = evaluateShort(metrics);
-
-		if (longCandidate.enter && shortCandidate.enter) {
-			writeDecision(state, bar5m, "NO_ENTRY", null, "BOTH_SIDES_MATCHED", metrics, ShortEvalResult.ofConflict());
+		LongSetupEval longEval = evaluateElitV1LongSetup(metrics, bar5m, state.symbol, bar5m.closeTime());
+		if (longEval.signal()) {
+			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
+			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", "ELIT_V1_LONG_MATCH", metrics, longEval);
 			return;
 		}
-		if (longCandidate.enter) {
-			openPosition(state, bar5m, Side.LONG, longCandidate.setup, metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_LONG", longCandidate.setup, null, metrics, null);
-			return;
-		}
-		if (shortCandidate.enter) {
-			openPosition(state, bar5m, Side.SHORT, shortCandidate.setup, metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_SHORT", shortCandidate.setup, null, metrics, shortCandidate.shortEvalResult);
-			return;
-		}
-		String blockReason = shortCandidate.blockReason != null ? shortCandidate.blockReason : longCandidate.blockReason;
-		writeDecision(state, bar5m, "NO_ENTRY", null, blockReason, metrics, shortCandidate.shortEvalResult);
+		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval);
 	}
 
 	private void rollDay(SymbolState state, long closeTimeMs) {
@@ -336,136 +323,70 @@ public class EliteV1Strategy implements Strategy {
 		return Math.max(warmupProperties.candles5m(), 0);
 	}
 
-	static PreCheckAction evaluatePreChecks(boolean baselinesReady,
-			Side positionSide,
-			boolean tradedToday,
-			int globalOpenPositions,
-			int maxOpenPositionsGlobal) {
+	static PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide) {
 		if (!baselinesReady) {
 			return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null);
 		}
 		if (positionSide != Side.NONE) {
-			return new PreCheckAction(DecisionAction.IN_POSITION, null);
-		}
-		if (tradedToday) {
-			return new PreCheckAction(DecisionAction.TRADDED_TODAY, "TRADDED_TODAY");
-		}
-		if (globalOpenPositions >= maxOpenPositionsGlobal) {
-			return new PreCheckAction(DecisionAction.GLOBAL_MAX_OPEN_POS, "GLOBAL_MAX_OPEN_POS");
+			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null);
 		}
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
 	}
 
-	private Candidate evaluateLong(String symbol, Metrics m) {
-		if (!props.longConfig().enabled() || m.activeRegimeTag != RegimeTag.CHOP) {
-			return Candidate.noEntry(null, null);
-		}
-		boolean match = m.rsi9_5m >= props.longConfig().rsiMin()
-				&& m.rsi9_5m <= props.longConfig().rsiMax()
-				&& m.ema20DistPct >= props.longConfig().ema20DistMin()
-				&& m.bbPercentB_5m <= props.longConfig().bbPercentBMax();
-		if (!match) {
-			return Candidate.noEntry(null, null);
-		}
-		if (props.longConfig().enableSetup5SafetyGate()) {
-			if (m.bbWidth_5m >= props.longConfig().setup5().maxBbWidth()) {
-				return Candidate.noEntry("SETUP5_BLOCK_BBWIDTH_WIDE", null);
-			}
-			if (m.volRatio >= props.longConfig().setup5().maxVolRatio()) {
-				return Candidate.noEntry("SETUP5_BLOCK_VOL_SPIKE", null);
-			}
-			if (m.bwRatio5m > props.longConfig().setup5().chopMaxBwRatio()) {
-				return Candidate.noEntry("SETUP5_BLOCK_CHOP_BWRATIO", null);
-			}
-			if (m.volRatioOfEma < props.longConfig().setup5().minVolRatioOfEma()) {
-				return Candidate.noEntry("SETUP5_BLOCK_LOW_VOLRATIO_OF_EMA", null);
-			}
-			if (m.atrRatio5m > props.longConfig().setup5().maxAtrRatio()) {
-				return Candidate.noEntry("SETUP5_BLOCK_ATR_SPIKE", null);
-			}
-			if (props.longConfig().setup5().requireStableRegime() && m.rawRegimeTag != m.activeRegimeTag) {
-				return Candidate.noEntry("SETUP5_BLOCK_REGIME_UNSTABLE", null);
+	private LongSetupEval evaluateElitV1LongSetup(Metrics m, Candle bar5m, String symbol, long nowMs) {
+		List<String> failReasons = new ArrayList<>();
+
+		Double takerBuyRatio = null;
+		OrderflowSnapshot orderflow = OrderflowSnapshot.fromCandle(bar5m);
+		if (bar5m.volume() <= 0.0 || orderflow.takerBuyBaseVolume() == null || !Double.isFinite(orderflow.takerBuyBaseVolume())) {
+			failReasons.add("FAIL_ORDERFLOW_MISSING");
+		} else {
+			takerBuyRatio = orderflow.takerBuyBaseVolume() / bar5m.volume();
+			if (!Double.isFinite(takerBuyRatio) || takerBuyRatio <= 0.60) {
+				failReasons.add("FAIL_TAKER_BUY_RATIO");
 			}
 		}
-		double tickPct = resolveTickSize(symbol) / Math.max(m.close5m, 1e-9);
-		if (tickPct > props.longConfig().maxTickPctAllowed()) {
-			return Candidate.noEntry("LONG_TICK_TOO_COARSE", null);
+
+		Double imbalance = null;
+		LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
+		if (snapshot == null) {
+			failReasons.add("FAIL_LIQUIDITY_MISSING");
+		} else {
+			long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
+			if (ageMs > LIQUIDITY_MAX_AGE_MS) {
+				failReasons.add("FAIL_LIQUIDITY_MISSING");
+			} else {
+				double bidQty = snapshot.bestBidQty();
+				double askQty = snapshot.bestAskQty();
+				if (!Double.isFinite(bidQty) || !Double.isFinite(askQty) || bidQty < 0.0 || askQty < 0.0) {
+					failReasons.add("FAIL_LIQUIDITY_MISSING");
+				} else {
+					double denom = bidQty + askQty;
+					if (denom <= 0.0) {
+						failReasons.add("FAIL_LIQUIDITY_MISSING");
+					} else {
+						imbalance = (bidQty - askQty) / denom;
+						if (!Double.isFinite(imbalance) || imbalance <= 0.15) {
+							failReasons.add("FAIL_IMBALANCE");
+						}
+					}
+				}
+			}
 		}
-		return Candidate.enter("SETUP5_ELITE", null);
+
+		boolean isDownTrend = m.activeRegimeTag == RegimeTag.TREND
+				&& m.close5m < m.ema20_5m
+				&& m.macdDelta < 0.0
+				&& m.ema20SlopeDown;
+		if (isDownTrend) {
+			failReasons.add("FAIL_DOWN_TREND");
+		}
+
+		boolean signal = failReasons.isEmpty();
+		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
 	}
 
-	static List<String> evaluateShortMomentumFailures(double pb,
-			double bwRatio,
-			double volRatioOfEma,
-			double close5m,
-			double ema20_5m,
-			boolean ema20SlopeDown,
-			double macdDelta,
-			double macdRatio5m,
-			EliteV1Properties.ShortEliteMomentum cfg) {
-		List<String> fails = new ArrayList<>();
-		if (!(pb >= cfg.pbMin() && pb < cfg.pbMax())) {
-			fails.add("PB");
-		}
-		if (!(bwRatio >= cfg.bwRatioMin() && bwRatio < cfg.bwRatioMax())) {
-			fails.add("BWRATIO");
-		}
-		if (!(volRatioOfEma >= cfg.volRatioOfEmaMin() && volRatioOfEma <= cfg.volRatioOfEmaMax())) {
-			fails.add("VOL");
-		}
-		if (cfg.requireCloseBelowEma20() && !(close5m < ema20_5m)) {
-			fails.add("CLOSE_BELOW_EMA20");
-		}
-		if (cfg.requireEma20SlopeDown() && !ema20SlopeDown) {
-			fails.add("EMA20_SLOPE");
-		}
-		if (cfg.requireMacdDeltaNegative() && !(macdDelta < 0.0)) {
-			fails.add("MACD_DELTA");
-		}
-		if (macdRatio5m < cfg.macdRatioMin()) {
-			fails.add("MACD_RATIO");
-		}
-		return fails;
-	}
-
-	private Candidate evaluateShort(Metrics m) {
-		if (!props.shortConfig().enabled()) {
-			return Candidate.noEntry(null, ShortEvalResult.ofNotEvaluated());
-		}
-		if (m.rawRegimeTag != m.activeRegimeTag) {
-			return Candidate.noEntry("SHORT_DISABLE_REGIME_LAG", ShortEvalResult.ofRegimeFail());
-		}
-		if (m.activeRegimeTag != RegimeTag.TREND) {
-			return Candidate.noEntry(null, ShortEvalResult.ofRegimeFail());
-		}
-		if (m.bbOutside_5m && props.shortConfig().veto().requireBbOutsideFalse()) {
-			return Candidate.noEntry("SHORT_VETO_BB_OUTSIDE", ShortEvalResult.ofVeto());
-		}
-		if (m.bbPercentB_5m <= props.shortConfig().veto().bbPercentBMinExclusive()) {
-			return Candidate.noEntry("SHORT_VETO_PB_TOO_LOW", ShortEvalResult.ofVeto());
-		}
-		if (m.ema20DistPct > props.shortConfig().veto().ema20DistPctMax()) {
-			return Candidate.noEntry("SHORT_VETO_EMA20_CHASE", ShortEvalResult.ofVeto());
-		}
-
-		EliteV1Properties.ShortEliteMomentum cfg = props.shortConfig().eliteMomentum();
-		List<String> fails = evaluateShortMomentumFailures(
-				m.bbPercentB_5m,
-				m.bwRatio5m,
-				m.volRatioOfEma,
-				m.close5m,
-				m.ema20_5m,
-				m.ema20SlopeDown,
-				m.macdDelta,
-				m.macdRatio5m,
-				cfg);
-		if (!fails.isEmpty()) {
-			return Candidate.noEntry("NO_SHORT_ELITE_MATCH", ShortEvalResult.ofFail(fails));
-		}
-		return Candidate.enter("SHORT_ELITE_MOMENTUM", ShortEvalResult.ofMatched());
-	}
-
-private void openPosition(SymbolState state,
+	private void openPosition(SymbolState state,
 			Candle bar5m,
 			Side side,
 			String matchedSetup,
@@ -479,7 +400,11 @@ private void openPosition(SymbolState state,
 		Long entryOrderId = null;
 
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			String entrySide = side == Side.LONG ? "BUY" : "SELL";
+			if (side != Side.LONG) {
+				LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
+				return;
+			}
+			String entrySide = "BUY";
 			OrderResponse entryResponse = orderClient.placeMarketOrder(
 					state.symbol,
 					entrySide,
@@ -500,24 +425,21 @@ private void openPosition(SymbolState state,
 		double slRaw;
 		double tpPrice;
 		double slPrice;
-		if (side == Side.LONG) {
-			tpRaw = entryPrice * (1.0 + props.tpPct());
-			slRaw = entryPrice * (1.0 - props.slPct());
-			tpPrice = roundUp(tpRaw, tickSize);
-			slPrice = roundDown(slRaw, tickSize);
-		} else {
-			tpRaw = entryPrice * (1.0 - props.tpPct());
-			slRaw = entryPrice * (1.0 + props.slPct());
-			tpPrice = roundDown(tpRaw, tickSize);
-			slPrice = roundUp(slRaw, tickSize);
+		if (side != Side.LONG) {
+			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
+			return;
 		}
+		tpRaw = entryPrice * (1.0 + TP_PCT);
+		slRaw = entryPrice * (1.0 - SL_PCT);
+		tpPrice = roundUp(tpRaw, tickSize);
+		slPrice = roundDown(slRaw, tickSize);
 
 		Long slOrderId = null;
 		Long tpOrderId = null;
 		String slClientOrderId = "ELITE_SL_" + state.symbol + "_" + bracketId;
 		String tpClientOrderId = "ELITE_TP_" + state.symbol + "_" + bracketId;
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			String exitSide = side == Side.LONG ? "SELL" : "BUY";
+			String exitSide = "SELL";
 			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
 					state.symbol,
 					exitSide,
@@ -579,6 +501,9 @@ private void openPosition(SymbolState state,
 		node.put("tickSize", tickSize);
 		node.put("matchedSetup", matchedSetup);
 		node.put("activeRegimeTag", activeRegimeTag.name());
+		node.put("elit.tpPct", TP_PCT);
+		node.put("elit.slPct", SL_PCT);
+		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
 		if (entryOrderId != null) {
 			node.put("entryOrderId", entryOrderId);
 		}
@@ -639,23 +564,26 @@ private void openPosition(SymbolState state,
 		LOGGER.info("EVENT=BRACKET_EXIT symbol={} by={} exitOrderId={}", state.symbol, reason, exitOrderId);
 		ExitReason exitReason = "TP_ORDER_FILLED".equals(reason) ? ExitReason.TP_ORDER_FILLED : ExitReason.SL_ORDER_FILLED;
 		exitPosition(state, exitReason, exitPrice, closeTimeMs,
-				new ExitEvaluation(exitReason, "NONE", reason, null));
+				new ExitEvaluation(exitReason, "NONE", reason, null, false));
 	}
 
 	private void checkPaperExit(SymbolState state, Candle oneMinuteBar) {
-		if (state.positionSide == Side.NONE || state.bracketId == null) {
+		if (state.positionSide == Side.NONE || state.bracketId == null || state.positionSide != Side.LONG) {
 			return;
 		}
-		updateHitTracking(state, oneMinuteBar);
-		ExitEvaluation evaluation = evaluateExit(state);
-		if (evaluation != null && evaluation.exitReason != null) {
-			double exitPrice = evaluation.exitReason == ExitReason.TAKE_PROFIT ? state.tpPrice : state.slPrice;
-			exitPosition(state, evaluation.exitReason, exitPrice, oneMinuteBar.closeTime(), evaluation);
+		if (oneMinuteBar.low() <= state.slPrice) {
+			exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, oneMinuteBar.closeTime(),
+					new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
 			return;
 		}
-		if (shouldTimeStop(state.entryTimeMs, oneMinuteBar.closeTime(), props.timeStopMinutes())) {
-			exitPosition(state, ExitReason.TIME_STOP_20M, oneMinuteBar.close(), oneMinuteBar.closeTime(),
-					new ExitEvaluation(ExitReason.TIME_STOP_20M, "NONE", "TIME_STOP", null));
+		if (oneMinuteBar.high() >= state.tpPrice) {
+			exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, oneMinuteBar.closeTime(),
+					new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
+			return;
+		}
+		if ((oneMinuteBar.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
+			exitPosition(state, ExitReason.TIMEOUT_36B, oneMinuteBar.close(), oneMinuteBar.closeTime(),
+					new ExitEvaluation(ExitReason.TIMEOUT_36B, "NONE", "TIMEOUT_36B", null, true));
 		}
 	}
 
@@ -690,7 +618,8 @@ private void openPosition(SymbolState state,
 			node.putNull("slHitTimeMs");
 		}
 		node.put("firstHit", evaluation == null ? "NONE" : evaluation.firstHit);
-		node.put("exitTrigger", evaluation == null ? "TIME_STOP" : evaluation.exitTrigger);
+		node.put("exitTrigger", evaluation == null ? "TIMEOUT_36B" : evaluation.exitTrigger);
+		node.put("elit.timeoutLoss", evaluation != null && evaluation.timeoutLoss);
 		if (evaluation != null && evaluation.ambiguityRule != null) {
 			node.put("ambiguityRule", evaluation.ambiguityRule);
 		}
@@ -717,46 +646,6 @@ private void openPosition(SymbolState state,
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 	}
 
-	private void updateHitTracking(SymbolState state, Candle oneMinuteBar) {
-		if (state.positionSide == Side.LONG) {
-			if (state.tpHitTimeMs == null && oneMinuteBar.high() >= state.tpPrice) {
-				state.tpHitTimeMs = oneMinuteBar.closeTime();
-				state.tpHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
-			}
-			if (state.slHitTimeMs == null && oneMinuteBar.low() <= state.slPrice) {
-				state.slHitTimeMs = oneMinuteBar.closeTime();
-				state.slHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
-			}
-		} else if (state.positionSide == Side.SHORT) {
-			if (state.tpHitTimeMs == null && oneMinuteBar.low() <= state.tpPrice) {
-				state.tpHitTimeMs = oneMinuteBar.closeTime();
-				state.tpHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
-			}
-			if (state.slHitTimeMs == null && oneMinuteBar.high() >= state.slPrice) {
-				state.slHitTimeMs = oneMinuteBar.closeTime();
-				state.slHitBar1m = HitSnapshot.fromCandle(oneMinuteBar);
-			}
-		}
-	}
-
-	private ExitEvaluation evaluateExit(SymbolState state) {
-		if (state.tpHitTimeMs == null && state.slHitTimeMs == null) {
-			return null;
-		}
-		if (state.tpHitTimeMs != null && state.slHitTimeMs == null) {
-			return new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null);
-		}
-		if (state.slHitTimeMs != null && state.tpHitTimeMs == null) {
-			return new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null);
-		}
-		if (state.tpHitTimeMs < state.slHitTimeMs) {
-			return new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null);
-		}
-		if (state.slHitTimeMs < state.tpHitTimeMs) {
-			return new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null);
-		}
-		return new ExitEvaluation(ExitReason.STOP_LOSS, "AMBIGUOUS_SAME_1M", "SL", "CONSERVATIVE_SL_WINS");
-	}
 
 	private static void putHitBar(ObjectNode parent, String field, HitSnapshot c) {
 		ObjectNode b = parent.putObject(field);
@@ -775,7 +664,7 @@ private void openPosition(SymbolState state,
 			String matchedSetup,
 			String blockReason,
 			Metrics metrics,
-			ShortEvalResult shortEvalResult) {
+			LongSetupEval longSetupEval) {
 		ObjectNode node = objectMapper.createObjectNode();
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
@@ -847,11 +736,24 @@ private void openPosition(SymbolState state,
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
 		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
-		ShortEvalResult resolvedShort = shortEvalResult == null ? ShortEvalResult.ofNotEvaluated() : shortEvalResult;
-		node.put("shortEliteMatched", resolvedShort.matched);
-		node.put("shortEliteMatchedSetup", resolvedShort.matchedSetup);
-		var failArr = node.putArray("shortEliteFailReasons");
-		resolvedShort.failReasons.forEach(failArr::add);
+		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
+		node.put("elit.tpPct", TP_PCT);
+		node.put("elit.slPct", SL_PCT);
+		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+		if (eval.takerBuyRatio != null && Double.isFinite(eval.takerBuyRatio)) {
+			node.put("elit.takerBuyRatio", eval.takerBuyRatio);
+		} else {
+			node.putNull("elit.takerBuyRatio");
+		}
+		if (eval.imbalance != null && Double.isFinite(eval.imbalance)) {
+			node.put("elit.imbalance", eval.imbalance);
+		} else {
+			node.putNull("elit.imbalance");
+		}
+		node.put("elit.isDownTrend", eval.isDownTrend);
+		node.put("shortEliteMatched", false);
+		node.putNull("shortEliteMatchedSetup");
+		node.putArray("shortEliteFailReasons");
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
 	}
 
@@ -860,7 +762,7 @@ private void openPosition(SymbolState state,
 		if (blockReason != null && !blockReason.isBlank()) {
 			return blockReason;
 		}
-		if ("ENTER_LONG".equals(action) || "ENTER_SHORT".equals(action)) {
+		if ("ENTER_LONG".equals(action)) {
 			return "NONE";
 		}
 		if ("NO_ENTRY".equals(action)) {
@@ -869,14 +771,8 @@ private void openPosition(SymbolState state,
 		if ("INPUTS_NOT_READY".equals(action)) {
 			return "INPUTS_NOT_READY";
 		}
-		if ("IN_POSITION".equals(action)) {
-			return "IN_POSITION";
-		}
-		if ("TRADDED_TODAY".equals(action)) {
-			return "TRADDED_TODAY";
-		}
-		if ("GLOBAL_MAX_OPEN_POS".equals(action)) {
-			return "GLOBAL_MAX_OPEN_POS";
+		if ("IN_POSITION_NO_ENTRY".equals(action)) {
+			return "IN_POSITION_NO_ENTRY";
 		}
 		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
 	}
@@ -1030,10 +926,6 @@ private Path decisionPath(String symbol, LocalDate day) {
 		return touchedSl ? ExitReason.STOP_LOSS : ExitReason.TAKE_PROFIT;
 	}
 
-	static boolean shouldTimeStop(long entryTimeMs, long nowMs, int timeStopMinutes) {
-		return nowMs - entryTimeMs >= (long) timeStopMinutes * 60_000L;
-	}
-
 	static double roundUp(double raw, double tickSize) {
 		BigDecimal tick = BigDecimal.valueOf(tickSize);
 		return BigDecimal.valueOf(raw)
@@ -1077,7 +969,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 	enum ExitReason {
 		TAKE_PROFIT,
 		STOP_LOSS,
-		TIME_STOP_20M,
+		TIMEOUT_36B,
 		TP_ORDER_FILLED,
 		SL_ORDER_FILLED
 	}
@@ -1105,15 +997,13 @@ private Path decisionPath(String symbol, LocalDate day) {
 		enum DecisionAction {
 		CONTINUE,
 		INPUTS_NOT_READY,
-		IN_POSITION,
-		TRADDED_TODAY,
-		GLOBAL_MAX_OPEN_POS
+		IN_POSITION_NO_ENTRY
 	}
 
 	record PreCheckAction(DecisionAction action, String blockReason) {
 	}
 
-	private record ExitEvaluation(ExitReason exitReason, String firstHit, String exitTrigger, String ambiguityRule) {
+	private record ExitEvaluation(ExitReason exitReason, String firstHit, String exitTrigger, String ambiguityRule, boolean timeoutLoss) {
 	}
 
 	private record HitSnapshot(double open, double high, double low, double close, double volume, long closeTimeMs) {
@@ -1201,41 +1091,12 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 	}
 
-	private record Candidate(boolean enter, String setup, String blockReason, ShortEvalResult shortEvalResult) {
-		private static Candidate enter(String setup, ShortEvalResult shortEvalResult) {
-			return new Candidate(true, setup, null, shortEvalResult);
-		}
-
-		private static Candidate noEntry(String blockReason, ShortEvalResult shortEvalResult) {
-			return new Candidate(false, null, blockReason, shortEvalResult);
+	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend) {
+		private static LongSetupEval empty() {
+			return new LongSetupEval(false, null, null, null, false);
 		}
 	}
 
-	private record ShortEvalResult(boolean matched, String matchedSetup, List<String> failReasons) {
-		private static ShortEvalResult ofMatched() {
-			return new ShortEvalResult(true, "SHORT_ELITE_MOMENTUM", List.of());
-		}
-
-		private static ShortEvalResult ofFail(List<String> failReasons) {
-			return new ShortEvalResult(false, null, failReasons);
-		}
-
-		private static ShortEvalResult ofVeto() {
-			return new ShortEvalResult(false, null, List.of());
-		}
-
-		private static ShortEvalResult ofRegimeFail() {
-			return new ShortEvalResult(false, null, List.of("REGIME"));
-		}
-
-		private static ShortEvalResult ofNotEvaluated() {
-			return new ShortEvalResult(false, null, List.of());
-		}
-
-		private static ShortEvalResult ofConflict() {
-			return new ShortEvalResult(false, null, List.of("REGIME"));
-		}
-	}
 
 	private static final class SymbolState {
 		private final String symbol;
