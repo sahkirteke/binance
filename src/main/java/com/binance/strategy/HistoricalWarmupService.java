@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import com.binance.exchange.strategy.elite.EliteV1Properties;
 import com.binance.market.BinanceMarketClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,35 +31,35 @@ public class HistoricalWarmupService {
 	private final StrategyRouter strategyRouter;
 	private final StrategyProperties strategyProperties;
 	private final WarmupProperties warmupProperties;
-	private final CtiLbStrategy ctiLbStrategy;
 	private final KlineStreamWatcher klineStreamWatcher;
 	private final MarkPriceStreamWatcher markPriceStreamWatcher;
 	private final ObjectMapper objectMapper;
 	private final SymbolFilterService symbolFilterService;
+	private final EliteV1Properties eliteV1Properties;
 
 	public HistoricalWarmupService(BinanceMarketClient marketClient,
 			StrategyRouter strategyRouter,
 			StrategyProperties strategyProperties,
 			WarmupProperties warmupProperties,
-			CtiLbStrategy ctiLbStrategy,
 			KlineStreamWatcher klineStreamWatcher,
 			MarkPriceStreamWatcher markPriceStreamWatcher,
 			ObjectMapper objectMapper,
-			SymbolFilterService symbolFilterService) {
+			SymbolFilterService symbolFilterService,
+			EliteV1Properties eliteV1Properties) {
 		this.marketClient = marketClient;
 		this.strategyRouter = strategyRouter;
 		this.strategyProperties = strategyProperties;
 		this.warmupProperties = warmupProperties;
-		this.ctiLbStrategy = ctiLbStrategy;
 		this.klineStreamWatcher = klineStreamWatcher;
 		this.markPriceStreamWatcher = markPriceStreamWatcher;
 		this.objectMapper = objectMapper;
 		this.symbolFilterService = symbolFilterService;
+		this.eliteV1Properties = eliteV1Properties;
 	}
 
 	@PostConstruct
 	public void start() {
-		if (!warmupProperties.enabled() || strategyProperties.active() != StrategyType.CTI_LB) {
+		if (!isWarmupEnabled() || !strategyRouter.needsKlines()) {
 			return;
 		}
 		List<String> symbols = strategyProperties.resolvedTradeSymbols();
@@ -67,68 +68,96 @@ public class HistoricalWarmupService {
 				.subscribe();
 	}
 
+	private boolean isWarmupEnabled() {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			return eliteV1Properties.warmup() != null && eliteV1Properties.warmup().enabled();
+		}
+		return warmupProperties.enabled();
+	}
+
 	public Mono<Void> warmupAllSymbols(List<String> symbols) {
 		long start = System.currentTimeMillis();
 		int concurrency = resolveConcurrency();
-//		LOGGER.info("EVENT=WARMUP_START symbolsCount={} concurrency={}", symbols.size(), concurrency);
-		ctiLbStrategy.setWarmupMode(true);
+		strategyRouter.setWarmupMode(true);
 		AtomicInteger readySymbols = new AtomicInteger();
 		AtomicInteger failedSymbols = new AtomicInteger();
-		return Flux.fromIterable(symbols)
+		java.util.concurrent.ConcurrentHashMap<String, String> notReadyReasons = new java.util.concurrent.ConcurrentHashMap<>();
+
+		Mono<Void> warmupFlow = Flux.fromIterable(symbols)
 				.flatMap(symbol -> warmupSymbol(symbol)
-						.doOnNext(ready -> {
-							if (ready) {
+						.doOnNext(report -> {
+							if (report.ready()) {
 								readySymbols.incrementAndGet();
+							} else {
+								notReadyReasons.put(symbol, report.reason());
 							}
 						})
 						.onErrorResume(error -> {
 							failedSymbols.incrementAndGet();
-//							LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} error={}", symbol, error.getMessage());
-							scheduleRetry(symbol);
-							return Mono.just(false);
+							notReadyReasons.put(symbol, "EXCEPTION " + error.getMessage());
+							return Mono.just(WarmupReport.failed(symbol, error));
 						}), concurrency)
-				.then()
-				.then(Flux.fromIterable(symbols)
-						.flatMap(ctiLbStrategy::refreshAfterWarmup, concurrency)
-						.then())
-				.doFinally(signal -> {
-					boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
-					klineStreamWatcher.markWarmupComplete();
-					klineStreamWatcher.startStreams();
-					markPriceStreamWatcher.markWarmupComplete();
-					markPriceStreamWatcher.startStreams();
-					ctiLbStrategy.setWarmupMode(false);
-					if (filtersReady) {
-						ctiLbStrategy.enableOrdersAfterWarmup();
-					}
-					long durationMs = System.currentTimeMillis() - start;
-					LOGGER.info("EVENT=WARMUP_DONE totalDurationMs={} readySymbols={} failedSymbols={}", durationMs,
-							readySymbols.get(),
-							failedSymbols.get());
-				});
+				.then();
+
+		if (strategyProperties.active() == StrategyType.CTI_LB) {
+			warmupFlow = warmupFlow.then(Flux.fromIterable(symbols)
+					.flatMap(symbol -> strategyRouter.refreshAfterWarmup(symbol), concurrency)
+					.then());
+		}
+
+		return warmupFlow.doFinally(signal -> {
+			int total = symbols.size();
+			int ready = readySymbols.get();
+			int failed = failedSymbols.get();
+			int notReady = Math.max(0, total - ready);
+			long durationMs = System.currentTimeMillis() - start;
+			if (ready == total) {
+				boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
+				klineStreamWatcher.markWarmupComplete();
+				klineStreamWatcher.startStreams();
+				markPriceStreamWatcher.markWarmupComplete();
+				markPriceStreamWatcher.startStreams();
+				strategyRouter.setWarmupMode(false);
+				strategyRouter.enableOrdersAfterWarmup(filtersReady);
+			}
+			LOGGER.info("EVENT=WARMUP_DONE readySymbols={} notReadySymbols={} failedSymbols={} totalDurationMs={}",
+					ready,
+					notReady,
+					failed,
+					durationMs);
+			notReadyReasons.forEach((symbol, reason) -> LOGGER.info("EVENT=WARMUP_NOT_READY symbol={} reason={}", symbol, reason));
+		});
 	}
 
-	public Mono<Boolean> warmupSymbol(String symbol) {
-		long start = System.currentTimeMillis();
+
+	public Mono<WarmupReport> warmupSymbol(String symbol) {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			return warmupSymbolInterval(symbol, "5m", resolveCandles5m())
+					.map(count5m -> {
+						var readiness = strategyRouter.eliteWarmupReadiness(symbol);
+						WarmupReport report = readiness == null
+								? new WarmupReport(symbol, false, "STATUS_NULL")
+								: new WarmupReport(symbol, readiness.ready(), readiness.reason());
+						if (report.ready()) {
+							LOGGER.info("EVENT=WARMUP_READY symbol={} have5m={} required5m={}", symbol, count5m, resolveCandles5m());
+						}
+						strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
+						return report;
+					});
+		}
 		return warmupSymbolInterval(symbol, "5m", resolveCandles5m())
 				.flatMap(count5m -> warmupSymbolInterval(symbol, "1m", resolveCandles1m())
 						.map(count1m -> new WarmupCounts(count1m, count5m)))
+				.doOnNext(counts -> strategyRouter.flushWarmup(symbol))
 				.map(counts -> {
 					ScoreSignalIndicator.WarmupStatus status = strategyRouter.warmupStatus(symbol);
 					boolean ready = status != null && status.cti5mReady() && status.adx5mReady();
-					long durationMs = System.currentTimeMillis() - start;
-//					LOGGER.info("EVENT=WARMUP_DONE symbol={} candles1m={} candles5m={} cti5mBarsSeen={} adx5mBarsSeen={} ready={} durationMs={}",
-//							symbol,
-//							counts.candles1m(),
-//							counts.candles5m(),
-//							status == null ? 0 : status.cti5mBarsSeen(),
-//							status == null ? 0 : status.adx5mBarsSeen(),
-//							ready,
-//							durationMs);
+					WarmupReport report = new WarmupReport(symbol, ready, ready ? "READY" : (status == null ? "STATUS_NULL" : "BASELINE_NOT_SEEDED"));
 					strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
-					return ready;
+					return report;
 				});
 	}
+
 
 	private Mono<Integer> warmupSymbolInterval(String symbol, String interval, int limit) {
 		return marketClient.fetchFuturesKlinesRaw(symbol, interval, limit)
@@ -151,8 +180,8 @@ public class HistoricalWarmupService {
 								kline.closeTime());
 						if ("5m".equals(interval)) {
 							strategyRouter.warmupFiveMinuteCandle(symbol, candle);
-						} else {
-							strategyRouter.onClosedOneMinuteCandle(symbol, candle);
+						} else if (strategyProperties.active() == StrategyType.CTI_LB) {
+							strategyRouter.warmupOneMinuteCandle(symbol, candle);
 						}
 					}
 				})
@@ -161,11 +190,8 @@ public class HistoricalWarmupService {
 
 	private void scheduleRetry(String symbol) {
 		Mono.delay(Duration.ofSeconds(30))
-				.then(warmupSymbol(symbol))
-				.onErrorResume(error -> {
-//					LOGGER.warn("EVENT=WARMUP_SYMBOL symbol={} retryError={}", symbol, error.getMessage());
-					return Mono.empty();
-				})
+				.then(warmupSymbol(symbol).then())
+				.onErrorResume(error -> Mono.empty())
 				.subscribe();
 	}
 
@@ -174,6 +200,9 @@ public class HistoricalWarmupService {
 	}
 
 	private int resolveCandles5m() {
+		if (strategyProperties.active() == StrategyType.ELITE_V1 && eliteV1Properties.warmup() != null && eliteV1Properties.warmup().enabled()) {
+			return eliteV1Properties.warmup().candles5m();
+		}
 		return warmupProperties.candles5m() > 0 ? warmupProperties.candles5m() : DEFAULT_CANDLES_5M;
 	}
 
@@ -204,6 +233,12 @@ public class HistoricalWarmupService {
 			return candles;
 		} catch (Exception ex) {
 			throw new IllegalStateException("Failed to parse klines for " + symbol + ": " + ex.getMessage(), ex);
+		}
+	}
+
+	private record WarmupReport(String symbol, boolean ready, String reason) {
+		static WarmupReport failed(String symbol, Throwable error) {
+			return new WarmupReport(symbol, false, "EXCEPTION " + error.getMessage());
 		}
 	}
 

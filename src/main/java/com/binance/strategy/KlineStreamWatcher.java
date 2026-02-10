@@ -1,6 +1,8 @@
 package com.binance.strategy;
 
 import java.net.URI;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -54,7 +56,7 @@ public class KlineStreamWatcher {
 
 	@PostConstruct
 	public void start() {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
+		if (!strategyRouter.needsKlines()) {
 			LOGGER.info("Kline stream not started (active={})", strategyProperties.active());
 			return;
 		}
@@ -67,7 +69,7 @@ public class KlineStreamWatcher {
 	}
 
 	public void startStreams() {
-		if (strategyProperties.active() != StrategyType.CTI_LB) {
+		if (!strategyRouter.needsKlines()) {
 			return;
 		}
 		if (!warmupComplete.get()) {
@@ -114,15 +116,87 @@ public class KlineStreamWatcher {
 			if (!kline.closed()) {
 				return;
 			}
-			Candle candle = new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.volume(),
-					kline.closeTime());
+			Candle candle = toCandle(kline);
 			if (KLINE_INTERVAL_5M.equals(message.interval())) {
+				LOGGER.debug("KLINE_5M_PARSED symbol={} v={} q={} n={} V={} Q={}",
+					event.symbol(),
+					candle.volume(),
+					candle.quoteVolume(),
+					candle.tradeCount(),
+					candle.takerBuyBaseVolume(),
+					candle.takerBuyQuoteVolume());
 				strategyRouter.onClosedFiveMinuteCandle(event.symbol(), candle);
 			} else {
 				strategyRouter.onClosedOneMinuteCandle(event.symbol(), candle);
 			}
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse kline message", ex);
+		}
+	}
+
+
+	private Candle toCandle(KlineEvent.Kline kline) {
+		Double quoteVolume = readDoubleAccessor(kline, "quoteVolume");
+		Long tradeCount = readLongAccessor(kline, "tradeCount");
+		Double takerBuyBaseVolume = readDoubleAccessor(kline, "takerBuyBaseVolume");
+		Double takerBuyQuoteVolume = readDoubleAccessor(kline, "takerBuyQuoteVolume");
+		try {
+			Constructor<Candle> fullCtor = Candle.class.getDeclaredConstructor(
+					double.class,
+					double.class,
+					double.class,
+					double.class,
+					double.class,
+					long.class,
+					Double.class,
+					Long.class,
+					Double.class,
+					Double.class);
+			return fullCtor.newInstance(
+					kline.open(),
+					kline.high(),
+					kline.low(),
+					kline.close(),
+					kline.volume(),
+					kline.closeTime(),
+					quoteVolume,
+					tradeCount,
+					takerBuyBaseVolume,
+					takerBuyQuoteVolume);
+		} catch (ReflectiveOperationException ex) {
+			return new Candle(kline.open(), kline.high(), kline.low(), kline.close(), kline.volume(), kline.closeTime());
+		}
+	}
+
+	private static Double readDoubleAccessor(Object target, String accessorName) {
+		if (target == null) {
+			return null;
+		}
+		try {
+			Method method = target.getClass().getMethod(accessorName);
+			Object value = method.invoke(target);
+			if (value == null) {
+				return null;
+			}
+			return value instanceof Number number ? number.doubleValue() : null;
+		} catch (ReflectiveOperationException ex) {
+			return null;
+		}
+	}
+
+	private static Long readLongAccessor(Object target, String accessorName) {
+		if (target == null) {
+			return null;
+		}
+		try {
+			Method method = target.getClass().getMethod(accessorName);
+			Object value = method.invoke(target);
+			if (value == null) {
+				return null;
+			}
+			return value instanceof Number number ? number.longValue() : null;
+		} catch (ReflectiveOperationException ex) {
+			return null;
 		}
 	}
 

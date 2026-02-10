@@ -6,5 +6,13 @@ public record Candle(
 		double low,
 		double close,
 		double volume,
-		long closeTime) {
+		long closeTime,
+		Double quoteVolume,
+		Long tradeCount,
+		Double takerBuyBaseVolume,
+		Double takerBuyQuoteVolume) {
+
+	public Candle(double open, double high, double low, double close, double volume, long closeTime) {
+		this(open, high, low, close, volume, closeTime, null, null, null, null);
+	}
 }

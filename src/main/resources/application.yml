@@ -16,7 +16,7 @@ binance:
   handshake-timeout-ms: 30000
 
 strategy:
-  active: CTI_LB
+  active: ELITE_V1
   reference-symbol: MANAUSDT
   trade-symbol: MANAUSDT
   trade-symbols:
@@ -234,9 +234,90 @@ strategy:
       ema20DistMin: 0.010
       adxMin: 25
 
+
+elite-v1:
+  mode: PAPER
+  zone-id: Europe/Istanbul
+  symbols:
+    - ETHUSDT
+    - XRPUSDT
+    - DOGEUSDT
+    - LTCUSDT
+    - ADAUSDT
+    - AVAXUSDT
+    - ARBUSDT
+    - MANAUSDT
+    - XLMUSDT
+    - CHZUSDT
+    - ALGOUSDT
+    - BANDUSDT
+    - BATUSDT
+    - CHRUSDT
+    - POLUSDT
+    - BTCUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - AAVEUSDT
+    - TRXUSDT
+    - DOTUSDT
+    - ATOMUSDT
+    - NEARUSDT
+    - OPUSDT
+    - SANDUSDT
+    - APEUSDT
+  paper-notional-usd: 50.0
+  max-open-positions-global: 1
+  max-entries-per-symbol-per-day: 1
+  tp-pct: 0.004
+  sl-pct: 0.002
+  time-stop-minutes: 20
+  conflict-resolution: SL_FIRST
+  warmup-min5m-bars: 60
+  warmup:
+    enabled: true
+    candles5m: 220
+  regime:
+    chop-bw-ratio-max: 1.15
+    chop-macd-ratio-max: 1.50
+    debounce-bars: 2
+    cooldown-bars: 3
+  long:
+    enabled: true
+    only-regime: CHOP
+    rsi-min: 35
+    rsi-max: 45
+    ema20-dist-min: 0.004
+    bb-percent-b-max: 0.62
+    max-tick-pct-allowed: 0.0010
+    enable-setup5-safety-gate: true
+    setup5:
+      max-bb-width: 0.022
+      max-vol-ratio: 5.37
+      chop-max-bw-ratio: 0.95
+      min-vol-ratio-of-ema: 0.40
+      max-atr-ratio: 1.00
+      require-stable-regime: false
+  short:
+    enabled: true
+    only-regime: TREND
+    veto:
+      bb-percent-b-min-exclusive: 0.15
+      ema20-dist-pct-max: 0.008
+      require-bb-outside-false: true
+    elite-momentum:
+      pb-min: 0.35
+      pb-max: 0.60
+      bw-ratio-min: 1.40
+      bw-ratio-max: 2.80
+      vol-ratio-of-ema-min: 1.10
+      vol-ratio-of-ema-max: 2.50
+      macd-ratio-min: 2.50
+      require-close-below-ema20: true
+      require-ema20-slope-down: true
+      require-macd-delta-negative: true
 warmup:
   enabled: true
-  candles1m: 250
+  candles1m: 1000
   candles5m: 200
   concurrency: 3
   log-decisions: false
