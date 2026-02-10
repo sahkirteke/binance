@@ -283,6 +283,14 @@ public class EliteV1Strategy implements Strategy {
 					metrics.atrRatio5m);
 		}
 		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
+			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
+				state.prevEma20_5m = metrics.ema20_5m;
+			}
+			return;
+		}
+
+		if (state.positionSide == Side.LONG && checkPaperExitOnFiveMinute(state, bar5m)) {
+			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 			return;
 		}
 
@@ -292,13 +300,14 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 
-		LongSetupEval longEval = evaluateElitV1LongSetup(metrics, bar5m, state.symbol, bar5m.closeTime());
+		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
 		if (longEval.signal()) {
 			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
 			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", "ELIT_V1_LONG_MATCH", metrics, longEval);
 			return;
 		}
 		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval);
+		state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 	}
 
 	private void rollDay(SymbolState state, long closeTimeMs) {
@@ -333,12 +342,12 @@ public class EliteV1Strategy implements Strategy {
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
 	}
 
-	private LongSetupEval evaluateElitV1LongSetup(Metrics m, Candle bar5m, String symbol, long nowMs) {
+	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
 		List<String> failReasons = new ArrayList<>();
 
 		Double takerBuyRatio = null;
 		OrderflowSnapshot orderflow = OrderflowSnapshot.fromCandle(bar5m);
-		if (bar5m.volume() <= 0.0 || orderflow.takerBuyBaseVolume() == null || !Double.isFinite(orderflow.takerBuyBaseVolume())) {
+		if (orderflow == null || bar5m.volume() <= 0.0 || orderflow.takerBuyBaseVolume() == null || !Double.isFinite(orderflow.takerBuyBaseVolume())) {
 			failReasons.add("FAIL_ORDERFLOW_MISSING");
 		} else {
 			takerBuyRatio = orderflow.takerBuyBaseVolume() / bar5m.volume();
@@ -374,10 +383,17 @@ public class EliteV1Strategy implements Strategy {
 			}
 		}
 
+		boolean ema20SlopeDown = m.ema20SlopeDown;
+		if (state != null
+				&& state.prevEma20_5m != null
+				&& Double.isFinite(m.ema20_5m)
+				&& Double.isFinite(state.prevEma20_5m)) {
+			ema20SlopeDown = m.ema20_5m < state.prevEma20_5m;
+		}
 		boolean isDownTrend = m.activeRegimeTag == RegimeTag.TREND
 				&& m.close5m < m.ema20_5m
 				&& m.macdDelta < 0.0
-				&& m.ema20SlopeDown;
+				&& ema20SlopeDown;
 		if (isDownTrend) {
 			failReasons.add("FAIL_DOWN_TREND");
 		}
@@ -568,23 +584,35 @@ public class EliteV1Strategy implements Strategy {
 	}
 
 	private void checkPaperExit(SymbolState state, Candle oneMinuteBar) {
+		if (state == null || oneMinuteBar == null) {
+			return;
+		}
 		if (state.positionSide == Side.NONE || state.bracketId == null || state.positionSide != Side.LONG) {
 			return;
 		}
-		if (oneMinuteBar.low() <= state.slPrice) {
-			exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, oneMinuteBar.closeTime(),
+		// no-op: paper exits are evaluated on final 5m bars via checkPaperExitOnFiveMinute
+	}
+
+	private boolean checkPaperExitOnFiveMinute(SymbolState state, Candle bar5m) {
+		if (state == null || bar5m == null || state.positionSide != Side.LONG || state.bracketId == null) {
+			return false;
+		}
+		if (bar5m.low() <= state.slPrice) {
+			exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
 					new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
-			return;
+			return true;
 		}
-		if (oneMinuteBar.high() >= state.tpPrice) {
-			exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, oneMinuteBar.closeTime(),
+		if (bar5m.high() >= state.tpPrice) {
+			exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
 					new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
-			return;
+			return true;
 		}
-		if ((oneMinuteBar.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
-			exitPosition(state, ExitReason.TIMEOUT_36B, oneMinuteBar.close(), oneMinuteBar.closeTime(),
+		if ((bar5m.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
+			exitPosition(state, ExitReason.TIMEOUT_36B, bar5m.close(), bar5m.closeTime(),
 					new ExitEvaluation(ExitReason.TIMEOUT_36B, "NONE", "TIMEOUT_36B", null, true));
+			return true;
 		}
+		return false;
 	}
 
 	private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs, ExitEvaluation evaluation) {
@@ -793,7 +821,7 @@ public class EliteV1Strategy implements Strategy {
 		ObjectNode orderflow = parent.putObject("orderflow5m");
 		orderflow.put("baseVolume", bar5m.volume());
 		OrderflowSnapshot of = OrderflowSnapshot.fromCandle(bar5m);
-		if (!of.available() || bar5m.volume() <= 0.0) {
+		if (of == null || !of.available() || bar5m.volume() <= 0.0) {
 			orderflow.put("reason", "KLINE_TAKER_FIELDS_MISSING");
 			orderflow.putNull("quoteVolume");
 			orderflow.putNull("trades");
@@ -1020,6 +1048,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 
 		static OrderflowSnapshot fromCandle(Candle candle) {
+			if (candle == null) {
+				return null;
+			}
 			return new OrderflowSnapshot(
 					readDoubleAccessor(candle, "quoteVolume"),
 					readLongAccessor(candle, "tradeCount"),
@@ -1124,6 +1155,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private String slClientOrderId;
 		private Long tpOrderId;
 		private String tpClientOrderId;
+		private Double prevEma20_5m;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
 		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
