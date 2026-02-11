@@ -6,6 +6,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -35,6 +40,14 @@ public class BookTickerStreamWatcher {
 	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
 	private final AtomicReference<List<Disposable>> testnetSubscriptionsRef = new AtomicReference<>();
 	private final Map<String, BookTickerSnapshot> snapshots = new ConcurrentHashMap<>();
+	private final AtomicLong lastMsgMs = new AtomicLong(0L);
+	private final AtomicLong msgCount = new AtomicLong(0L);
+	private final ScheduledExecutorService healthExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+		Thread t = new Thread(r, "bookticker-health");
+		t.setDaemon(true);
+		return t;
+	});
+	private final AtomicReference<ScheduledFuture<?>> healthTaskRef = new AtomicReference<>();
 
 	public BookTickerStreamWatcher(BinanceProperties binanceProperties,
 			StrategyProperties strategyProperties,
@@ -50,6 +63,7 @@ public class BookTickerStreamWatcher {
 			return;
 		}
 		LOGGER.info("BookTicker stream enabled: symbols={}", strategyProperties.resolvedTradeSymbols().size());
+		startHealthLogging();
 		if (binanceProperties.useTestnet()) {
 			startTestnetStreams();
 		} else {
@@ -59,6 +73,11 @@ public class BookTickerStreamWatcher {
 
 	@PreDestroy
 	public void stop() {
+		ScheduledFuture<?> healthTask = healthTaskRef.getAndSet(null);
+		if (healthTask != null) {
+			healthTask.cancel(true);
+		}
+		healthExecutor.shutdownNow();
 		Disposable subscription = subscriptionRef.getAndSet(null);
 		if (subscription != null) {
 			subscription.dispose();
@@ -84,9 +103,16 @@ public class BookTickerStreamWatcher {
 		URI uri = URI.create("wss://fstream.binance.com/stream?streams=" + streamPath);
 		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
 				.map(message -> message.getPayloadAsText())
+				.timeout(Duration.ofSeconds(30))
+				.doOnSubscribe(ignored -> LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols={} mode=combined", streams.size()))
 				.doOnNext(payload -> handleBookTickerMessage(payload, null))
+				.doOnError(error -> LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode=combined reason={}", error.toString()))
+				.doFinally(signal -> LOGGER.warn("EVENT=BOOKTICKER_WS_FINALLY mode=combined signal={}", signal))
 				.then())
-				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)))
+				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1))
+						.maxBackoff(Duration.ofSeconds(30))
+						.jitter(0.2))
+				.repeat()
 				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR reason={}", error.getMessage()));
 		subscriptionRef.set(subscription);
 	}
@@ -104,13 +130,22 @@ public class BookTickerStreamWatcher {
 		URI uri = URI.create(baseUrl + symbol + "@bookTicker");
 		return webSocketClient.execute(uri, session -> session.receive()
 				.map(message -> message.getPayloadAsText())
+				.timeout(Duration.ofSeconds(30))
+				.doOnSubscribe(ignored -> LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols=1 mode=testnet symbol={}", symbol.toUpperCase()))
 				.doOnNext(payload -> handleBookTickerMessage(payload, symbol.toUpperCase()))
+				.doOnError(error -> LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode=testnet symbol={} reason={}", symbol.toUpperCase(), error.toString()))
+				.doFinally(signal -> LOGGER.warn("EVENT=BOOKTICKER_WS_FINALLY mode=testnet symbol={} signal={}", symbol.toUpperCase(), signal))
 				.then())
-				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)))
+				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1))
+						.maxBackoff(Duration.ofSeconds(30))
+						.jitter(0.2))
+				.repeat()
 				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR reason={}", error.getMessage()));
 	}
 
 	private void handleBookTickerMessage(String payload, String symbolHint) {
+		msgCount.incrementAndGet();
+		lastMsgMs.set(System.currentTimeMillis());
 		try {
 			JsonNode node = objectMapper.readTree(payload);
 			JsonNode dataNode = node.path("data");
@@ -129,6 +164,20 @@ public class BookTickerStreamWatcher {
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse bookTicker message", ex);
 		}
+	}
+
+	private void startHealthLogging() {
+		ScheduledFuture<?> existing = healthTaskRef.getAndSet(null);
+		if (existing != null) {
+			existing.cancel(true);
+		}
+		ScheduledFuture<?> task = healthExecutor.scheduleAtFixedRate(() -> {
+			long now = System.currentTimeMillis();
+			long last = lastMsgMs.get();
+			long age = last <= 0L ? -1L : Math.max(0L, now - last);
+			LOGGER.info("EVENT=BOOKTICKER_HEALTH msgCount={} lastMsgAgeMs={}", msgCount.get(), age);
+		}, 30, 30, TimeUnit.SECONDS);
+		healthTaskRef.set(task);
 	}
 
 	private static double parseDouble(JsonNode node) {
