@@ -43,6 +43,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import jakarta.annotation.PreDestroy;
+import reactor.core.Disposable;
 
 @Component
 public class EliteV1Strategy implements Strategy {
@@ -58,6 +59,8 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
+	private static final long LIQUIDITY_RECONNECT_THRESHOLD_MS = 60_000L;
+	private static final long MIN_RESTART_INTERVAL_MS = 30_000L;
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
 
@@ -72,6 +75,9 @@ public class EliteV1Strategy implements Strategy {
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
+	private final AtomicLong lastLiquidityEventMs = new AtomicLong(0L);
+	private final AtomicLong lastLiquidityRestartMs = new AtomicLong(0L);
+	private volatile Disposable liquidityDisposable;
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -118,6 +124,7 @@ public class EliteV1Strategy implements Strategy {
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
+		liquidityDisposable = subscribeLiquidityStream();
 		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
 	}
 
@@ -125,6 +132,10 @@ public class EliteV1Strategy implements Strategy {
 	public void stop() {
 		if (!started.compareAndSet(true, false)) {
 			return;
+		}
+		Disposable disposable = liquidityDisposable;
+		if (disposable != null && !disposable.isDisposed()) {
+			disposable.dispose();
 		}
 		writer.stop();
 	}
@@ -258,6 +269,7 @@ public class EliteV1Strategy implements Strategy {
 		rollDay(state, bar5m.closeTime());
 		Metrics metrics = state.indicators.metrics();
 		boolean baselinesReady = isBaselinesReady(state, metrics);
+		checkLiquidityHealth(state, bar5m.closeTime());
 		state.baselinesReady = baselinesReady;
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
@@ -712,7 +724,8 @@ public class EliteV1Strategy implements Strategy {
 		node.put("baselinesReady", baselinesReady);
 		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
 		putOrderflow(node, bar5m);
-		putLiquidity(node, state, state.symbol, timeMs);
+		putLiquidity(node, state.symbol, timeMs);
+		node.put("liquidityHealthAgeMs", Math.max(0L, timeMs - lastLiquidityEventMs.get()));
 		Candle last1m = state.last1m.peekLast();
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
@@ -846,59 +859,128 @@ public class EliteV1Strategy implements Strategy {
 		orderflow.put("reason", "OK");
 	}
 
-	private void putLiquidity(ObjectNode parent, SymbolState state, String symbol, long nowMs) {
+	private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
 		LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
-		if (snapshot != null) {
-			state.lastLiquiditySnapshot = snapshot;
-			long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
-			if (ageMs <= LIQUIDITY_MAX_AGE_MS) {
-				putLiquidityNode(parent, snapshot, ageMs);
-				parent.put("liquidityReason", "ATTACHED");
-				LOGGER.debug("DECISION liquidity attached symbol={} ageMs={} source=LIVE", symbol, ageMs);
-				return;
-			}
-			putLiquidityNode(parent, snapshot, ageMs);
-			parent.put("liquidityReason", "STALE_ATTACHED");
-			LOGGER.debug("DECISION liquidity attached stale symbol={} ageMs={} source=LIVE", symbol, ageMs);
+		if (snapshot == null) {
+			parent.putNull("liquidity");
+			parent.put("liquidityReason", "MISSING");
 			return;
 		}
 
-		if (state != null && state.lastLiquiditySnapshot != null) {
-			long ageMs = Math.max(0L, nowMs - state.lastLiquiditySnapshot.eventTimeMs());
-			putLiquidityNode(parent, state.lastLiquiditySnapshot, ageMs);
-			parent.put("liquidityReason", "FALLBACK_LAST_SEEN");
-			LOGGER.debug("DECISION liquidity attached fallback symbol={} ageMs={} source=STATE", symbol, ageMs);
+		lastLiquidityEventMs.set(snapshot.eventTimeMs());
+		long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
+		double bid = snapshot.bestBid();
+		double ask = snapshot.bestAsk();
+		double bidQty = snapshot.bestBidQty();
+		double askQty = snapshot.bestAskQty();
+
+		if (!Double.isFinite(bid)
+				|| !Double.isFinite(ask)
+				|| !Double.isFinite(bidQty)
+				|| !Double.isFinite(askQty)
+				|| bid <= 0.0
+				|| ask <= 0.0
+				|| bidQty < 0.0
+				|| askQty < 0.0) {
+			parent.putNull("liquidity");
+			parent.put("liquidityReason", "INVALID");
 			return;
 		}
 
-		parent.putNull("liquidity");
-		parent.put("liquidityReason", "MISSING");
+		double spread = ask - bid;
+		double mid = (bid + ask) / 2.0;
+		double spreadPct = spread / Math.max(mid, 1e-12);
+		double denomQty = bidQty + askQty;
+		double imbalance = denomQty > 0.0 ? (bidQty - askQty) / denomQty : 0.0;
+
+		if (!Double.isFinite(imbalance) || !Double.isFinite(spread) || !Double.isFinite(spreadPct)) {
+			parent.putNull("liquidity");
+			parent.put("liquidityReason", "INVALID");
+			return;
+		}
+
+		ObjectNode liq = parent.putObject("liquidity");
+		liq.put("bid", bid);
+		liq.put("ask", ask);
+		liq.put("bidQty", bidQty);
+		liq.put("askQty", askQty);
+		liq.put("spread", spread);
+		liq.put("spreadPct", spreadPct);
+		liq.put("imbalance", imbalance);
+		liq.put("ageMs", ageMs);
+		parent.put("liquidityReason", ageMs > LIQUIDITY_MAX_AGE_MS ? "STALE" : "OK");
 	}
 
-	private void putLiquidityNode(ObjectNode parent, LiquiditySnapshot snapshot, long ageMs) {
-		double spread = snapshot.bestAskPrice() - snapshot.bestBidPrice();
-		double mid = (snapshot.bestAskPrice() + snapshot.bestBidPrice()) / 2.0;
-		double spreadPct = mid > 0 ? spread / mid : Double.NaN;
-		double qtyTotal = snapshot.bestBidQty() + snapshot.bestAskQty();
-		double imbalance = qtyTotal > 0 ? (snapshot.bestBidQty() - snapshot.bestAskQty()) / qtyTotal : Double.NaN;
+	private void checkLiquidityHealth(SymbolState state, long nowMs) {
+		long ageMs = Math.max(0L, nowMs - lastLiquidityEventMs.get());
+		if (ageMs > LIQUIDITY_RECONNECT_THRESHOLD_MS) {
+			LOGGER.warn("EVENT=LIQUIDITY_STALE_DETECTED symbol={} ageMs={}", state.symbol, ageMs);
+			restartLiquidityStream(nowMs);
+		}
+	}
 
-		ObjectNode liquidity = parent.putObject("liquidity");
-		liquidity.put("bid", snapshot.bestBidPrice());
-		liquidity.put("ask", snapshot.bestAskPrice());
-		liquidity.put("bidQty", snapshot.bestBidQty());
-		liquidity.put("askQty", snapshot.bestAskQty());
-		liquidity.put("spread", spread);
-		if (Double.isFinite(spreadPct)) {
-			liquidity.put("spreadPct", spreadPct);
-		} else {
-			liquidity.putNull("spreadPct");
+	private synchronized void restartLiquidityStream(long nowMs) {
+		long lastRestart = lastLiquidityRestartMs.get();
+		if (nowMs - lastRestart < MIN_RESTART_INTERVAL_MS) {
+			return;
 		}
-		if (Double.isFinite(imbalance)) {
-			liquidity.put("imbalance", imbalance);
-		} else {
-			liquidity.putNull("imbalance");
+		lastLiquidityRestartMs.set(nowMs);
+		try {
+			if (liquidityDisposable != null && !liquidityDisposable.isDisposed()) {
+				LOGGER.warn("EVENT=LIQUIDITY_DISPOSE");
+				liquidityDisposable.dispose();
+			}
+		} catch (Exception e) {
+			LOGGER.error("EVENT=LIQUIDITY_DISPOSE_ERROR", e);
 		}
-		liquidity.put("ageMs", ageMs);
+
+		try {
+			LOGGER.warn("EVENT=LIQUIDITY_RESUBSCRIBE");
+			liquidityDisposable = subscribeLiquidityStream();
+		} catch (Exception e) {
+			LOGGER.error("EVENT=LIQUIDITY_RESUBSCRIBE_ERROR", e);
+		}
+	}
+
+	private Disposable subscribeLiquidityStream() {
+		try {
+			Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
+			Object bean = applicationContext.getBean(watcherClass);
+			Method startMethod = watcherClass.getMethod("start");
+			Method stopMethod = watcherClass.getMethod("stop");
+			startMethod.invoke(bean);
+			return new Disposable() {
+				private final AtomicBoolean disposed = new AtomicBoolean(false);
+
+				@Override
+				public void dispose() {
+					if (disposed.compareAndSet(false, true)) {
+						try {
+							stopMethod.invoke(bean);
+						} catch (Exception ex) {
+							LOGGER.error("EVENT=LIQUIDITY_DISPOSE_ERROR", ex);
+						}
+					}
+				}
+
+				@Override
+				public boolean isDisposed() {
+					return disposed.get();
+				}
+			};
+		} catch (Exception ex) {
+			LOGGER.error("EVENT=LIQUIDITY_RESUBSCRIBE_ERROR", ex);
+			return new Disposable() {
+				@Override
+				public void dispose() {
+				}
+
+				@Override
+				public boolean isDisposed() {
+					return true;
+				}
+			};
+		}
 	}
 
 	static void applyWarmupNotReadyFields(ObjectNode node, int required1mBars, long have1mBars, int required5mBars, long have5mBars) {
@@ -1171,7 +1253,6 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private Long tpOrderId;
 		private String tpClientOrderId;
 		private Double prevEma20_5m;
-		private LiquiditySnapshot lastLiquiditySnapshot;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
 		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
