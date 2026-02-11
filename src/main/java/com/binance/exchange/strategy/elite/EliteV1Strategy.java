@@ -269,7 +269,7 @@ public class EliteV1Strategy implements Strategy {
 		rollDay(state, bar5m.closeTime());
 		Metrics metrics = state.indicators.metrics();
 		boolean baselinesReady = isBaselinesReady(state, metrics);
-		checkLiquidityHealth(state, bar5m.closeTime());
+		checkLiquidityHealth(bar5m.closeTime());
 		state.baselinesReady = baselinesReady;
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
@@ -911,23 +911,27 @@ public class EliteV1Strategy implements Strategy {
 		parent.put("liquidityReason", ageMs > LIQUIDITY_MAX_AGE_MS ? "STALE" : "OK");
 	}
 
-	private void checkLiquidityHealth(SymbolState state, long nowMs) {
-		long ageMs = Math.max(0L, nowMs - lastLiquidityEventMs.get());
+	private void checkLiquidityHealth(long nowMs) {
+		long lastEventMs = lastLiquidityEventMs.get();
+		if (lastEventMs <= 0L) {
+			lastLiquidityEventMs.set(nowMs);
+			return;
+		}
+		long ageMs = Math.max(0L, nowMs - lastEventMs);
 		if (ageMs > LIQUIDITY_RECONNECT_THRESHOLD_MS) {
-			LOGGER.warn("EVENT=LIQUIDITY_STALE_DETECTED symbol={} ageMs={}", state.symbol, ageMs);
-			restartLiquidityStream(nowMs);
+			restartLiquidityStream(nowMs, ageMs, lastEventMs);
 		}
 	}
 
-	private synchronized void restartLiquidityStream(long nowMs) {
+	private synchronized boolean restartLiquidityStream(long nowMs, long ageMs, long lastEventMs) {
 		long lastRestart = lastLiquidityRestartMs.get();
 		if (nowMs - lastRestart < MIN_RESTART_INTERVAL_MS) {
-			return;
+			return false;
 		}
 		lastLiquidityRestartMs.set(nowMs);
+		LOGGER.warn("EVENT=LIQUIDITY_RESTART ageMs={} lastEventMs={} nowMs={}", ageMs, lastEventMs, nowMs);
 		try {
 			if (liquidityDisposable != null && !liquidityDisposable.isDisposed()) {
-				LOGGER.warn("EVENT=LIQUIDITY_DISPOSE");
 				liquidityDisposable.dispose();
 			}
 		} catch (Exception e) {
@@ -935,11 +939,12 @@ public class EliteV1Strategy implements Strategy {
 		}
 
 		try {
-			LOGGER.warn("EVENT=LIQUIDITY_RESUBSCRIBE");
 			liquidityDisposable = subscribeLiquidityStream();
+			lastLiquidityEventMs.set(System.currentTimeMillis());
 		} catch (Exception e) {
 			LOGGER.error("EVENT=LIQUIDITY_RESUBSCRIBE_ERROR", e);
 		}
+		return true;
 	}
 
 	private Disposable subscribeLiquidityStream() {
