@@ -43,7 +43,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import jakarta.annotation.PreDestroy;
-import reactor.core.Disposable;
 
 @Component
 public class EliteV1Strategy implements Strategy {
@@ -59,8 +58,6 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
-	private static final long LIQUIDITY_RECONNECT_THRESHOLD_MS = 60_000L;
-	private static final long MIN_RESTART_INTERVAL_MS = 30_000L;
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
 
@@ -75,9 +72,6 @@ public class EliteV1Strategy implements Strategy {
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
-	private final AtomicLong lastLiquidityEventMs = new AtomicLong(0L);
-	private final AtomicLong lastLiquidityRestartMs = new AtomicLong(0L);
-	private volatile Disposable liquidityDisposable;
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -124,7 +118,7 @@ public class EliteV1Strategy implements Strategy {
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
-		liquidityDisposable = subscribeLiquidityStream();
+		startBookTickerWatcher();
 		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
 	}
 
@@ -132,10 +126,6 @@ public class EliteV1Strategy implements Strategy {
 	public void stop() {
 		if (!started.compareAndSet(true, false)) {
 			return;
-		}
-		Disposable disposable = liquidityDisposable;
-		if (disposable != null && !disposable.isDisposed()) {
-			disposable.dispose();
 		}
 		writer.stop();
 	}
@@ -269,7 +259,7 @@ public class EliteV1Strategy implements Strategy {
 		rollDay(state, bar5m.closeTime());
 		Metrics metrics = state.indicators.metrics();
 		boolean baselinesReady = isBaselinesReady(state, metrics);
-		checkLiquidityHealth(bar5m.closeTime());
+		checkLiquidityHealth();
 		state.baselinesReady = baselinesReady;
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
@@ -373,7 +363,7 @@ public class EliteV1Strategy implements Strategy {
 		if (snapshot == null) {
 			failReasons.add("FAIL_LIQUIDITY_MISSING");
 		} else {
-			long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
+			long ageMs = Math.max(0L, System.currentTimeMillis() - snapshot.eventTimeMs());
 			if (ageMs > LIQUIDITY_MAX_AGE_MS) {
 				failReasons.add("FAIL_LIQUIDITY_MISSING");
 			} else {
@@ -725,7 +715,7 @@ public class EliteV1Strategy implements Strategy {
 		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
 		putOrderflow(node, bar5m);
 		putLiquidity(node, state.symbol, timeMs);
-		node.put("liquidityHealthAgeMs", Math.max(0L, timeMs - lastLiquidityEventMs.get()));
+		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
 		Candle last1m = state.last1m.peekLast();
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
@@ -867,8 +857,7 @@ public class EliteV1Strategy implements Strategy {
 			return;
 		}
 
-		lastLiquidityEventMs.set(snapshot.eventTimeMs());
-		long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
+		long ageMs = Math.max(0L, System.currentTimeMillis() - snapshot.eventTimeMs());
 		double bid = snapshot.bestBidPrice();
 		double ask = snapshot.bestAskPrice();
 		double bidQty = snapshot.bestBidQty();
@@ -911,80 +900,43 @@ public class EliteV1Strategy implements Strategy {
 		parent.put("liquidityReason", ageMs > LIQUIDITY_MAX_AGE_MS ? "STALE" : "OK");
 	}
 
-	private void checkLiquidityHealth(long nowMs) {
-		long lastEventMs = lastLiquidityEventMs.get();
-		if (lastEventMs <= 0L) {
-			lastLiquidityEventMs.set(nowMs);
-			return;
-		}
-		long ageMs = Math.max(0L, nowMs - lastEventMs);
-		if (ageMs > LIQUIDITY_RECONNECT_THRESHOLD_MS) {
-			restartLiquidityStream(nowMs, ageMs, lastEventMs);
+	private void checkLiquidityHealth() {
+		try {
+			Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
+			Object bean = applicationContext.getBean(watcherClass);
+			Method ensureHealthy = watcherClass.getMethod("ensureHealthy");
+			ensureHealthy.invoke(bean);
+		} catch (Exception ex) {
+			LOGGER.debug("EVENT=LIQUIDITY_HEALTH_CHECK_SKIPPED reason={}", ex.toString());
 		}
 	}
 
-	private synchronized boolean restartLiquidityStream(long nowMs, long ageMs, long lastEventMs) {
-		long lastRestart = lastLiquidityRestartMs.get();
-		if (nowMs - lastRestart < MIN_RESTART_INTERVAL_MS) {
-			return false;
-		}
-		lastLiquidityRestartMs.set(nowMs);
-		LOGGER.warn("EVENT=LIQUIDITY_RESTART ageMs={} lastEventMs={} nowMs={}", ageMs, lastEventMs, nowMs);
+	private long resolveLiquidityHealthAgeMs() {
 		try {
-			if (liquidityDisposable != null && !liquidityDisposable.isDisposed()) {
-				liquidityDisposable.dispose();
+			Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
+			Object bean = applicationContext.getBean(watcherClass);
+			Method lastMsgMsMethod = watcherClass.getMethod("lastMsgMs");
+			Object value = lastMsgMsMethod.invoke(bean);
+			if (value instanceof Number number) {
+				long last = number.longValue();
+				if (last <= 0L) {
+					return -1L;
+				}
+				return Math.max(0L, System.currentTimeMillis() - last);
 			}
-		} catch (Exception e) {
-			LOGGER.error("EVENT=LIQUIDITY_DISPOSE_ERROR", e);
+		} catch (Exception ignored) {
 		}
-
-		try {
-			liquidityDisposable = subscribeLiquidityStream();
-			lastLiquidityEventMs.set(System.currentTimeMillis());
-		} catch (Exception e) {
-			LOGGER.error("EVENT=LIQUIDITY_RESUBSCRIBE_ERROR", e);
-		}
-		return true;
+		return -1L;
 	}
 
-	private Disposable subscribeLiquidityStream() {
+	private void startBookTickerWatcher() {
 		try {
 			Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
 			Object bean = applicationContext.getBean(watcherClass);
 			Method startMethod = watcherClass.getMethod("start");
-			Method stopMethod = watcherClass.getMethod("stop");
 			startMethod.invoke(bean);
-			return new Disposable() {
-				private final AtomicBoolean disposed = new AtomicBoolean(false);
-
-				@Override
-				public void dispose() {
-					if (disposed.compareAndSet(false, true)) {
-						try {
-							stopMethod.invoke(bean);
-						} catch (Exception ex) {
-							LOGGER.error("EVENT=LIQUIDITY_DISPOSE_ERROR", ex);
-						}
-					}
-				}
-
-				@Override
-				public boolean isDisposed() {
-					return disposed.get();
-				}
-			};
 		} catch (Exception ex) {
-			LOGGER.error("EVENT=LIQUIDITY_RESUBSCRIBE_ERROR", ex);
-			return new Disposable() {
-				@Override
-				public void dispose() {
-				}
-
-				@Override
-				public boolean isDisposed() {
-					return true;
-				}
-			};
+			LOGGER.debug("EVENT=LIQUIDITY_WATCHER_START_SKIPPED reason={}", ex.toString());
 		}
 	}
 
