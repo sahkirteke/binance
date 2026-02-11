@@ -131,8 +131,6 @@ public class BookTickerStreamWatcher {
 				})
 				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR connId={} reason={}", connId, error.getMessage()));
 		wsRef.set(disposable);
-		reconnectAttempt.set(0);
-		reconnecting.set(false);
 	}
 
 	private void startTestnetStream(String reason) {
@@ -157,8 +155,6 @@ public class BookTickerStreamWatcher {
 				})
 				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR connId={} reason={}", connId, error.getMessage()));
 		wsRef.set(disposable);
-		reconnectAttempt.set(0);
-		reconnecting.set(false);
 	}
 
 	private Flux<String> receivePayloads(Object session, String symbolHint, long connId, String mode) {
@@ -198,6 +194,11 @@ public class BookTickerStreamWatcher {
 	private String mapFrameToPayload(Object frame, long connId, String mode, String symbolHint) {
 		msgCount.incrementAndGet();
 		lastMsgMs.set(System.currentTimeMillis());
+		if (reconnecting.get()) {
+			reconnectAttempt.set(0);
+			reconnecting.set(false);
+			LOGGER.info("EVENT=BOOKTICKER_RECONNECT_RECOVERED connId={} mode={}", connId, mode);
+		}
 		if (frame == null) {
 			return null;
 		}
@@ -256,6 +257,7 @@ public class BookTickerStreamWatcher {
 					reconnecting.set(false);
 					return;
 				}
+				reconnecting.set(false);
 				disposeActiveWs("RECONNECT", "INTERNAL_LOOP");
 				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT attempt={} delayMs={} reason={}", attempt, delayMs, reason);
 				subscribe("RECONNECT_" + reason);
@@ -278,6 +280,11 @@ public class BookTickerStreamWatcher {
 	private void onInboundMessage(WebSocketMessage message, String symbolHint, long connId, String mode) {
 		msgCount.incrementAndGet();
 		lastMsgMs.set(System.currentTimeMillis());
+		if (reconnecting.get()) {
+			reconnectAttempt.set(0);
+			reconnecting.set(false);
+			LOGGER.info("EVENT=BOOKTICKER_RECONNECT_RECOVERED connId={} mode={}", connId, mode);
+		}
 		if ("CLOSE".equalsIgnoreCase(message.getType().name())) {
 			logCloseFrame(message, connId);
 			return;
