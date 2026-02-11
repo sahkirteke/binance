@@ -56,6 +56,9 @@ public class BookTickerStreamWatcher {
 	private final AtomicLong connIdSeq = new AtomicLong(0L);
 	private final AtomicLong currentConnectionId = new AtomicLong(0L);
 	private final AtomicLong lastRestartMs = new AtomicLong(0L);
+	private final AtomicLong lastSubscribeMs = new AtomicLong(0L);
+	private final AtomicLong connectionStartMs = new AtomicLong(0L);
+	private final AtomicLong stableSinceMs = new AtomicLong(0L);
 	private volatile ScheduledExecutorService healthExec;
 
 	public BookTickerStreamWatcher(BinanceProperties binanceProperties,
@@ -80,7 +83,6 @@ public class BookTickerStreamWatcher {
 		LOGGER.info("BookTicker stream enabled: symbols={}", strategyProperties.resolvedTradeSymbols().size());
 		startHealthLogging();
 		reconnecting.set(false);
-		reconnectAttempt.set(0);
 		subscribe("START");
 	}
 
@@ -140,6 +142,10 @@ public class BookTickerStreamWatcher {
 		URI uri = URI.create("wss://fstream.binance.com/stream?streams=" + streamPath);
 		long connId = connIdSeq.incrementAndGet();
 		currentConnectionId.set(connId);
+		long subscribeNowMs = System.currentTimeMillis();
+		lastSubscribeMs.set(subscribeNowMs);
+		connectionStartMs.set(subscribeNowMs);
+		stableSinceMs.set(0L);
 		Disposable disposable = webSocketClient.execute(uri, session -> {
 			Flux<String> payloads = receivePayloads(session, null, connId, "combined");
 			return payloads.then();
@@ -155,7 +161,6 @@ public class BookTickerStreamWatcher {
 		if (prev != null && prev != disposable && !prev.isDisposed()) {
 			prev.dispose();
 		}
-		reconnectAttempt.set(0);
 	}
 
 	private void startTestnetStream(String reason) {
@@ -168,6 +173,10 @@ public class BookTickerStreamWatcher {
 		URI uri = URI.create("wss://stream.binancefuture.com/ws/" + symbolLower + "@bookTicker");
 		long connId = connIdSeq.incrementAndGet();
 		currentConnectionId.set(connId);
+		long subscribeNowMs = System.currentTimeMillis();
+		lastSubscribeMs.set(subscribeNowMs);
+		connectionStartMs.set(subscribeNowMs);
+		stableSinceMs.set(0L);
 		Disposable disposable = webSocketClient.execute(uri, session -> {
 			Flux<String> payloads = receivePayloads(session, symbol.toUpperCase(), connId, "testnet");
 			return payloads.then();
@@ -183,7 +192,6 @@ public class BookTickerStreamWatcher {
 		if (prev != null && prev != disposable && !prev.isDisposed()) {
 			prev.dispose();
 		}
-		reconnectAttempt.set(0);
 	}
 
 	private Flux<String> receivePayloads(Object session, String symbolHint, long connId, String mode) {
@@ -221,8 +229,10 @@ public class BookTickerStreamWatcher {
 	}
 
 	private String mapFrameToPayload(Object frame, long connId, String mode, String symbolHint) {
+		long nowMs = System.currentTimeMillis();
 		msgCount.incrementAndGet();
-		lastMsgMs.set(System.currentTimeMillis());
+		markConnectionHealthy(nowMs, connId, mode);
+		lastMsgMs.set(nowMs);
 		if (frame == null) {
 			return null;
 		}
@@ -258,6 +268,30 @@ public class BookTickerStreamWatcher {
 		LOGGER.warn("EVENT=BOOKTICKER_WS_CLOSE connId={} code={} reason={}", connId, code, reason);
 	}
 
+
+	private void markConnectionHealthy(long nowMs, long connId, String mode) {
+		long last = lastMsgMs.get();
+		long gap = last <= 0L ? Long.MAX_VALUE : Math.max(0L, nowMs - last);
+		if (gap < 2_000L) {
+			long stableFrom = stableSinceMs.get();
+			if (stableFrom <= 0L) {
+				stableSinceMs.compareAndSet(stableFrom, nowMs);
+			}
+		} else {
+			stableSinceMs.set(0L);
+		}
+
+		long stableFrom = stableSinceMs.get();
+		boolean stableWindow = stableFrom > 0L && (nowMs - stableFrom) >= 30_000L;
+		long connStart = connectionStartMs.get();
+		boolean uptimeStable = connStart > 0L && (nowMs - connStart) >= 120_000L;
+		if ((stableWindow || uptimeStable) && reconnectAttempt.get() > 0) {
+			reconnectAttempt.set(0);
+			LOGGER.info("EVENT=BOOKTICKER_RECONNECT_STABLE connId={} mode={} stableWindow={} uptimeStable={}",
+					connId, mode, stableWindow, uptimeStable);
+		}
+	}
+
 	private void scheduleReconnect(String reason, long ageMs) {
 		if (!running.get()) {
 			return;
@@ -273,10 +307,16 @@ public class BookTickerStreamWatcher {
 			return;
 		}
 		lastRestartMs.set(now);
-		int attempt = reconnectAttempt.incrementAndGet();
-		long base = Math.min(30_000L, 1_000L * (1L << Math.min(attempt, 5)));
-		long jitter = ThreadLocalRandom.current().nextLong(0L, 500L);
+		boolean flapping = lastSubscribeMs.get() > 0L && (now - lastSubscribeMs.get()) < 10_000L;
+		int attemptIncrement = flapping ? 2 : 1;
+		int attempt = reconnectAttempt.addAndGet(attemptIncrement);
+		long exp = 1_000L * (1L << Math.min(attempt, 15));
+		long base = Math.min(30_000L, exp);
+		long jitter = ThreadLocalRandom.current().nextLong(0L, 251L);
 		long delayMs = base + jitter;
+		if (flapping && delayMs < 10_000L) {
+			delayMs = 10_000L;
+		}
 		ScheduledExecutorService exec = healthExec;
 		if (exec == null) {
 			reconnecting.set(false);
@@ -290,7 +330,7 @@ public class BookTickerStreamWatcher {
 				}
 				reconnecting.set(false);
 				disposeActiveWs("RECONNECT", "INTERNAL_LOOP");
-				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT attempt={} delayMs={} reason={} ageMs={}", attempt, delayMs, reason, ageMs);
+				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT attempt={} delayMs={} reason={} connId={}", attempt, delayMs, reason, currentConnectionId.get());
 				subscribe("RECONNECT_" + reason);
 			}, delayMs, TimeUnit.MILLISECONDS);
 		} catch (RejectedExecutionException ex) {
@@ -300,17 +340,22 @@ public class BookTickerStreamWatcher {
 	}
 
 	private void disposeActiveWs(String reason, String callerTag) {
-		Disposable current = wsRef.getAndSet(null);
+		Disposable current = wsRef.get();
 		LOGGER.warn("EVENT=BOOKTICKER_DISPOSE_REQUEST reason={} caller={}", reason, callerTag);
-		if (current != null && !current.isDisposed()) {
+		if (current == null) {
+			return;
+		}
+		if (wsRef.compareAndSet(current, null) && !current.isDisposed()) {
 			current.dispose();
 		}
 	}
 
 
 	private void onInboundMessage(WebSocketMessage message, String symbolHint, long connId, String mode) {
+		long nowMs = System.currentTimeMillis();
 		msgCount.incrementAndGet();
-		lastMsgMs.set(System.currentTimeMillis());
+		markConnectionHealthy(nowMs, connId, mode);
+		lastMsgMs.set(nowMs);
 		if ("CLOSE".equalsIgnoreCase(message.getType().name())) {
 			logCloseFrame(message, connId);
 			return;
