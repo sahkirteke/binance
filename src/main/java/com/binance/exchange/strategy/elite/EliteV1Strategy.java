@@ -869,8 +869,8 @@ public class EliteV1Strategy implements Strategy {
 
 		lastLiquidityEventMs.set(snapshot.eventTimeMs());
 		long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
-		double bid = snapshot.bestBid();
-		double ask = snapshot.bestAsk();
+		double bid = snapshot.bestBidPrice();
+		double ask = snapshot.bestAskPrice();
 		double bidQty = snapshot.bestBidQty();
 		double askQty = snapshot.bestAskQty();
 
