@@ -149,7 +149,7 @@ public class BookTickerStreamWatcher {
 	private void onInboundMessage(WebSocketMessage message, String symbolHint) {
 		msgCount.incrementAndGet();
 		lastMsgMs.set(System.currentTimeMillis());
-		if (message.getType() == WebSocketMessage.Type.CLOSE) {
+		if ("CLOSE".equalsIgnoreCase(message.getType().name())) {
 			logCloseFrame(message);
 			return;
 		}
