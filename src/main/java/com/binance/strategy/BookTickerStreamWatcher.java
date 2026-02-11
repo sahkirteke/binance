@@ -309,14 +309,14 @@ public class BookTickerStreamWatcher {
 		lastRestartMs.set(now);
 		boolean flapping = lastSubscribeMs.get() > 0L && (now - lastSubscribeMs.get()) < 10_000L;
 		int attemptIncrement = flapping ? 2 : 1;
-		int attempt = reconnectAttempt.addAndGet(attemptIncrement);
+		final int attempt = reconnectAttempt.addAndGet(attemptIncrement);
 		long exp = 1_000L * (1L << Math.min(attempt, 15));
 		long base = Math.min(30_000L, exp);
 		long jitter = ThreadLocalRandom.current().nextLong(0L, 251L);
-		long delayMs = base + jitter;
-		if (flapping && delayMs < 10_000L) {
-			delayMs = 10_000L;
-		}
+		long rawDelayMs  = base + jitter;
+		final long delayMs = (flapping && rawDelayMs < 10_000L) ? 10_000L : rawDelayMs;
+		final String reconnectReason = reason;
+		final long reconnectAgeMs = Math.max(0L, ageMs);
 		ScheduledExecutorService exec = healthExec;
 		if (exec == null) {
 			reconnecting.set(false);
@@ -330,8 +330,12 @@ public class BookTickerStreamWatcher {
 				}
 				reconnecting.set(false);
 				disposeActiveWs("RECONNECT", "INTERNAL_LOOP");
-				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT attempt={} delayMs={} reason={} connId={}", attempt, delayMs, reason, currentConnectionId.get());
-				subscribe("RECONNECT_" + reason);
+				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT attempt={} delayMs={} reason={} ageMs={} connId={}",
+						 					attempt,
+						 						delayMs,
+						 						reconnectReason,
+						 						reconnectAgeMs,
+						 					currentConnectionId.get());
 			}, delayMs, TimeUnit.MILLISECONDS);
 		} catch (RejectedExecutionException ex) {
 			LOGGER.warn("EVENT=BOOKTICKER_RECONNECT_SCHEDULE_REJECTED reason={}", ex.toString());
