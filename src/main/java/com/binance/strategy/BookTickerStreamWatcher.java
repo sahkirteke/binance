@@ -2,17 +2,29 @@ package com.binance.strategy;
 
 import java.net.URI;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
+
+import reactor.core.publisher.Flux;
 
 import com.binance.config.BinanceProperties;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -21,20 +33,33 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import reactor.core.Disposable;
-import reactor.util.retry.Retry;
 
 @Component
 public class BookTickerStreamWatcher {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(BookTickerStreamWatcher.class);
+	private static final long STALE_THRESHOLD_MS = 60_000L;
+	private static final long MIN_RESTART_INTERVAL_MS = 30_000L;
 
 	private final BinanceProperties binanceProperties;
 	private final StrategyProperties strategyProperties;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
-	private final AtomicReference<Disposable> subscriptionRef = new AtomicReference<>();
-	private final AtomicReference<List<Disposable>> testnetSubscriptionsRef = new AtomicReference<>();
+	private final AtomicReference<Disposable> wsRef = new AtomicReference<>();
 	private final Map<String, BookTickerSnapshot> snapshots = new ConcurrentHashMap<>();
+	private final AtomicLong lastMsgMs = new AtomicLong(0L);
+	private final AtomicLong msgCount = new AtomicLong(0L);
+	private final AtomicReference<ScheduledFuture<?>> healthTaskRef = new AtomicReference<>();
+	private final AtomicBoolean running = new AtomicBoolean(false);
+	private final AtomicBoolean reconnecting = new AtomicBoolean(false);
+	private final AtomicInteger reconnectAttempt = new AtomicInteger(0);
+	private final AtomicLong connIdSeq = new AtomicLong(0L);
+	private final AtomicLong currentConnectionId = new AtomicLong(0L);
+	private final AtomicLong lastRestartMs = new AtomicLong(0L);
+	private final AtomicLong lastSubscribeMs = new AtomicLong(0L);
+	private final AtomicLong connectionStartMs = new AtomicLong(0L);
+	private final AtomicLong stableSinceMs = new AtomicLong(0L);
+	private volatile ScheduledExecutorService healthExec;
 
 	public BookTickerStreamWatcher(BinanceProperties binanceProperties,
 			StrategyProperties strategyProperties,
@@ -45,28 +70,37 @@ public class BookTickerStreamWatcher {
 	}
 
 	@PostConstruct
-	public void start() {
+	public synchronized void start() {
 		if (strategyProperties.active() != StrategyType.ELITE_V1) {
 			return;
 		}
-		LOGGER.info("BookTicker stream enabled: symbols={}", strategyProperties.resolvedTradeSymbols().size());
-		if (binanceProperties.useTestnet()) {
-			startTestnetStreams();
-		} else {
-			startCombinedStream();
+		running.set(true);
+		Disposable existing = wsRef.get();
+		if (existing != null && !existing.isDisposed()) {
+			startHealthLogging();
+			return;
 		}
+		LOGGER.info("BookTicker stream enabled: symbols={}", strategyProperties.resolvedTradeSymbols().size());
+		startHealthLogging();
+		reconnecting.set(false);
+		subscribe("START");
 	}
 
 	@PreDestroy
-	public void stop() {
-		Disposable subscription = subscriptionRef.getAndSet(null);
-		if (subscription != null) {
-			subscription.dispose();
+	public synchronized void stop() {
+		running.set(false);
+		ScheduledFuture<?> healthTask = healthTaskRef.getAndSet(null);
+		if (healthTask != null) {
+			healthTask.cancel(false);
 		}
-		List<Disposable> subscriptions = testnetSubscriptionsRef.getAndSet(null);
-		if (subscriptions != null) {
-			subscriptions.forEach(Disposable::dispose);
-		}
+		disposeActiveWs("STOP", "MANUAL");
+	}
+
+	public synchronized void restart(String callerTag) {
+		running.set(true);
+		startHealthLogging();
+		disposeActiveWs("RESTART", callerTag == null || callerTag.isBlank() ? "MANUAL" : callerTag);
+		subscribe("RESTART_" + (callerTag == null || callerTag.isBlank() ? "MANUAL" : callerTag));
 	}
 
 	public BookTickerSnapshot getSnapshot(String symbol) {
@@ -76,38 +110,279 @@ public class BookTickerStreamWatcher {
 		return snapshots.get(symbol.toUpperCase());
 	}
 
-	private void startCombinedStream() {
+	public long lastMsgMs() {
+		return lastMsgMs.get();
+	}
+
+	public void ensureHealthy() {
+		long now = System.currentTimeMillis();
+		long last = lastMsgMs.get();
+		if (last <= 0L) {
+			return;
+		}
+		long age = Math.max(0L, now - last);
+		if (age > STALE_THRESHOLD_MS) {
+			scheduleReconnect("STALE", age);
+		}
+	}
+
+	private void subscribe(String reason) {
+		if (binanceProperties.useTestnet()) {
+			startTestnetStream(reason);
+		} else {
+			startCombinedStream(reason);
+		}
+	}
+
+	private void startCombinedStream(String reason) {
 		List<String> streams = strategyProperties.resolvedTradeSymbols().stream()
 				.map(symbol -> symbol.toLowerCase() + "@bookTicker")
 				.toList();
 		String streamPath = streams.stream().collect(Collectors.joining("/"));
 		URI uri = URI.create("wss://fstream.binance.com/stream?streams=" + streamPath);
-		Disposable subscription = webSocketClient.execute(uri, session -> session.receive()
-				.map(message -> message.getPayloadAsText())
-				.doOnNext(payload -> handleBookTickerMessage(payload, null))
-				.then())
-				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)))
-				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR reason={}", error.getMessage()));
-		subscriptionRef.set(subscription);
-	}
-
-	private void startTestnetStreams() {
-		String baseUrl = "wss://stream.binancefuture.com/ws/";
-		List<Disposable> subscriptions = new ArrayList<>();
-		for (String symbol : strategyProperties.resolvedTradeSymbols()) {
-			subscriptions.add(startTestnetStream(baseUrl, symbol.toLowerCase()));
+		long connId = connIdSeq.incrementAndGet();
+		currentConnectionId.set(connId);
+		long subscribeNowMs = System.currentTimeMillis();
+		lastSubscribeMs.set(subscribeNowMs);
+		connectionStartMs.set(subscribeNowMs);
+		stableSinceMs.set(0L);
+		Disposable disposable = webSocketClient.execute(uri, session -> {
+			Flux<String> payloads = receivePayloads(session, null, connId, "combined");
+			return payloads.then();
+		})
+				.doOnSubscribe(ignored -> LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols={} mode=combined connId={} reason={}", streams.size(), connId, reason))
+				.doOnError(error -> LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode=combined connId={} reason={}", connId, error.toString()))
+				.doFinally(signal -> {
+					LOGGER.warn("EVENT=BOOKTICKER_WS_FINALLY mode=combined connId={} signal={}", connId, signal);
+					scheduleReconnect("FINALLY_" + signal.name(), -1L);
+				})
+				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR connId={} reason={}", connId, error.getMessage()));
+		Disposable prev = wsRef.getAndSet(disposable);
+		if (prev != null && prev != disposable && !prev.isDisposed()) {
+			prev.dispose();
 		}
-		testnetSubscriptionsRef.set(subscriptions);
 	}
 
-	private Disposable startTestnetStream(String baseUrl, String symbol) {
-		URI uri = URI.create(baseUrl + symbol + "@bookTicker");
-		return webSocketClient.execute(uri, session -> session.receive()
-				.map(message -> message.getPayloadAsText())
-				.doOnNext(payload -> handleBookTickerMessage(payload, symbol.toUpperCase()))
-				.then())
-				.retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)))
-				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR reason={}", error.getMessage()));
+	private void startTestnetStream(String reason) {
+		String symbol = strategyProperties.resolvedTradeSymbols().isEmpty() ? null : strategyProperties.resolvedTradeSymbols().get(0);
+		if (symbol == null) {
+			LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode=testnet reason=NO_SYMBOL");
+			return;
+		}
+		String symbolLower = symbol.toLowerCase();
+		URI uri = URI.create("wss://stream.binancefuture.com/ws/" + symbolLower + "@bookTicker");
+		long connId = connIdSeq.incrementAndGet();
+		currentConnectionId.set(connId);
+		long subscribeNowMs = System.currentTimeMillis();
+		lastSubscribeMs.set(subscribeNowMs);
+		connectionStartMs.set(subscribeNowMs);
+		stableSinceMs.set(0L);
+		Disposable disposable = webSocketClient.execute(uri, session -> {
+			Flux<String> payloads = receivePayloads(session, symbol.toUpperCase(), connId, "testnet");
+			return payloads.then();
+		})
+				.doOnSubscribe(ignored -> LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols=1 mode=testnet symbol={} connId={} reason={}", symbol.toUpperCase(), connId, reason))
+				.doOnError(error -> LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode=testnet symbol={} connId={} reason={}", symbol.toUpperCase(), connId, error.toString()))
+				.doFinally(signal -> {
+					LOGGER.warn("EVENT=BOOKTICKER_WS_FINALLY mode=testnet symbol={} connId={} signal={}", symbol.toUpperCase(), connId, signal);
+					scheduleReconnect("FINALLY_" + signal.name(), -1L);
+				})
+				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR connId={} reason={}", connId, error.getMessage()));
+		Disposable prev = wsRef.getAndSet(disposable);
+		if (prev != null && prev != disposable && !prev.isDisposed()) {
+			prev.dispose();
+		}
+	}
+
+	private Flux<String> receivePayloads(Object session, String symbolHint, long connId, String mode) {
+		try {
+			var receiveFrames = session.getClass().getMethod("receiveFrames");
+			Object frameFlux = receiveFrames.invoke(session);
+			if (frameFlux instanceof Flux<?> flux) {
+				return flux
+						.timeout(Duration.ofSeconds(30))
+						.map(frame -> mapFrameToPayload(frame, connId, mode, symbolHint))
+						.filter(payload -> payload != null);
+			}
+		} catch (ReflectiveOperationException ignored) {
+		}
+
+		try {
+			var receive = session.getClass().getMethod("receive");
+			Object msgFlux = receive.invoke(session);
+			if (msgFlux instanceof Flux<?> flux) {
+				return flux
+						.timeout(Duration.ofSeconds(30))
+						.map(message -> {
+							if (message instanceof WebSocketMessage wsMessage) {
+								onInboundMessage(wsMessage, symbolHint, connId, mode);
+								return wsMessage.getPayloadAsText();
+							}
+							return null;
+						})
+						.filter(payload -> payload != null);
+			}
+		} catch (ReflectiveOperationException ex) {
+			LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode={} connId={} reason={}", mode, connId, ex.toString());
+		}
+		return Flux.empty();
+	}
+
+	private String mapFrameToPayload(Object frame, long connId, String mode, String symbolHint) {
+		long nowMs = System.currentTimeMillis();
+		msgCount.incrementAndGet();
+		markConnectionHealthy(nowMs, connId, mode);
+		lastMsgMs.set(nowMs);
+		if (frame == null) {
+			return null;
+		}
+		String simple = frame.getClass().getSimpleName();
+		if ("CloseWebSocketFrame".equals(simple)) {
+			logCloseFrameReflective(frame, connId);
+			return null;
+		}
+		try {
+			var textMethod = frame.getClass().getMethod("text");
+			Object payload = textMethod.invoke(frame);
+			if (payload instanceof String text) {
+				handleBookTickerMessage(text, symbolHint);
+				return text;
+			}
+		} catch (ReflectiveOperationException ignored) {
+		}
+		LOGGER.debug("EVENT=BOOKTICKER_WS_FRAME_IGNORED mode={} connId={} frameType={}", mode, connId, simple);
+		return null;
+	}
+
+	private void logCloseFrameReflective(Object frame, long connId) {
+		int code = -1;
+		String reason = null;
+		try {
+			Object statusCode = frame.getClass().getMethod("statusCode").invoke(frame);
+			if (statusCode instanceof Number n) {
+				code = n.intValue();
+			}
+			reason = String.valueOf(frame.getClass().getMethod("reasonText").invoke(frame));
+		} catch (ReflectiveOperationException ignored) {
+		}
+		LOGGER.warn("EVENT=BOOKTICKER_WS_CLOSE connId={} code={} reason={}", connId, code, reason);
+	}
+
+
+	private void markConnectionHealthy(long nowMs, long connId, String mode) {
+		long last = lastMsgMs.get();
+		long gap = last <= 0L ? Long.MAX_VALUE : Math.max(0L, nowMs - last);
+		if (gap < 2_000L) {
+			long stableFrom = stableSinceMs.get();
+			if (stableFrom <= 0L) {
+				stableSinceMs.compareAndSet(stableFrom, nowMs);
+			}
+		} else {
+			stableSinceMs.set(0L);
+		}
+
+		long stableFrom = stableSinceMs.get();
+		boolean stableWindow = stableFrom > 0L && (nowMs - stableFrom) >= 30_000L;
+		long connStart = connectionStartMs.get();
+		boolean uptimeStable = connStart > 0L && (nowMs - connStart) >= 120_000L;
+		if ((stableWindow || uptimeStable) && reconnectAttempt.get() > 0) {
+			reconnectAttempt.set(0);
+			LOGGER.info("EVENT=BOOKTICKER_RECONNECT_STABLE connId={} mode={} stableWindow={} uptimeStable={}",
+					connId, mode, stableWindow, uptimeStable);
+		}
+	}
+
+	private void scheduleReconnect(String reason, long ageMs) {
+		if (!running.get()) {
+			return;
+		}
+		if (!reconnecting.compareAndSet(false, true)) {
+			return;
+		}
+		startHealthLogging();
+		long now = System.currentTimeMillis();
+		long lastRestart = lastRestartMs.get();
+		if (now - lastRestart < MIN_RESTART_INTERVAL_MS) {
+			reconnecting.set(false);
+			return;
+		}
+		lastRestartMs.set(now);
+		boolean flapping = lastSubscribeMs.get() > 0L && (now - lastSubscribeMs.get()) < 10_000L;
+		int attemptIncrement = flapping ? 2 : 1;
+		final int attempt = reconnectAttempt.addAndGet(attemptIncrement);
+		long exp = 1_000L * (1L << Math.min(attempt, 15));
+		long base = Math.min(30_000L, exp);
+		long jitter = ThreadLocalRandom.current().nextLong(0L, 251L);
+		long rawDelayMs  = base + jitter;
+		final long delayMs = (flapping && rawDelayMs < 10_000L) ? 10_000L : rawDelayMs;
+		final String reconnectReason = reason;
+		final long reconnectAgeMs = Math.max(0L, ageMs);
+		ScheduledExecutorService exec = healthExec;
+		if (exec == null) {
+			reconnecting.set(false);
+			return;
+		}
+		try {
+			exec.schedule(() -> {
+				if (!running.get()) {
+					reconnecting.set(false);
+					return;
+				}
+				reconnecting.set(false);
+				disposeActiveWs("RECONNECT", "INTERNAL_LOOP");
+				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT attempt={} delayMs={} reason={} ageMs={} connId={}",
+						 					attempt,
+						 						delayMs,
+						 						reconnectReason,
+						 						reconnectAgeMs,
+						 					currentConnectionId.get());
+			}, delayMs, TimeUnit.MILLISECONDS);
+		} catch (RejectedExecutionException ex) {
+			LOGGER.warn("EVENT=BOOKTICKER_RECONNECT_SCHEDULE_REJECTED reason={}", ex.toString());
+			reconnecting.set(false);
+		}
+	}
+
+	private void disposeActiveWs(String reason, String callerTag) {
+		Disposable current = wsRef.get();
+		LOGGER.warn("EVENT=BOOKTICKER_DISPOSE_REQUEST reason={} caller={}", reason, callerTag);
+		if (current == null) {
+			return;
+		}
+		if (wsRef.compareAndSet(current, null) && !current.isDisposed()) {
+			current.dispose();
+		}
+	}
+
+
+	private void onInboundMessage(WebSocketMessage message, String symbolHint, long connId, String mode) {
+		long nowMs = System.currentTimeMillis();
+		msgCount.incrementAndGet();
+		markConnectionHealthy(nowMs, connId, mode);
+		lastMsgMs.set(nowMs);
+		if ("CLOSE".equalsIgnoreCase(message.getType().name())) {
+			logCloseFrame(message, connId);
+			return;
+		}
+		handleBookTickerMessage(message.getPayloadAsText(), symbolHint);
+	}
+
+	private void logCloseFrame(WebSocketMessage message, long connId) {
+		int code = -1;
+		String reason = null;
+		try {
+			var buffer = message.getPayload().asByteBuffer();
+			if (buffer.remaining() >= 2) {
+				code = buffer.getShort() & 0xFFFF;
+				if (buffer.remaining() > 0) {
+					byte[] rest = new byte[buffer.remaining()];
+					buffer.get(rest);
+					reason = new String(rest, java.nio.charset.StandardCharsets.UTF_8);
+				}
+			}
+		} catch (Exception ignored) {
+		}
+		LOGGER.warn("EVENT=BOOKTICKER_WS_CLOSE connId={} code={} reason={}", connId, code, reason);
 	}
 
 	private void handleBookTickerMessage(String payload, String symbolHint) {
@@ -128,6 +403,34 @@ public class BookTickerStreamWatcher {
 			snapshots.put(symbol.toUpperCase(), new BookTickerSnapshot(bid, bidQty, ask, askQty, eventTime));
 		} catch (Exception ex) {
 			LOGGER.warn("Failed to parse bookTicker message", ex);
+		}
+	}
+
+	private synchronized void startHealthLogging() {
+		ScheduledFuture<?> existing = healthTaskRef.get();
+		if (existing != null && !existing.isCancelled() && !existing.isDone()) {
+			return;
+		}
+		ScheduledExecutorService exec = healthExec;
+		if (exec == null || (exec instanceof ScheduledThreadPoolExecutor stpe
+				&& (stpe.isShutdown() || stpe.isTerminated()))) {
+			exec = Executors.newSingleThreadScheduledExecutor(r -> {
+				Thread t = new Thread(r, "bookticker-health");
+				t.setDaemon(true);
+				return t;
+			});
+			healthExec = exec;
+		}
+		try {
+			ScheduledFuture<?> task = exec.scheduleAtFixedRate(() -> {
+				long now = System.currentTimeMillis();
+				long last = lastMsgMs.get();
+				long age = last <= 0L ? -1L : Math.max(0L, now - last);
+				LOGGER.info("EVENT=BOOKTICKER_HEALTH connId={} msgCount={} lastMsgAgeMs={}", currentConnectionId.get(), msgCount.get(), age);
+			}, 30, 30, TimeUnit.SECONDS);
+			healthTaskRef.set(task);
+		} catch (RejectedExecutionException ex) {
+			LOGGER.warn("EVENT=BOOKTICKER_HEALTH_SCHEDULE_REJECTED reason={}", ex.toString());
 		}
 	}
 
