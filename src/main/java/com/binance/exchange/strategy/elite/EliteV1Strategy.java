@@ -712,7 +712,7 @@ public class EliteV1Strategy implements Strategy {
 		node.put("baselinesReady", baselinesReady);
 		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
 		putOrderflow(node, bar5m);
-		putLiquidity(node, state.symbol, timeMs);
+		putLiquidity(node, state, state.symbol, timeMs);
 		Candle last1m = state.last1m.peekLast();
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
@@ -846,19 +846,36 @@ public class EliteV1Strategy implements Strategy {
 		orderflow.put("reason", "OK");
 	}
 
-	private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
+	private void putLiquidity(ObjectNode parent, SymbolState state, String symbol, long nowMs) {
 		LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
-		if (snapshot == null) {
-			parent.putNull("liquidity");
-			parent.put("liquidityReason", "MISSING");
+		if (snapshot != null) {
+			state.lastLiquiditySnapshot = snapshot;
+			long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
+			if (ageMs <= LIQUIDITY_MAX_AGE_MS) {
+				putLiquidityNode(parent, snapshot, ageMs);
+				parent.put("liquidityReason", "ATTACHED");
+				LOGGER.debug("DECISION liquidity attached symbol={} ageMs={} source=LIVE", symbol, ageMs);
+				return;
+			}
+			putLiquidityNode(parent, snapshot, ageMs);
+			parent.put("liquidityReason", "STALE_ATTACHED");
+			LOGGER.debug("DECISION liquidity attached stale symbol={} ageMs={} source=LIVE", symbol, ageMs);
 			return;
 		}
-		long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
-		if (ageMs > LIQUIDITY_MAX_AGE_MS) {
-			parent.putNull("liquidity");
-			parent.put("liquidityReason", "STALE");
+
+		if (state != null && state.lastLiquiditySnapshot != null) {
+			long ageMs = Math.max(0L, nowMs - state.lastLiquiditySnapshot.eventTimeMs());
+			putLiquidityNode(parent, state.lastLiquiditySnapshot, ageMs);
+			parent.put("liquidityReason", "FALLBACK_LAST_SEEN");
+			LOGGER.debug("DECISION liquidity attached fallback symbol={} ageMs={} source=STATE", symbol, ageMs);
 			return;
 		}
+
+		parent.putNull("liquidity");
+		parent.put("liquidityReason", "MISSING");
+	}
+
+	private void putLiquidityNode(ObjectNode parent, LiquiditySnapshot snapshot, long ageMs) {
 		double spread = snapshot.bestAskPrice() - snapshot.bestBidPrice();
 		double mid = (snapshot.bestAskPrice() + snapshot.bestBidPrice()) / 2.0;
 		double spreadPct = mid > 0 ? spread / mid : Double.NaN;
@@ -882,8 +899,6 @@ public class EliteV1Strategy implements Strategy {
 			liquidity.putNull("imbalance");
 		}
 		liquidity.put("ageMs", ageMs);
-		parent.put("liquidityReason", "ATTACHED");
-		LOGGER.debug("DECISION liquidity attached symbol={} spreadPct={} imbalance={}", symbol, spreadPct, imbalance);
 	}
 
 	static void applyWarmupNotReadyFields(ObjectNode node, int required1mBars, long have1mBars, int required5mBars, long have5mBars) {
@@ -1156,6 +1171,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private Long tpOrderId;
 		private String tpClientOrderId;
 		private Double prevEma20_5m;
+		private LiquiditySnapshot lastLiquiditySnapshot;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
 		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
