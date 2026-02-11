@@ -45,16 +45,17 @@ public class BookTickerStreamWatcher {
 	private final StrategyProperties strategyProperties;
 	private final ObjectMapper objectMapper;
 	private final ReactorNettyWebSocketClient webSocketClient = new ReactorNettyWebSocketClient();
-	private final AtomicReference<Disposable> wsRef = new AtomicReference<>();
+	private final AtomicBoolean connected = new AtomicBoolean(false);
+	private final AtomicReference<Disposable> wsRef = new AtomicReference<>(null);
+	private final AtomicLong currentConnId = new AtomicLong(0L);
 	private final Map<String, BookTickerSnapshot> snapshots = new ConcurrentHashMap<>();
 	private final AtomicLong lastMsgMs = new AtomicLong(0L);
+	private final AtomicLong lastFinallyMs = new AtomicLong(0L);
 	private final AtomicLong msgCount = new AtomicLong(0L);
 	private final AtomicReference<ScheduledFuture<?>> healthTaskRef = new AtomicReference<>();
 	private final AtomicBoolean running = new AtomicBoolean(false);
 	private final AtomicBoolean reconnecting = new AtomicBoolean(false);
 	private final AtomicInteger reconnectAttempt = new AtomicInteger(0);
-	private final AtomicLong connIdSeq = new AtomicLong(0L);
-	private final AtomicLong currentConnectionId = new AtomicLong(0L);
 	private final AtomicLong lastRestartMs = new AtomicLong(0L);
 	private final AtomicLong lastSubscribeMs = new AtomicLong(0L);
 	private final AtomicLong connectionStartMs = new AtomicLong(0L);
@@ -75,15 +76,14 @@ public class BookTickerStreamWatcher {
 			return;
 		}
 		running.set(true);
-		Disposable existing = wsRef.get();
-		if (existing != null && !existing.isDisposed()) {
+		if (connected.get()) {
 			startHealthLogging();
 			return;
 		}
 		LOGGER.info("BookTicker stream enabled: symbols={}", strategyProperties.resolvedTradeSymbols().size());
 		startHealthLogging();
 		reconnecting.set(false);
-		subscribe("START");
+		startSubscribe("START");
 	}
 
 	@PreDestroy
@@ -100,7 +100,7 @@ public class BookTickerStreamWatcher {
 		running.set(true);
 		startHealthLogging();
 		disposeActiveWs("RESTART", callerTag == null || callerTag.isBlank() ? "MANUAL" : callerTag);
-		subscribe("RESTART_" + (callerTag == null || callerTag.isBlank() ? "MANUAL" : callerTag));
+		startSubscribe("RESTART_" + (callerTag == null || callerTag.isBlank() ? "MANUAL" : callerTag));
 	}
 
 	public BookTickerSnapshot getSnapshot(String symbol) {
@@ -117,16 +117,27 @@ public class BookTickerStreamWatcher {
 	public void ensureHealthy() {
 		long now = System.currentTimeMillis();
 		long last = lastMsgMs.get();
-		if (last <= 0L) {
-			return;
-		}
-		long age = Math.max(0L, now - last);
-		if (age > STALE_THRESHOLD_MS) {
-			scheduleReconnect("STALE", age);
+		if (!connected.get()) {
+			if (last > 0L) {
+				long age = Math.max(0L, now - last);
+				if (age > STALE_THRESHOLD_MS) {
+					scheduleReconnect("HEALTH_STALE", age);
+				}
+			}
+			long lastFinally = lastFinallyMs.get();
+			if (lastFinally > 0L && (now - lastFinally) > 5_000L) {
+				scheduleReconnect("POST_FINALLY_NO_CONN", now - lastFinally);
+			}
 		}
 	}
 
-	private void subscribe(String reason) {
+	private void startSubscribe(String reason) {
+		if (!running.get()) {
+			return;
+		}
+		if (connected.get()) {
+			return;
+		}
 		if (binanceProperties.useTestnet()) {
 			startTestnetStream(reason);
 		} else {
@@ -140,8 +151,7 @@ public class BookTickerStreamWatcher {
 				.toList();
 		String streamPath = streams.stream().collect(Collectors.joining("/"));
 		URI uri = URI.create("wss://fstream.binance.com/stream?streams=" + streamPath);
-		long connId = connIdSeq.incrementAndGet();
-		currentConnectionId.set(connId);
+		long connId = currentConnId.incrementAndGet();
 		long subscribeNowMs = System.currentTimeMillis();
 		lastSubscribeMs.set(subscribeNowMs);
 		connectionStartMs.set(subscribeNowMs);
@@ -150,14 +160,17 @@ public class BookTickerStreamWatcher {
 			Flux<String> payloads = receivePayloads(session, null, connId, "combined");
 			return payloads.then();
 		})
-				.doOnSubscribe(ignored -> LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols={} mode=combined connId={} reason={}", streams.size(), connId, reason))
 				.doOnError(error -> LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode=combined connId={} reason={}", connId, error.toString()))
 				.doFinally(signal -> {
 					LOGGER.warn("EVENT=BOOKTICKER_WS_FINALLY mode=combined connId={} signal={}", connId, signal);
+					lastFinallyMs.set(System.currentTimeMillis());
+					clearConnectionState(connId);
 					scheduleReconnect("FINALLY_" + signal.name(), -1L);
 				})
 				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR connId={} reason={}", connId, error.getMessage()));
 		Disposable prev = wsRef.getAndSet(disposable);
+		connected.set(true);
+		LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols={} mode=combined connId={} reason={}", streams.size(), connId, reason);
 		if (prev != null && prev != disposable && !prev.isDisposed()) {
 			prev.dispose();
 		}
@@ -171,8 +184,7 @@ public class BookTickerStreamWatcher {
 		}
 		String symbolLower = symbol.toLowerCase();
 		URI uri = URI.create("wss://stream.binancefuture.com/ws/" + symbolLower + "@bookTicker");
-		long connId = connIdSeq.incrementAndGet();
-		currentConnectionId.set(connId);
+		long connId = currentConnId.incrementAndGet();
 		long subscribeNowMs = System.currentTimeMillis();
 		lastSubscribeMs.set(subscribeNowMs);
 		connectionStartMs.set(subscribeNowMs);
@@ -181,14 +193,17 @@ public class BookTickerStreamWatcher {
 			Flux<String> payloads = receivePayloads(session, symbol.toUpperCase(), connId, "testnet");
 			return payloads.then();
 		})
-				.doOnSubscribe(ignored -> LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols=1 mode=testnet symbol={} connId={} reason={}", symbol.toUpperCase(), connId, reason))
 				.doOnError(error -> LOGGER.warn("EVENT=BOOKTICKER_WS_ERROR mode=testnet symbol={} connId={} reason={}", symbol.toUpperCase(), connId, error.toString()))
 				.doFinally(signal -> {
 					LOGGER.warn("EVENT=BOOKTICKER_WS_FINALLY mode=testnet symbol={} connId={} signal={}", symbol.toUpperCase(), connId, signal);
+					lastFinallyMs.set(System.currentTimeMillis());
+					clearConnectionState(connId);
 					scheduleReconnect("FINALLY_" + signal.name(), -1L);
 				})
 				.subscribe(null, error -> LOGGER.warn("EVENT=BOOK_TICKER_STREAM_ERROR connId={} reason={}", connId, error.getMessage()));
 		Disposable prev = wsRef.getAndSet(disposable);
+		connected.set(true);
+		LOGGER.info("EVENT=BOOKTICKER_WS_SUBSCRIBE symbols=1 mode=testnet symbol={} connId={} reason={}", symbol.toUpperCase(), connId, reason);
 		if (prev != null && prev != disposable && !prev.isDisposed()) {
 			prev.dispose();
 		}
@@ -313,10 +328,16 @@ public class BookTickerStreamWatcher {
 		long exp = 1_000L * (1L << Math.min(attempt, 15));
 		long base = Math.min(30_000L, exp);
 		long jitter = ThreadLocalRandom.current().nextLong(0L, 251L);
-		long rawDelayMs  = base + jitter;
+		long rawDelayMs = base + jitter;
 		final long delayMs = (flapping && rawDelayMs < 10_000L) ? 10_000L : rawDelayMs;
 		final String reconnectReason = reason;
 		final long reconnectAgeMs = Math.max(0L, ageMs);
+		LOGGER.warn("EVENT=BOOKTICKER_RECONNECT_SCHEDULE attempt={} delayMs={} reason={} ageMs={} connId={}",
+				attempt,
+				delayMs,
+				reconnectReason,
+				reconnectAgeMs,
+				currentConnId.get());
 		ScheduledExecutorService exec = healthExec;
 		if (exec == null) {
 			reconnecting.set(false);
@@ -328,14 +349,18 @@ public class BookTickerStreamWatcher {
 					reconnecting.set(false);
 					return;
 				}
-				reconnecting.set(false);
-				disposeActiveWs("RECONNECT", "INTERNAL_LOOP");
-				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT attempt={} delayMs={} reason={} ageMs={} connId={}",
-						 					attempt,
-						 						delayMs,
-						 						reconnectReason,
-						 						reconnectAgeMs,
-						 					currentConnectionId.get());
+				LOGGER.warn("EVENT=BOOKTICKER_RECONNECT_FIRE attempt={} reason={}", attempt, reconnectReason);
+				try {
+					if (connected.get()) {
+						reconnecting.set(false);
+						return;
+					}
+					startSubscribe("RECONNECT_" + reconnectReason);
+				} catch (Exception ex) {
+					LOGGER.warn("EVENT=BOOKTICKER_RECONNECT_FIRE_ERROR attempt={} reason={} error={}", attempt, reconnectReason, ex.toString());
+				} finally {
+					reconnecting.set(false);
+				}
 			}, delayMs, TimeUnit.MILLISECONDS);
 		} catch (RejectedExecutionException ex) {
 			LOGGER.warn("EVENT=BOOKTICKER_RECONNECT_SCHEDULE_REJECTED reason={}", ex.toString());
@@ -344,13 +369,21 @@ public class BookTickerStreamWatcher {
 	}
 
 	private void disposeActiveWs(String reason, String callerTag) {
-		Disposable current = wsRef.get();
+		Disposable current = wsRef.getAndSet(null);
 		LOGGER.warn("EVENT=BOOKTICKER_DISPOSE_REQUEST reason={} caller={}", reason, callerTag);
+		connected.set(false);
 		if (current == null) {
 			return;
 		}
-		if (wsRef.compareAndSet(current, null) && !current.isDisposed()) {
+		if (!current.isDisposed()) {
 			current.dispose();
+		}
+	}
+
+	private void clearConnectionState(long connId) {
+		if (currentConnId.get() == connId) {
+			connected.set(false);
+			wsRef.set(null);
 		}
 	}
 
@@ -423,10 +456,11 @@ public class BookTickerStreamWatcher {
 		}
 		try {
 			ScheduledFuture<?> task = exec.scheduleAtFixedRate(() -> {
+				ensureHealthy();
 				long now = System.currentTimeMillis();
 				long last = lastMsgMs.get();
 				long age = last <= 0L ? -1L : Math.max(0L, now - last);
-				LOGGER.info("EVENT=BOOKTICKER_HEALTH connId={} msgCount={} lastMsgAgeMs={}", currentConnectionId.get(), msgCount.get(), age);
+				LOGGER.info("EVENT=BOOKTICKER_HEALTH connId={} connected={} msgCount={} lastMsgAgeMs={}", currentConnId.get(), connected.get(), msgCount.get(), age);
 			}, 30, 30, TimeUnit.SECONDS);
 			healthTaskRef.set(task);
 		} catch (RejectedExecutionException ex) {
