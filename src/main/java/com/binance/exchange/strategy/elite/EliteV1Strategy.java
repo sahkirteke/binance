@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.binance.strategy.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationContext;
@@ -34,11 +35,6 @@ import org.springframework.stereotype.Component;
 import com.binance.config.BinanceProperties;
 import com.binance.exchange.BinanceFuturesOrderClient;
 import com.binance.exchange.dto.OrderResponse;
-import com.binance.strategy.Candle;
-import com.binance.strategy.Strategy;
-import com.binance.strategy.StrategyType;
-import com.binance.strategy.SymbolFilterService;
-import com.binance.strategy.WarmupProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -58,6 +54,24 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
+
+
+// Global cap to avoid spraying too many concurrent positions/brackets.
+// One ENTRY typically creates a bracket (TP+SL), so capping OPEN POSITIONS acts as a practical cap on orders.
+private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
+
+// Winrate boosters (derived from DECISION/TRADES analysis):
+// - Avoid CHOP upper-band longs (top-buy)
+// - Avoid volume spikes (panic entries)
+// - Avoid EMA chase (too far above EMA20)
+private static final double CHOP_PB_MAX = 0.55;
+private static final double GLOBAL_PB_MAX = 0.75;
+private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
+private static final double EMA_SIGNED_DIST_MAX = 0.0025; // 0.25% above EMA20
+
+// RSI guard (LONG): blocks overbought entries. Tune based on desired trade count.
+private static final double CHOP_RSI_MAX = 55.0;   // more strict in CHOP
+private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/BREAKOUT
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
 
@@ -77,14 +91,15 @@ public class EliteV1Strategy implements Strategy {
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
 	private final AtomicBoolean warmupModeEnabled = new AtomicBoolean(false);
 	private volatile boolean warmupCompleted;
+	private final BookTickerStreamWatcher bookTickerStreamWatcher;
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
-			EliteV1Properties props,
-			ObjectMapper objectMapper,
-			SymbolFilterService symbolFilterService,
-			WarmupProperties warmupProperties,
-			ApplicationContext applicationContext,
-			BinanceFuturesOrderClient orderClient) {
+                           EliteV1Properties props,
+                           ObjectMapper objectMapper,
+                           SymbolFilterService symbolFilterService,
+                           WarmupProperties warmupProperties,
+                           ApplicationContext applicationContext,
+                           BinanceFuturesOrderClient orderClient, BookTickerStreamWatcher bookTickerStreamWatcher) {
 		this.binanceProperties = binanceProperties;
 		this.props = props;
 		this.objectMapper = objectMapper;
@@ -92,7 +107,8 @@ public class EliteV1Strategy implements Strategy {
 		this.warmupProperties = warmupProperties;
 		this.applicationContext = applicationContext;
 		this.orderClient = orderClient;
-	}
+        this.bookTickerStreamWatcher = bookTickerStreamWatcher;
+    }
 
 	@Override
 	public StrategyType type() {
@@ -334,13 +350,16 @@ public class EliteV1Strategy implements Strategy {
 		return Math.max(warmupProperties.candles5m(), 0);
 	}
 
-	static PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide) {
+	PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide) {
 		if (!baselinesReady) {
 			return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null);
 		}
 		if (positionSide != Side.NONE) {
 			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null);
 		}
+if (globalOpenPositions.get() >= MAX_CONCURRENT_OPEN_POSITIONS) {
+	return new PreCheckAction(DecisionAction.GLOBAL_MAX_OPEN_POSITIONS, "GLOBAL_MAX_OPEN_POSITIONS");
+}
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
 	}
 
@@ -400,6 +419,49 @@ public class EliteV1Strategy implements Strategy {
 			failReasons.add("FAIL_DOWN_TREND");
 		}
 
+
+// --- Winrate boosters (regime-aware) ---
+double pb = m.bbPercentB_5m;
+if (!Double.isFinite(pb)) {
+	failReasons.add("FAIL_PB_MISSING");
+} else {
+	if (m.activeRegimeTag == RegimeTag.CHOP) {
+		if (pb > CHOP_PB_MAX) {
+			failReasons.add("FAIL_PB_TOO_HIGH_CHOP");
+		}
+	} else {
+		if (pb > GLOBAL_PB_MAX) {
+			failReasons.add("FAIL_PB_TOO_HIGH");
+		}
+	}
+}
+
+double volE = m.volRatioOfEma;
+if (Double.isFinite(volE) && volE > VOL_RATIO_OF_EMA_MAX) {
+	failReasons.add("FAIL_VOL_RATIO_OF_EMA_TOO_HIGH");
+}
+
+// Signed distance to EMA20: (close - ema20) / ema20. Blocks chasing above EMA.
+double emaSignedDist = Double.NaN;
+if (Double.isFinite(m.close5m) && Double.isFinite(m.ema20_5m) && m.ema20_5m != 0.0) {
+	emaSignedDist = (m.close5m - m.ema20_5m) / m.ema20_5m;
+	if (Double.isFinite(emaSignedDist) && emaSignedDist > EMA_SIGNED_DIST_MAX) {
+		failReasons.add("FAIL_EMA20_CHASE_SIGNED");
+	}
+} else {
+	failReasons.add("FAIL_EMA20_OR_CLOSE_MISSING");
+}
+
+// RSI guard: blocks overbought longs (especially in CHOP where mean-reversion dominates).
+double rsi9 = m.rsi9_5m;
+if (!Double.isFinite(rsi9)) {
+	failReasons.add("FAIL_RSI_MISSING");
+} else {
+	double rsiMax = (m.activeRegimeTag == RegimeTag.CHOP) ? CHOP_RSI_MAX : GLOBAL_RSI_MAX;
+	if (rsi9 > rsiMax) {
+		failReasons.add(m.activeRegimeTag == RegimeTag.CHOP ? "FAIL_RSI_TOO_HIGH_CHOP" : "FAIL_RSI_TOO_HIGH");
+	}
+}
 		boolean signal = failReasons.isEmpty();
 		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
 	}
@@ -449,8 +511,8 @@ public class EliteV1Strategy implements Strategy {
 		}
 		tpRaw = entryPrice * (1.0 + TP_PCT);
 		slRaw = entryPrice * (1.0 - SL_PCT);
-		tpPrice = roundUp(tpRaw, tickSize);
-		slPrice = roundDown(slRaw, tickSize);
+		tpPrice = roundDown(tpRaw, tickSize);
+		slPrice = roundUp(slRaw, tickSize);
 
 		Long slOrderId = null;
 		Long tpOrderId = null;
@@ -712,6 +774,7 @@ public class EliteV1Strategy implements Strategy {
 		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
 		node.put("entriesToday", state.entriesToday);
 		node.put("baselinesReady", baselinesReady);
+		node.put("globalOpenPositions", globalOpenPositions.get());
 		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
 		putOrderflow(node, bar5m);
 		putLiquidity(node, state.symbol, timeMs);
@@ -849,65 +912,46 @@ public class EliteV1Strategy implements Strategy {
 		orderflow.put("reason", "OK");
 	}
 
+	// --- DEĞİŞECEK YER 3: putLiquidity Metodu ---
 	private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
-		LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
-		if (snapshot == null) {
-			parent.putNull("liquidity");
-			parent.put("liquidityReason", "MISSING");
+		// Doğrudan yeni watcher üzerinden snapshot alıyoruz
+		var snap = bookTickerStreamWatcher.getSnapshot(symbol);
+
+		if (snap == null) {
+			parent.put("liqOk", false);
 			return;
 		}
 
-		long ageMs = Math.max(0L, System.currentTimeMillis() - snapshot.eventTimeMs());
-		double bid = snapshot.bestBidPrice();
-		double ask = snapshot.bestAskPrice();
-		double bidQty = snapshot.bestBidQty();
-		double askQty = snapshot.bestAskQty();
+		// Zaman farkını ve verileri hesapla
+		long ageMs = Math.max(0L, nowMs - snap.eventTimeMs());
+		double bid = snap.bestBidPrice();
+		double ask = snap.bestAskPrice();
+		double bidQty = snap.bestBidQty();
+		double askQty = snap.bestAskQty();
 
-		if (!Double.isFinite(bid)
-				|| !Double.isFinite(ask)
-				|| !Double.isFinite(bidQty)
-				|| !Double.isFinite(askQty)
-				|| bid <= 0.0
-				|| ask <= 0.0
-				|| bidQty < 0.0
-				|| askQty < 0.0) {
-			parent.putNull("liquidity");
-			parent.put("liquidityReason", "INVALID");
-			return;
-		}
-
-		double spread = ask - bid;
 		double mid = (bid + ask) / 2.0;
-		double spreadPct = spread / Math.max(mid, 1e-12);
-		double denomQty = bidQty + askQty;
-		double imbalance = denomQty > 0.0 ? (bidQty - askQty) / denomQty : 0.0;
+		double spreadPct = (mid <= 0) ? 0.0 : (ask - bid) / mid;
+		double denom = (bidQty + askQty);
+		double imbalance = (denom <= 0) ? 0.0 : (bidQty - askQty) / denom;
 
-		if (!Double.isFinite(imbalance) || !Double.isFinite(spread) || !Double.isFinite(spreadPct)) {
-			parent.putNull("liquidity");
-			parent.put("liquidityReason", "INVALID");
-			return;
-		}
-
-		ObjectNode liq = parent.putObject("liquidity");
-		liq.put("bid", bid);
-		liq.put("ask", ask);
-		liq.put("bidQty", bidQty);
-		liq.put("askQty", askQty);
-		liq.put("spread", spread);
-		liq.put("spreadPct", spreadPct);
-		liq.put("imbalance", imbalance);
-		liq.put("ageMs", ageMs);
-		parent.put("liquidityReason", ageMs > LIQUIDITY_MAX_AGE_MS ? "STALE" : "OK");
+		// JSON objesine ekle
+		parent.put("liqOk", true);
+		parent.put("liqAgeMs", ageMs);
+		parent.put("bid", bid);
+		parent.put("ask", ask);
+		parent.put("bidQty", bidQty);
+		parent.put("askQty", askQty);
+		parent.put("spreadPct", spreadPct);
+		parent.put("imbalance", imbalance);
 	}
 
+	// --- DEĞİŞECEK YER 4: Yardımcı Metotlar ---
 	private void checkLiquidityHealth() {
-		try {
-			Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
-			Object bean = applicationContext.getBean(watcherClass);
-			Method ensureHealthy = watcherClass.getMethod("ensureHealthy");
-			ensureHealthy.invoke(bean);
-		} catch (Exception ex) {
-			LOGGER.debug("EVENT=LIQUIDITY_HEALTH_CHECK_SKIPPED reason={}", ex.toString());
+		// Artık yavaş metod çağırma (invoke) yok, doğrudan erişim var
+		long last = bookTickerStreamWatcher.lastMsgMs();
+		long age = System.currentTimeMillis() - last;
+		if (age > 30000) {
+			LOGGER.warn("Likidite verisi çok eski! Age: {}ms", age);
 		}
 	}
 
@@ -976,7 +1020,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 	private double resolveTickSize(String symbol) {
 		var filters = symbolFilterService.getFilters(symbol);
 		if (filters == null || filters.tickSize() == null) {
-			return DEFAULT_TICK_SIZE;
+			return Double.NaN;
 		}
 		return filters.tickSize().doubleValue();
 	}
@@ -1079,7 +1123,8 @@ private Path decisionPath(String symbol, LocalDate day) {
 		enum DecisionAction {
 		CONTINUE,
 		INPUTS_NOT_READY,
-		IN_POSITION_NO_ENTRY
+		IN_POSITION_NO_ENTRY,
+		GLOBAL_MAX_OPEN_POSITIONS
 	}
 
 	record PreCheckAction(DecisionAction action, String blockReason) {
