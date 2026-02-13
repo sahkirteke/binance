@@ -45,7 +45,8 @@ public class EliteV1Strategy implements Strategy {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(EliteV1Strategy.class);
 	private static final DateTimeFormatter DAY_FMT = DateTimeFormatter.BASIC_ISO_DATE;
-	private static final DateTimeFormatter ISO_OFFSET_FMT = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
+	private static final ZoneId TR_ZONE = ZoneId.of("Europe/Istanbul");
+	private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX");
 	private static final long ONE_MIN_MS = 60_000L;
 	private static final long FIVE_MIN_MS = 300_000L;
 	private static final double TP_PCT = 0.0075;
@@ -58,20 +59,24 @@ public class EliteV1Strategy implements Strategy {
 
 // Global cap to avoid spraying too many concurrent positions/brackets.
 // One ENTRY typically creates a bracket (TP+SL), so capping OPEN POSITIONS acts as a practical cap on orders.
-private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
+private static final int MAX_CONCURRENT_OPEN_POSITIONS = 14;
+private static final int GLOBAL_MAX_ENTRIES_PER_5M_BAR = 5;
 
 // Winrate boosters (derived from DECISION/TRADES analysis):
 // - Avoid CHOP upper-band longs (top-buy)
 // - Avoid volume spikes (panic entries)
 // - Avoid EMA chase (too far above EMA20)
 private static final double CHOP_PB_MAX = 0.55;
+private static final double CHOP_PB_MIN = 0.15;
 private static final double GLOBAL_PB_MAX = 0.75;
 private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 private static final double EMA_SIGNED_DIST_MAX = 0.0025; // 0.25% above EMA20
 
 // RSI guard (LONG): blocks overbought entries. Tune based on desired trade count.
-private static final double CHOP_RSI_MAX = 55.0;   // more strict in CHOP
+private static final double CHOP_RSI_MAX = 50.0;   // more strict in CHOP
 private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/BREAKOUT
+private static final double CHOP_PB_TIGHTEN_SL_THRESHOLD = 0.85;
+private static final double CHOP_TIGHTEN_SL_TO_ENTRY_BUFFER_PCT = 0.0005;
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
 
@@ -86,6 +91,8 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
+	private final AtomicLong entrySlotBarCloseTimeMs = new AtomicLong(Long.MIN_VALUE);
+	private final AtomicInteger entriesInBar = new AtomicInteger(0);
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -130,7 +137,7 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 				props.symbols().size(),
 				requiredWarmup5m,
 				warmupMode.name());
-		zoneId = ZoneId.of(props.zoneId());
+		zoneId = TR_ZONE;
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
@@ -279,16 +286,13 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 		state.baselinesReady = baselinesReady;
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
-			var at = Instant.ofEpochMilli(bar5m.closeTime());
-			var atTr = at.atZone(zoneId);
-			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} timeUtc={} timeTr={}",
+			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} atTr={}",
 					state.symbol,
 					state.seen1mCloses,
 					state.seen5mCloses,
 					requiredWarmup5m,
 					bar5m.closeTime(),
-					at.toString(),
-					ISO_OFFSET_FMT.format(atTr));
+					fmtTr(bar5m.closeTime()));
 			LOGGER.info("warm up bitti strategy=ELITE_V1 symbol={} seen1m={} seen5m={} atMs={}",
 					state.symbol,
 					state.seen1mCloses,
@@ -307,9 +311,12 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 			return;
 		}
 
-		if (state.positionSide == Side.LONG && checkPaperExitOnFiveMinute(state, bar5m)) {
-			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
-			return;
+		if (state.positionSide == Side.LONG) {
+			if (checkPaperExitOnFiveMinute(state, bar5m)) {
+				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+				return;
+			}
+			applyChopPbHighRiskAction(state, metrics, bar5m);
 		}
 
 		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
@@ -320,7 +327,23 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 
 		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
 		if (longEval.signal()) {
-			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
+			long barCloseTimeMs = bar5m.closeTime();
+			if (!tryAcquireEntrySlot(barCloseTimeMs)) {
+				writeDecision(state, bar5m, "NO_ENTRY", null, "GLOBAL_MAX_ENTRIES_PER_5M_BAR", metrics, null);
+				return;
+			}
+			boolean opened = false;
+			try {
+				opened = openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
+			} finally {
+				if (!opened) {
+					releaseEntrySlotIfNeeded(barCloseTimeMs);
+				}
+			}
+			if (!opened) {
+				writeDecision(state, bar5m, "NO_ENTRY", null, "ENTRY_PLACE_FAILED", metrics, null);
+				return;
+			}
 			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", "ELIT_V1_LONG_MATCH", metrics, longEval);
 			return;
 		}
@@ -357,10 +380,34 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 		if (positionSide != Side.NONE) {
 			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null);
 		}
-if (globalOpenPositions.get() >= MAX_CONCURRENT_OPEN_POSITIONS) {
-	return new PreCheckAction(DecisionAction.GLOBAL_MAX_OPEN_POSITIONS, "GLOBAL_MAX_OPEN_POSITIONS");
-}
+		if (globalOpenPositions.get() >= MAX_CONCURRENT_OPEN_POSITIONS) {
+			return new PreCheckAction(DecisionAction.GLOBAL_MAX_OPEN_POSITIONS, "GLOBAL_MAX_OPEN_POSITIONS");
+		}
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
+	}
+
+	private boolean tryAcquireEntrySlot(long barCloseTimeMs) {
+		synchronized (entriesInBar) {
+			long currentBar = entrySlotBarCloseTimeMs.get();
+			if (currentBar != barCloseTimeMs) {
+				entrySlotBarCloseTimeMs.set(barCloseTimeMs);
+				entriesInBar.set(0);
+			}
+			if (entriesInBar.get() >= GLOBAL_MAX_ENTRIES_PER_5M_BAR) {
+				return false;
+			}
+			entriesInBar.incrementAndGet();
+			return true;
+		}
+	}
+
+	private void releaseEntrySlotIfNeeded(long barCloseTimeMs) {
+		synchronized (entriesInBar) {
+			if (entrySlotBarCloseTimeMs.get() != barCloseTimeMs) {
+				return;
+			}
+			entriesInBar.updateAndGet(v -> Math.max(0, v - 1));
+		}
 	}
 
 	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
@@ -426,6 +473,9 @@ if (!Double.isFinite(pb)) {
 	failReasons.add("FAIL_PB_MISSING");
 } else {
 	if (m.activeRegimeTag == RegimeTag.CHOP) {
+		if (pb < CHOP_PB_MIN) {
+			failReasons.add("FAIL_PB_TOO_LOW_CHOP");
+		}
 		if (pb > CHOP_PB_MAX) {
 			failReasons.add("FAIL_PB_TOO_HIGH_CHOP");
 		}
@@ -466,7 +516,7 @@ if (!Double.isFinite(rsi9)) {
 		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
 	}
 
-	private void openPosition(SymbolState state,
+	private boolean openPosition(SymbolState state,
 			Candle bar5m,
 			Side side,
 			String matchedSetup,
@@ -481,8 +531,8 @@ if (!Double.isFinite(rsi9)) {
 
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
 			if (side != Side.LONG) {
-				LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-				return;
+				LOGGER.debug("EVENT=ENTRY_SKIPPED symbol={} reason=ENTRY_SIDE_NOT_SUPPORTED", state.symbol);
+				return false;
 			}
 			String entrySide = "BUY";
 			OrderResponse entryResponse = orderClient.placeMarketOrder(
@@ -493,7 +543,7 @@ if (!Double.isFinite(rsi9)) {
 					entryOrderClientId).block();
 			if (entryResponse == null || entryResponse.orderId() == null) {
 				LOGGER.warn("EVENT=ENTRY_FAILED symbol={} side={} reason=NULL_RESPONSE", state.symbol, side);
-				return;
+				return false;
 			}
 			entryOrderId = entryResponse.orderId();
 			if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
@@ -506,8 +556,8 @@ if (!Double.isFinite(rsi9)) {
 		double tpPrice;
 		double slPrice;
 		if (side != Side.LONG) {
-			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-			return;
+			LOGGER.debug("EVENT=ENTRY_SKIPPED symbol={} reason=ENTRY_SIDE_NOT_SUPPORTED", state.symbol);
+			return false;
 		}
 		tpRaw = entryPrice * (1.0 + TP_PCT);
 		slRaw = entryPrice * (1.0 - SL_PCT);
@@ -534,7 +584,7 @@ if (!Double.isFinite(rsi9)) {
 					tpClientOrderId).block();
 			if (slResponse == null || slResponse.orderId() == null || tpResponse == null || tpResponse.orderId() == null) {
 				LOGGER.warn("EVENT=BRACKET_PLACE_FAIL symbol={} bracketId={}", state.symbol, bracketId);
-				return;
+				return false;
 			}
 			slOrderId = slResponse.orderId();
 			tpOrderId = tpResponse.orderId();
@@ -564,13 +614,16 @@ if (!Double.isFinite(rsi9)) {
 		state.slClientOrderId = slClientOrderId;
 		state.tpOrderId = tpOrderId;
 		state.tpClientOrderId = tpClientOrderId;
+		state.lastSlTighten5mCloseTimeMs = null;
+		state.pendingRiskAction = null;
+		state.pendingRiskActionDetail = null;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
 
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "ENTRY");
 		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
+		node.put("entryTime", fmtTr(bar5m.closeTime()));
 		node.put("side", side.name());
 		node.put("entryPrice", entryPrice);
 		node.put("qty", qty);
@@ -594,6 +647,111 @@ if (!Double.isFinite(rsi9)) {
 			node.put("tpOrderId", tpOrderId);
 		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+		return true;
+	}
+
+	private void applyChopPbHighRiskAction(SymbolState state, Metrics metrics, Candle bar5m) {
+		if (state == null || metrics == null || bar5m == null) {
+			return;
+		}
+		if (state.positionSide != Side.LONG || metrics.activeRegimeTag != RegimeTag.CHOP) {
+			return;
+		}
+		if (!Double.isFinite(metrics.bbPercentB_5m) || metrics.bbPercentB_5m < CHOP_PB_TIGHTEN_SL_THRESHOLD) {
+			return;
+		}
+		if (state.lastSlTighten5mCloseTimeMs != null && state.lastSlTighten5mCloseTimeMs == bar5m.closeTime()) {
+			return;
+		}
+		double tickSize = resolveTickSize(state.symbol);
+		double newSlRaw = Math.max(state.slPrice, state.entryPrice * (1.0 + CHOP_TIGHTEN_SL_TO_ENTRY_BUFFER_PCT));
+		double newSlPrice = roundUp(newSlRaw, tickSize);
+		if (!(newSlPrice > state.slPrice + tickSize)) {
+			return;
+		}
+		double maxSafeSl = bar5m.close() - tickSize;
+		if (newSlPrice >= maxSafeSl) {
+			return;
+		}
+		double oldSl = state.slPrice;
+		if (props.mode() == EliteV1Properties.Mode.LIVE) {
+			if (!tightenLiveStopLoss(state, oldSl, newSlPrice)) {
+				return;
+			}
+		} else {
+			state.slPrice = newSlPrice;
+		}
+		state.lastSlTighten5mCloseTimeMs = bar5m.closeTime();
+		state.pendingRiskAction = "CHOP_PB_HIGH_TIGHTEN_SL";
+		state.pendingRiskActionDetail = String.format("oldSl=%.8f newSl=%.8f pb=%.6f rsi=%.6f",
+				oldSl, newSlPrice, metrics.bbPercentB_5m, metrics.rsi9_5m);
+		LOGGER.info("EVENT=SL_TIGHTEN_CHOP_PB_HIGH symbol={} oldSl={} newSl={} pb={} rsi={} barCloseMs={}",
+				state.symbol,
+				oldSl,
+				newSlPrice,
+				metrics.bbPercentB_5m,
+				metrics.rsi9_5m,
+				bar5m.closeTime());
+	}
+
+	private boolean tightenLiveStopLoss(SymbolState state, double oldSlPrice, double newSlPrice) {
+		if (state.slOrderId == null) {
+			return false;
+		}
+		Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(state.symbol).block();
+		if (openOrders == null || !openOrders.containsKey(state.slOrderId)) {
+			return false;
+		}
+		Long oldSlOrderId = state.slOrderId;
+		String oldSlClientOrderId = state.slClientOrderId;
+		try {
+			orderClient.cancelOrder(state.symbol, oldSlOrderId).block();
+		} catch (Exception ex) {
+			LOGGER.warn("EVENT=SL_TIGHTEN_CANCEL_FAIL symbol={} slOrderId={} err={}", state.symbol, oldSlOrderId, ex.getMessage());
+			return false;
+		}
+		String newSlClientOrderId = "ELITE_SL_TIGHTEN_" + state.symbol + "_" + UUID.randomUUID();
+		try {
+			OrderResponse newSlOrder = orderClient.placeStopMarketClosePositionOrder(
+					state.symbol,
+					"SELL",
+					BigDecimal.valueOf(newSlPrice),
+					"MARK_PRICE",
+					newSlClientOrderId).block();
+			if (newSlOrder == null || newSlOrder.orderId() == null) {
+				throw new IllegalStateException("NEW_SL_NULL");
+			}
+			state.slPrice = newSlPrice;
+			state.slOrderId = newSlOrder.orderId();
+			state.slClientOrderId = newSlClientOrderId;
+			return true;
+		} catch (Exception ex) {
+			LOGGER.error("EVENT=SL_TIGHTEN_PLACE_FAIL symbol={} err={} -> fallback", state.symbol, ex.getMessage());
+			String fallbackClientOrderId = "ELITE_SL_FALLBACK_" + state.symbol + "_" + UUID.randomUUID();
+			try {
+				OrderResponse fallback = orderClient.placeStopMarketClosePositionOrder(
+						state.symbol,
+						"SELL",
+						BigDecimal.valueOf(oldSlPrice),
+						"MARK_PRICE",
+						fallbackClientOrderId).block();
+				if (fallback != null && fallback.orderId() != null) {
+					state.slPrice = oldSlPrice;
+					state.slOrderId = fallback.orderId();
+					state.slClientOrderId = fallbackClientOrderId;
+				} else {
+					state.slPrice = oldSlPrice;
+					state.slOrderId = oldSlOrderId;
+					state.slClientOrderId = oldSlClientOrderId;
+				}
+			} catch (Exception fallbackEx) {
+				LOGGER.error("EVENT=SL_TIGHTEN_FALLBACK_FAIL symbol={} err={}", state.symbol, fallbackEx.getMessage());
+				state.slPrice = oldSlPrice;
+				state.slOrderId = oldSlOrderId;
+				state.slClientOrderId = oldSlClientOrderId;
+			}
+			return false;
+		}
 	}
 
 	private void checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
@@ -687,7 +845,7 @@ if (!Double.isFinite(rsi9)) {
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "EXIT");
 		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(exitTimeMs).toString());
+		node.put("exitTime", fmtTr(exitTimeMs));
 		node.put("side", state.positionSide.name());
 		node.put("entryPrice", state.entryPrice);
 		node.put("exitPrice", exitPrice);
@@ -735,6 +893,9 @@ if (!Double.isFinite(rsi9)) {
 		state.slClientOrderId = null;
 		state.tpOrderId = null;
 		state.tpClientOrderId = null;
+		state.lastSlTighten5mCloseTimeMs = null;
+		state.pendingRiskAction = null;
+		state.pendingRiskActionDetail = null;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 	}
 
@@ -759,8 +920,7 @@ if (!Double.isFinite(rsi9)) {
 			LongSetupEval longSetupEval) {
 		ObjectNode node = objectMapper.createObjectNode();
 		long timeMs = bar5m.closeTime();
-		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
-		LocalDate dayFromTimeMs = timeTr.toLocalDate();
+		LocalDate dayFromTimeMs = Instant.ofEpochMilli(timeMs).atZone(TR_ZONE).toLocalDate();
 		boolean baselinesReady = isBaselinesReady(state, metrics);
 		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
@@ -769,8 +929,7 @@ if (!Double.isFinite(rsi9)) {
 		node.put("tfExecution", "1m");
 		node.put("version", "20260207-elitev1-logv2");
 		node.put("timeMs", timeMs);
-		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
-		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+		node.put("decisionTime", fmtTr(timeMs));
 		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
 		node.put("entriesToday", state.entriesToday);
 		node.put("baselinesReady", baselinesReady);
@@ -830,6 +989,10 @@ if (!Double.isFinite(rsi9)) {
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
 		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
+		if (state.pendingRiskAction != null && !state.pendingRiskAction.isBlank()) {
+			node.put("riskAction", state.pendingRiskAction);
+			node.put("riskActionDetail", state.pendingRiskActionDetail == null ? "" : state.pendingRiskActionDetail);
+		}
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
 		node.put("elit.tpPct", TP_PCT);
 		node.put("elit.slPct", SL_PCT);
@@ -845,10 +1008,9 @@ if (!Double.isFinite(rsi9)) {
 			node.putNull("elit.imbalance");
 		}
 		node.put("elit.isDownTrend", eval.isDownTrend);
-		node.put("shortEliteMatched", false);
-		node.putNull("shortEliteMatchedSetup");
-		node.putArray("shortEliteFailReasons");
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+		state.pendingRiskAction = null;
+		state.pendingRiskActionDetail = null;
 	}
 
 
@@ -1075,6 +1237,10 @@ private Path decisionPath(String symbol, LocalDate day) {
 		return RegimeTag.TREND;
 	}
 
+	private static String fmtTr(long epochMs) {
+		return Instant.ofEpochMilli(epochMs).atZone(TR_ZONE).format(TS_FMT);
+	}
+
 	private void validateConfig() {
 		if (props.paperNotionalUsd() <= 0) {
 			throw new IllegalStateException("paperNotionalUsd must be > 0");
@@ -1254,6 +1420,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private String slClientOrderId;
 		private Long tpOrderId;
 		private String tpClientOrderId;
+		private Long lastSlTighten5mCloseTimeMs;
+		private String pendingRiskAction;
+		private String pendingRiskActionDetail;
 		private Double prevEma20_5m;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
