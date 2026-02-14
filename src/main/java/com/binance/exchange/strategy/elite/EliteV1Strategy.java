@@ -60,11 +60,17 @@ public class EliteV1Strategy implements Strategy {
 // One ENTRY typically creates a bracket (TP+SL), so capping OPEN POSITIONS acts as a practical cap on orders.
 private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
 
-// Winrate boosters (derived from DECISION/TRADES analysis):
-// - Avoid CHOP upper-band longs (top-buy)
-// - Avoid volume spikes (panic entries)
-// - Avoid EMA chase (too far above EMA20)
-private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
+// BEGIN PB_EMA_PATCH
+private static final double CHOP_PB_MAX = 0.80;
+private static final double GLOBAL_PB_MAX = 1.15;
+private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
+// Mini sanity test checklist:
+// - CHOP + pb=0.81 -> NO_ENTRY + FAIL_PB_MAX_CHOP
+// - TREND + pb=1.16 -> NO_ENTRY + FAIL_PB_MAX_GLOBAL
+// - emaSignedDist=0.016 -> NO_ENTRY + FAIL_EMA_CHASE
+// - pb/ema uygun + setup match -> ENTER_LONG
+// - Eğer metrics.activeRegimeTag null ise onu UNKNOWN kabul et ve pbMaxUsed için GLOBAL_PB_MAX kullan.
+// END PB_EMA_PATCH
 
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
@@ -356,6 +362,28 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
 		List<String> failReasons = new ArrayList<>();
 
+		// BEGIN PB_EMA_PATCH
+		RegimeTag activeRegimeTag = m.activeRegimeTag;
+		double pb = m.bbPercentB_5m;
+		double pbMaxUsed = activeRegimeTag == RegimeTag.CHOP ? CHOP_PB_MAX : GLOBAL_PB_MAX;
+		if (!Double.isFinite(pb)) {
+			failReasons.add("FAIL_PB_MISSING");
+		} else if (pb > pbMaxUsed) {
+			failReasons.add(activeRegimeTag == RegimeTag.CHOP ? "FAIL_PB_MAX_CHOP" : "FAIL_PB_MAX_GLOBAL");
+		}
+
+		double ema = m.ema20_5m;
+		Double emaSignedDist = null;
+		if (!Double.isFinite(ema) || ema <= 0.0) {
+			failReasons.add("FAIL_EMA_MISSING");
+		} else {
+			emaSignedDist = (m.close5m - ema) / ema;
+			if (emaSignedDist > EMA_SIGNED_DIST_MAX) {
+				failReasons.add("FAIL_EMA_CHASE");
+			}
+		}
+		// END PB_EMA_PATCH
+
 		Double takerBuyRatio = null;
 		OrderflowSnapshot orderflow = OrderflowSnapshot.fromCandle(bar5m);
 		if (orderflow == null || bar5m.volume() <= 0.0 || orderflow.takerBuyBaseVolume() == null || !Double.isFinite(orderflow.takerBuyBaseVolume())) {
@@ -411,7 +439,14 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 
 		boolean signal = failReasons.isEmpty();
-		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
+		return new LongSetupEval(signal,
+				signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons),
+				takerBuyRatio,
+				imbalance,
+				isDownTrend,
+				pbMaxUsed,
+				emaSignedDist,
+				EMA_SIGNED_DIST_MAX);
 	}
 
 
@@ -809,6 +844,19 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			node.putNull("elit.imbalance");
 		}
 		node.put("elit.isDownTrend", eval.isDownTrend);
+		// BEGIN PB_EMA_PATCH
+		if (Double.isFinite(eval.pbMaxUsed)) {
+			node.put("pbMaxUsed", eval.pbMaxUsed);
+		} else {
+			node.putNull("pbMaxUsed");
+		}
+		if (eval.emaSignedDist != null && Double.isFinite(eval.emaSignedDist)) {
+			node.put("emaSignedDist", eval.emaSignedDist);
+		} else {
+			node.putNull("emaSignedDist");
+		}
+		node.put("emaMaxUsed", eval.emaMaxUsed);
+		// END PB_EMA_PATCH
 		node.put("shortEliteMatched", false);
 		node.putNull("shortEliteMatchedSetup");
 		node.putArray("shortEliteFailReasons");
@@ -1185,9 +1233,16 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 	}
 
-	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend) {
+	private record LongSetupEval(boolean signal,
+			String blockReason,
+			Double takerBuyRatio,
+			Double imbalance,
+			boolean isDownTrend,
+			double pbMaxUsed,
+			Double emaSignedDist,
+			double emaMaxUsed) {
 		private static LongSetupEval empty() {
-			return new LongSetupEval(false, null, null, null, false);
+			return new LongSetupEval(false, null, null, null, false, Double.NaN, null, EMA_SIGNED_DIST_MAX);
 		}
 	}
 
