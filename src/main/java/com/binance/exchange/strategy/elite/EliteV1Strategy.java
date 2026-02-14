@@ -627,6 +627,12 @@ if (!Double.isFinite(rsi9)) {
 		node.put("side", side.name());
 		node.put("entryPrice", entryPrice);
 		node.put("qty", qty);
+		double entryFeeRateAssumed = resolveEntryFeeRate();
+		double entryNotional = scale8(entryPrice * qty);
+		double feeEntryAssumed = props.feeEnabled() ? scale8(entryNotional * entryFeeRateAssumed) : 0.0;
+		node.put("feeRateEntryAssumed", props.feeEnabled() ? entryFeeRateAssumed : 0.0);
+		node.put("entryNotional", entryNotional);
+		node.put("feeEntryAssumed", feeEntryAssumed);
 		node.put("tpPrice", tpPrice);
 		node.put("slPrice", slPrice);
 		node.put("tpRaw", tpRaw);
@@ -838,9 +844,18 @@ if (!Double.isFinite(rsi9)) {
 	}
 
 	private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs, ExitEvaluation evaluation) {
-		double pnl = state.positionSide == Side.LONG
+		double grossPnl = state.positionSide == Side.LONG
 				? (exitPrice - state.entryPrice) * state.qty
 				: (state.entryPrice - exitPrice) * state.qty;
+		double entryNotional = scale8(state.entryPrice * state.qty);
+		double exitNotional = scale8(exitPrice * state.qty);
+		double entryFeeRate = props.feeEnabled() ? resolveEntryFeeRate() : 0.0;
+		double exitFeeRate = props.feeEnabled() ? resolveExitFeeRate() : 0.0;
+		double feeEntry = props.feeEnabled() ? scale8(entryNotional * entryFeeRate) : 0.0;
+		double feeExit = props.feeEnabled() ? scale8(exitNotional * exitFeeRate) : 0.0;
+		double feeTotal = scale8(feeEntry + feeExit);
+		double netPnl = scale8(grossPnl - feeTotal);
+		double grossPnlScaled = scale8(grossPnl);
 
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "EXIT");
@@ -850,7 +865,17 @@ if (!Double.isFinite(rsi9)) {
 		node.put("entryPrice", state.entryPrice);
 		node.put("exitPrice", exitPrice);
 		node.put("qty", state.qty);
-		node.put("realizedPnl", pnl);
+		node.put("realizedPnl", netPnl);
+		node.put("grossPnl", grossPnlScaled);
+		node.put("netPnl", netPnl);
+		node.put("feeEntry", feeEntry);
+		node.put("feeExit", feeExit);
+		node.put("feeTotal", feeTotal);
+		node.put("feeRateEntry", entryFeeRate);
+		node.put("feeRateExit", exitFeeRate);
+		node.put("feeModel", props.feeModel());
+		node.put("entryNotional", entryNotional);
+		node.put("exitNotional", exitNotional);
 		node.put("exitReason", reason.name());
 		if (state.entryOrderId != null) { node.put("entryOrderId", state.entryOrderId); }
 		if (state.slOrderId != null) { node.put("slOrderId", state.slOrderId); }
@@ -1235,6 +1260,18 @@ private Path decisionPath(String symbol, LocalDate day) {
 			return RegimeTag.CHOP;
 		}
 		return RegimeTag.TREND;
+	}
+
+	private double resolveEntryFeeRate() {
+		return props.feeTakerRate();
+	}
+
+	private double resolveExitFeeRate() {
+		return props.feeTakerRate();
+	}
+
+	private static double scale8(double value) {
+		return BigDecimal.valueOf(value).setScale(8, RoundingMode.HALF_UP).doubleValue();
 	}
 
 	private static String fmtTr(long epochMs) {

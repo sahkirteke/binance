@@ -3,6 +3,7 @@ package com.binance.exchange.strategy.elite;
 import java.util.List;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.boot.context.properties.bind.Name;
 import org.springframework.validation.annotation.Validated;
 
@@ -26,6 +27,10 @@ public record EliteV1Properties(
 		@Positive int warmupMin5mBars,
 		@NotNull WarmupConfig warmup,
 		@NotNull RegimeConfig regime,
+		@DefaultValue("true") boolean feeEnabled,
+		@DefaultValue("0.0004") double feeTakerRate,
+		@DefaultValue("0.0002") double feeMakerRate,
+		@DefaultValue("ESTIMATED") String feeModel,
 		@Name("long") @NotNull LongConfig longConfig,
 		@Name("short") @NotNull ShortConfig shortConfig) {
 
