@@ -554,7 +554,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "ENTRY");
 		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
+		node.put("time", ISO_OFFSET_FMT.format(Instant.ofEpochMilli(bar5m.closeTime()).atZone(zoneId)));
 		node.put("side", side.name());
 		node.put("entryPrice", entryPrice);
 		node.put("qty", qty);
@@ -673,7 +673,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "EXIT");
 		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(exitTimeMs).toString());
+		node.put("time", ISO_OFFSET_FMT.format(Instant.ofEpochMilli(exitTimeMs).atZone(zoneId)));
 		node.put("side", state.positionSide.name());
 		node.put("entryPrice", state.entryPrice);
 		node.put("exitPrice", exitPrice);
