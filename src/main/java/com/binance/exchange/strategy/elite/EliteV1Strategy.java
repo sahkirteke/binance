@@ -50,7 +50,7 @@ public class EliteV1Strategy implements Strategy {
 	private static final long FIVE_MIN_MS = 300_000L;
 	private static final double TP_PCT = 0.0075;
 	private static final double SL_PCT = 0.0050;
-	private static final int LOOKAHEAD_BARS = 36;
+	private static final int LOOKAHEAD_BARS = 24;
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
