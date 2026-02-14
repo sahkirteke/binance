@@ -50,7 +50,7 @@ public class EliteV1Strategy implements Strategy {
 	private static final long FIVE_MIN_MS = 300_000L;
 	private static final double TP_PCT = 0.0075;
 	private static final double SL_PCT = 0.0050;
-	private static final int LOOKAHEAD_BARS = 36;
+	private static final int LOOKAHEAD_BARS = 24;
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
@@ -64,14 +64,8 @@ private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
 // - Avoid CHOP upper-band longs (top-buy)
 // - Avoid volume spikes (panic entries)
 // - Avoid EMA chase (too far above EMA20)
-private static final double CHOP_PB_MAX = 0.55;
-private static final double GLOBAL_PB_MAX = 0.75;
 private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
-private static final double EMA_SIGNED_DIST_MAX = 0.0025; // 0.25% above EMA20
 
-// RSI guard (LONG): blocks overbought entries. Tune based on desired trade count.
-private static final double CHOP_RSI_MAX = 55.0;   // more strict in CHOP
-private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/BREAKOUT
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
 
@@ -172,9 +166,7 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 
 	public void setWarmupMode(boolean warmupMode) {
 		warmupModeEnabled.set(warmupMode);
-		if (warmupMode) {
-			warmupCompleted = false;
-		}
+		warmupCompleted = false;
 	}
 
 	public void enableOrdersAfterWarmup() {
@@ -212,11 +204,6 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 		state.last1m.addLast(bar1m);
 		if (state.last1m.size() > 300) {
 			state.last1m.removeFirst();
-		}
-		if (props.mode() == EliteV1Properties.Mode.PAPER) {
-			checkPaperExit(state, bar1m);
-		} else {
-			checkLiveBracketExit(state, bar1m);
 		}
 		logWarmupProgressIfDue(state);
 
@@ -301,15 +288,21 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 					metrics.atrRatio5m);
 		}
 		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
+			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null);
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
 				state.prevEma20_5m = metrics.ema20_5m;
 			}
 			return;
 		}
 
-		if (state.positionSide == Side.LONG && checkPaperExitOnFiveMinute(state, bar5m)) {
-			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
-			return;
+		if (state.positionSide == Side.LONG) {
+			boolean exited = props.mode() == EliteV1Properties.Mode.PAPER
+					? checkPaperExitOnFiveMinute(state, bar5m)
+					: checkLiveBracketExit(state, bar5m);
+			if (exited) {
+				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+				return;
+			}
 		}
 
 		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
@@ -321,7 +314,7 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
 		if (longEval.signal()) {
 			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", "ELIT_V1_LONG_MATCH", metrics, longEval);
+			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval);
 			return;
 		}
 		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval);
@@ -357,9 +350,6 @@ private static final double GLOBAL_RSI_MAX = 60.0; // allow a bit more in TREND/
 		if (positionSide != Side.NONE) {
 			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null);
 		}
-if (globalOpenPositions.get() >= MAX_CONCURRENT_OPEN_POSITIONS) {
-	return new PreCheckAction(DecisionAction.GLOBAL_MAX_OPEN_POSITIONS, "GLOBAL_MAX_OPEN_POSITIONS");
-}
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
 	}
 
@@ -382,7 +372,7 @@ if (globalOpenPositions.get() >= MAX_CONCURRENT_OPEN_POSITIONS) {
 		if (snapshot == null) {
 			failReasons.add("FAIL_LIQUIDITY_MISSING");
 		} else {
-			long ageMs = Math.max(0L, System.currentTimeMillis() - snapshot.eventTimeMs());
+			long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
 			if (ageMs > LIQUIDITY_MAX_AGE_MS) {
 				failReasons.add("FAIL_LIQUIDITY_MISSING");
 			} else {
@@ -420,51 +410,10 @@ if (globalOpenPositions.get() >= MAX_CONCURRENT_OPEN_POSITIONS) {
 		}
 
 
-// --- Winrate boosters (regime-aware) ---
-double pb = m.bbPercentB_5m;
-if (!Double.isFinite(pb)) {
-	failReasons.add("FAIL_PB_MISSING");
-} else {
-	if (m.activeRegimeTag == RegimeTag.CHOP) {
-		if (pb > CHOP_PB_MAX) {
-			failReasons.add("FAIL_PB_TOO_HIGH_CHOP");
-		}
-	} else {
-		if (pb > GLOBAL_PB_MAX) {
-			failReasons.add("FAIL_PB_TOO_HIGH");
-		}
-	}
-}
-
-double volE = m.volRatioOfEma;
-if (Double.isFinite(volE) && volE > VOL_RATIO_OF_EMA_MAX) {
-	failReasons.add("FAIL_VOL_RATIO_OF_EMA_TOO_HIGH");
-}
-
-// Signed distance to EMA20: (close - ema20) / ema20. Blocks chasing above EMA.
-double emaSignedDist = Double.NaN;
-if (Double.isFinite(m.close5m) && Double.isFinite(m.ema20_5m) && m.ema20_5m != 0.0) {
-	emaSignedDist = (m.close5m - m.ema20_5m) / m.ema20_5m;
-	if (Double.isFinite(emaSignedDist) && emaSignedDist > EMA_SIGNED_DIST_MAX) {
-		failReasons.add("FAIL_EMA20_CHASE_SIGNED");
-	}
-} else {
-	failReasons.add("FAIL_EMA20_OR_CLOSE_MISSING");
-}
-
-// RSI guard: blocks overbought longs (especially in CHOP where mean-reversion dominates).
-double rsi9 = m.rsi9_5m;
-if (!Double.isFinite(rsi9)) {
-	failReasons.add("FAIL_RSI_MISSING");
-} else {
-	double rsiMax = (m.activeRegimeTag == RegimeTag.CHOP) ? CHOP_RSI_MAX : GLOBAL_RSI_MAX;
-	if (rsi9 > rsiMax) {
-		failReasons.add(m.activeRegimeTag == RegimeTag.CHOP ? "FAIL_RSI_TOO_HIGH_CHOP" : "FAIL_RSI_TOO_HIGH");
-	}
-}
 		boolean signal = failReasons.isEmpty();
 		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
 	}
+
 
 	private void openPosition(SymbolState state,
 			Candle bar5m,
@@ -474,7 +423,7 @@ if (!Double.isFinite(rsi9)) {
 		double tickSize = resolveTickSize(state.symbol);
 		String bracketId = UUID.randomUUID().toString();
 		double estimatedEntryPrice = bar5m.close();
-		double qty = props.paperNotionalUsd() / Math.max(estimatedEntryPrice, 1e-9);
+		double qty = Math.max(props.paperNotionalUsd() / Math.max(estimatedEntryPrice, 1e-9), 1e-9);
 		double entryPrice = estimatedEntryPrice;
 		String entryOrderClientId = "ELITE_ENTRY_" + state.symbol + "_" + bracketId;
 		Long entryOrderId = null;
@@ -511,8 +460,8 @@ if (!Double.isFinite(rsi9)) {
 		}
 		tpRaw = entryPrice * (1.0 + TP_PCT);
 		slRaw = entryPrice * (1.0 - SL_PCT);
-		tpPrice = roundDown(tpRaw, tickSize);
-		slPrice = roundUp(slRaw, tickSize);
+		tpPrice = roundUp(tpRaw, tickSize);
+		slPrice = roundDown(slRaw, tickSize);
 
 		Long slOrderId = null;
 		Long tpOrderId = null;
@@ -596,32 +545,34 @@ if (!Double.isFinite(rsi9)) {
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 	}
 
-	private void checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
+	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
 		if (state.positionSide == Side.NONE || state.bracketId == null || state.slOrderId == null || state.tpOrderId == null) {
-			return;
+			return false;
 		}
 		Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(state.symbol).block();
 		if (openOrders == null) {
-			return;
+			return false;
 		}
 		boolean slOpen = openOrders.containsKey(state.slOrderId);
 		boolean tpOpen = openOrders.containsKey(state.tpOrderId);
 		if (slOpen && tpOpen) {
-			return;
+			return false;
 		}
 		if (!slOpen) {
 			OrderResponse sl = orderClient.fetchOrder(state.symbol, state.slOrderId).block();
 			if (sl != null && "FILLED".equalsIgnoreCase(sl.status())) {
 				handleBracketFill(state, "SL_ORDER_FILLED", state.slOrderId, state.slClientOrderId, state.tpOrderId, sl, oneMinuteBar.closeTime());
-				return;
+				return true;
 			}
 		}
 		if (!tpOpen) {
 			OrderResponse tp = orderClient.fetchOrder(state.symbol, state.tpOrderId).block();
 			if (tp != null && "FILLED".equalsIgnoreCase(tp.status())) {
 				handleBracketFill(state, "TP_ORDER_FILLED", state.tpOrderId, state.tpClientOrderId, state.slOrderId, tp, oneMinuteBar.closeTime());
+				return true;
 			}
 		}
+		return false;
 	}
 
 	private void handleBracketFill(SymbolState state,
@@ -768,6 +719,8 @@ if (!Double.isFinite(rsi9)) {
 		node.put("tfDecision", "5m");
 		node.put("tfExecution", "1m");
 		node.put("version", "20260207-elitev1-logv2");
+		node.put("closeTimeMs", timeMs);
+		node.put("closeTime", ISO_OFFSET_FMT.format(timeTr));
 		node.put("timeMs", timeMs);
 		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
 		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
@@ -794,6 +747,7 @@ if (!Double.isFinite(rsi9)) {
 			effectiveMatchedSetup = null;
 			effectiveBlockReason = "INPUTS_NOT_READY";
 			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
+			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
 		} else {
 			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
 			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
@@ -811,26 +765,36 @@ if (!Double.isFinite(rsi9)) {
 			putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
 			putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
 			putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
+			putMetric(metricNode, "ema20_5m", metrics.ema20_5m, invalidReasons, "ema20_5m");
 			putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
 			putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
 			putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
 			putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
 			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
 			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
-			node.put("inputsValid", invalidReasons.isEmpty());
-			var invalid = node.putArray("inputsInvalidReasons");
-			invalidReasons.forEach(invalid::add);
-			if (!invalidReasons.isEmpty()) {
-				effectiveAction = "INPUTS_NOT_READY";
-				effectiveMatchedSetup = null;
-				effectiveBlockReason = "INPUTS_NOT_READY";
-			}
 		}
 
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
 		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
+		if ("INPUTS_NOT_READY".equals(effectiveAction)) {
+			node.put("inputsValid", false);
+			if (!node.has("inputsInvalidReasons")) {
+				var invalid = node.putArray("inputsInvalidReasons");
+				invalid.add("WARMUP");
+			}
+		} else {
+			node.put("inputsValid", eval.signal());
+			var invalid = node.putArray("inputsInvalidReasons");
+			if (eval.blockReason() != null && !eval.blockReason().isBlank() && !"ELIT_V1_LONG_MATCH".equals(eval.blockReason())) {
+				for (String reason : eval.blockReason().split("\\|")) {
+					if (!reason.isBlank()) {
+						invalid.add(reason);
+					}
+				}
+			}
+		}
 		node.put("elit.tpPct", TP_PCT);
 		node.put("elit.slPct", SL_PCT);
 		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
@@ -1020,7 +984,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 	private double resolveTickSize(String symbol) {
 		var filters = symbolFilterService.getFilters(symbol);
 		if (filters == null || filters.tickSize() == null) {
-			return Double.NaN;
+			return DEFAULT_TICK_SIZE;
 		}
 		return filters.tickSize().doubleValue();
 	}

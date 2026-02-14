@@ -3,6 +3,7 @@ package com.binance.exchange.strategy.elite;
 import java.util.List;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.boot.context.properties.bind.Name;
 import org.springframework.validation.annotation.Validated;
 
@@ -26,6 +27,9 @@ public record EliteV1Properties(
 		@Positive int warmupMin5mBars,
 		@NotNull WarmupConfig warmup,
 		@NotNull RegimeConfig regime,
+		@DefaultValue("0.80") double chopPbMax,
+		@DefaultValue("1.15") double globalPbMax,
+		@DefaultValue("0.015") double emaSignedDistMax,
 		@Name("long") @NotNull LongConfig longConfig,
 		@Name("short") @NotNull ShortConfig shortConfig) {
 
