@@ -64,10 +64,10 @@ private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
 // - Avoid CHOP upper-band longs (top-buy)
 // - Avoid volume spikes (panic entries)
 // - Avoid EMA chase (too far above EMA20)
-private static final double CHOP_PB_MAX = 0.55;
-private static final double GLOBAL_PB_MAX = 0.75;
+private static final double CHOP_PB_MAX = 0.80;
+private static final double GLOBAL_PB_MAX = 1.15;
 private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
-private static final double EMA_SIGNED_DIST_MAX = 0.0025; // 0.25% above EMA20
+private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5% above EMA20
 
 // RSI guard (LONG): blocks overbought entries. Tune based on desired trade count.
 private static final double CHOP_RSI_MAX = 55.0;   // more strict in CHOP
@@ -426,12 +426,12 @@ if (!Double.isFinite(pb)) {
 	failReasons.add("FAIL_PB_MISSING");
 } else {
 	if (m.activeRegimeTag == RegimeTag.CHOP) {
-		if (pb > CHOP_PB_MAX) {
-			failReasons.add("FAIL_PB_TOO_HIGH_CHOP");
+		if (pb > resolveChopPbMax()) {
+			failReasons.add("FAIL_PB_MAX_CHOP");
 		}
 	} else {
-		if (pb > GLOBAL_PB_MAX) {
-			failReasons.add("FAIL_PB_TOO_HIGH");
+		if (pb > resolveGlobalPbMax()) {
+			failReasons.add("FAIL_PB_MAX_GLOBAL");
 		}
 	}
 }
@@ -445,11 +445,11 @@ if (Double.isFinite(volE) && volE > VOL_RATIO_OF_EMA_MAX) {
 double emaSignedDist = Double.NaN;
 if (Double.isFinite(m.close5m) && Double.isFinite(m.ema20_5m) && m.ema20_5m != 0.0) {
 	emaSignedDist = (m.close5m - m.ema20_5m) / m.ema20_5m;
-	if (Double.isFinite(emaSignedDist) && emaSignedDist > EMA_SIGNED_DIST_MAX) {
-		failReasons.add("FAIL_EMA20_CHASE_SIGNED");
+	if (Double.isFinite(emaSignedDist) && emaSignedDist > resolveEmaSignedDistMax()) {
+		failReasons.add("FAIL_EMA_CHASE");
 	}
 } else {
-	failReasons.add("FAIL_EMA20_OR_CLOSE_MISSING");
+	failReasons.add("FAIL_EMA_MISSING");
 }
 
 // RSI guard: blocks overbought longs (especially in CHOP where mean-reversion dominates).
@@ -464,6 +464,18 @@ if (!Double.isFinite(rsi9)) {
 }
 		boolean signal = failReasons.isEmpty();
 		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
+	}
+
+	private double resolveChopPbMax() {
+		return props.chopPbMax() > 0.0 ? props.chopPbMax() : CHOP_PB_MAX;
+	}
+
+	private double resolveGlobalPbMax() {
+		return props.globalPbMax() > 0.0 ? props.globalPbMax() : GLOBAL_PB_MAX;
+	}
+
+	private double resolveEmaSignedDistMax() {
+		return props.emaSignedDistMax() > 0.0 ? props.emaSignedDistMax() : EMA_SIGNED_DIST_MAX;
 	}
 
 	private void openPosition(SymbolState state,
@@ -811,6 +823,15 @@ if (!Double.isFinite(rsi9)) {
 			putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
 			putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
 			putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
+			double pbMaxUsed = metrics.activeRegimeTag == RegimeTag.CHOP ? resolveChopPbMax() : resolveGlobalPbMax();
+			putMetric(metricNode, "pbMaxUsed", pbMaxUsed, invalidReasons, "pbMaxUsed");
+			putMetric(metricNode, "ema20_5m", metrics.ema20_5m, invalidReasons, "ema20_5m");
+			double emaSignedDist = Double.NaN;
+			if (Double.isFinite(metrics.close5m) && Double.isFinite(metrics.ema20_5m) && metrics.ema20_5m != 0.0) {
+				emaSignedDist = (metrics.close5m - metrics.ema20_5m) / metrics.ema20_5m;
+			}
+			putMetric(metricNode, "emaSignedDist", emaSignedDist, invalidReasons, "emaSignedDist");
+			putMetric(metricNode, "emaMaxUsed", resolveEmaSignedDistMax(), invalidReasons, "emaMaxUsed");
 			putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
 			putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
 			putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
