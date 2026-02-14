@@ -772,20 +772,29 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
 			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
 			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
-			node.put("inputsValid", invalidReasons.isEmpty());
-			var invalid = node.putArray("inputsInvalidReasons");
-			invalidReasons.forEach(invalid::add);
-			if (!invalidReasons.isEmpty()) {
-				effectiveAction = "INPUTS_NOT_READY";
-				effectiveMatchedSetup = null;
-				effectiveBlockReason = "INPUTS_NOT_READY";
-			}
 		}
 
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
 		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
+		if ("INPUTS_NOT_READY".equals(effectiveAction)) {
+			node.put("inputsValid", false);
+			if (!node.has("inputsInvalidReasons")) {
+				var invalid = node.putArray("inputsInvalidReasons");
+				invalid.add("WARMUP");
+			}
+		} else {
+			node.put("inputsValid", eval.signal());
+			var invalid = node.putArray("inputsInvalidReasons");
+			if (eval.blockReason() != null && !eval.blockReason().isBlank() && !"ELIT_V1_LONG_MATCH".equals(eval.blockReason())) {
+				for (String reason : eval.blockReason().split("\\|")) {
+					if (!reason.isBlank()) {
+						invalid.add(reason);
+					}
+				}
+			}
+		}
 		node.put("elit.tpPct", TP_PCT);
 		node.put("elit.slPct", SL_PCT);
 		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
