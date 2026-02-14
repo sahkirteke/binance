@@ -617,6 +617,9 @@ if (!Double.isFinite(rsi9)) {
 		state.lastSlTighten5mCloseTimeMs = null;
 		state.pendingRiskAction = null;
 		state.pendingRiskActionDetail = null;
+		state.slTightenedActive = false;
+		state.slTightenedFromPrice = 0.0;
+		state.slTightenedAt5mCloseTimeMs = 0L;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
 
@@ -688,6 +691,9 @@ if (!Double.isFinite(rsi9)) {
 			state.slPrice = newSlPrice;
 		}
 		state.lastSlTighten5mCloseTimeMs = bar5m.closeTime();
+		state.slTightenedActive = true;
+		state.slTightenedFromPrice = oldSl;
+		state.slTightenedAt5mCloseTimeMs = bar5m.closeTime();
 		state.pendingRiskAction = "CHOP_PB_HIGH_TIGHTEN_SL";
 		state.pendingRiskActionDetail = String.format("oldSl=%.8f newSl=%.8f pb=%.6f rsi=%.6f",
 				oldSl, newSlPrice, metrics.bbPercentB_5m, metrics.rsi9_5m);
@@ -876,7 +882,15 @@ if (!Double.isFinite(rsi9)) {
 		node.put("feeModel", props.feeModel());
 		node.put("entryNotional", entryNotional);
 		node.put("exitNotional", exitNotional);
-		node.put("exitReason", reason.name());
+		String exitReasonValue = reason.name();
+		boolean slExit = reason == ExitReason.STOP_LOSS || reason == ExitReason.SL_ORDER_FILLED;
+		if (slExit && state.slTightenedActive) {
+			exitReasonValue = exitReasonValue + "|SL_TIGHTENED";
+			node.put("slTightenedAt5mCloseTimeMs", state.slTightenedAt5mCloseTimeMs);
+			node.put("slTightenedFromPrice", state.slTightenedFromPrice);
+			node.put("slTightenedToPrice", state.slPrice);
+		}
+		node.put("exitReason", exitReasonValue);
 		if (state.entryOrderId != null) { node.put("entryOrderId", state.entryOrderId); }
 		if (state.slOrderId != null) { node.put("slOrderId", state.slOrderId); }
 		if (state.tpOrderId != null) { node.put("tpOrderId", state.tpOrderId); }
@@ -921,6 +935,9 @@ if (!Double.isFinite(rsi9)) {
 		state.lastSlTighten5mCloseTimeMs = null;
 		state.pendingRiskAction = null;
 		state.pendingRiskActionDetail = null;
+		state.slTightenedActive = false;
+		state.slTightenedFromPrice = 0.0;
+		state.slTightenedAt5mCloseTimeMs = 0L;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 	}
 
@@ -1460,6 +1477,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private Long lastSlTighten5mCloseTimeMs;
 		private String pendingRiskAction;
 		private String pendingRiskActionDetail;
+		private boolean slTightenedActive;
+		private double slTightenedFromPrice;
+		private long slTightenedAt5mCloseTimeMs;
 		private Double prevEma20_5m;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
