@@ -54,6 +54,7 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
+	private static final AtomicBoolean ORDERFLOW_ACCESSORS_LOGGED = new AtomicBoolean(false);
 
 
 // Global cap to avoid spraying too many concurrent positions/brackets.
@@ -899,7 +900,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		ObjectNode orderflow = parent.putObject("orderflow5m");
 		orderflow.put("baseVolume", bar5m.volume());
 		OrderflowSnapshot of = OrderflowSnapshot.fromCandle(bar5m);
-		if (of == null || !of.available() || bar5m.volume() <= 0.0) {
+		if (of == null || bar5m.volume() <= 0.0 || of.takerBuyBaseVolume() == null || !Double.isFinite(of.takerBuyBaseVolume())) {
 			orderflow.put("reason", "KLINE_TAKER_FIELDS_MISSING");
 			orderflow.putNull("quoteVolume");
 			orderflow.putNull("trades");
@@ -914,10 +915,22 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		double takerBuyBase = of.takerBuyBaseVolume();
 		double takerSellBase = bar5m.volume() - takerBuyBase;
 		double deltaBase = takerBuyBase - takerSellBase;
-		orderflow.put("quoteVolume", of.quoteVolume());
-		orderflow.put("trades", of.tradeCount());
+		if (of.quoteVolume() != null) {
+			orderflow.put("quoteVolume", of.quoteVolume());
+		} else {
+			orderflow.putNull("quoteVolume");
+		}
+		if (of.tradeCount() != null) {
+			orderflow.put("trades", of.tradeCount());
+		} else {
+			orderflow.putNull("trades");
+		}
 		orderflow.put("takerBuyBase", takerBuyBase);
-		orderflow.put("takerBuyQuote", of.takerBuyQuoteVolume());
+		if (of.takerBuyQuoteVolume() != null) {
+			orderflow.put("takerBuyQuote", of.takerBuyQuoteVolume());
+		} else {
+			orderflow.putNull("takerBuyQuote");
+		}
 		orderflow.put("takerSellBase", takerSellBase);
 		orderflow.put("deltaBase", deltaBase);
 		orderflow.put("takerBuyRatio", takerBuyBase / bar5m.volume());
@@ -1155,18 +1168,26 @@ private Path decisionPath(String symbol, LocalDate day) {
 			Double takerBuyQuoteVolume) {
 
 		boolean available() {
-			return quoteVolume != null && tradeCount != null && takerBuyBaseVolume != null && takerBuyQuoteVolume != null;
+			return takerBuyBaseVolume != null;
 		}
 
 		static OrderflowSnapshot fromCandle(Candle candle) {
 			if (candle == null) {
 				return null;
 			}
+			if (ORDERFLOW_ACCESSORS_LOGGED.compareAndSet(false, true)) {
+				LOGGER.info("ORDERFLOW_ACCESSORS candleClass={} quoteVolume={} trades={} takerBuyBaseVolume={} takerBuyQuoteVolume={}",
+					candle.getClass().getName(),
+					findAccessorName(candle, "quoteVolume", "quoteAssetVolume", "getQuoteVolume", "getQuoteAssetVolume"),
+					findAccessorName(candle, "trades", "tradeCount", "getTrades", "getTradeCount"),
+					findAccessorName(candle, "takerBuyBaseVolume", "takerBuyBase", "takerBuyBaseAssetVolume", "getTakerBuyBaseVolume"),
+					findAccessorName(candle, "takerBuyQuoteVolume", "takerBuyQuote", "takerBuyQuoteAssetVolume", "getTakerBuyQuoteVolume"));
+			}
 			return new OrderflowSnapshot(
-					readDoubleAccessor(candle, "quoteVolume"),
-					readLongAccessor(candle, "tradeCount"),
-					readDoubleAccessor(candle, "takerBuyBaseVolume"),
-					readDoubleAccessor(candle, "takerBuyQuoteVolume"));
+					readDoubleAccessorAny(candle, "quoteVolume", "quoteAssetVolume", "getQuoteVolume", "getQuoteAssetVolume"),
+					readLongAccessorAny(candle, "trades", "tradeCount", "getTrades", "getTradeCount"),
+					readDoubleAccessorAny(candle, "takerBuyBaseVolume", "takerBuyBase", "takerBuyBaseAssetVolume", "getTakerBuyBaseVolume"),
+					readDoubleAccessorAny(candle, "takerBuyQuoteVolume", "takerBuyQuote", "takerBuyQuoteAssetVolume", "getTakerBuyQuoteVolume"));
 		}
 	}
 
@@ -1211,7 +1232,11 @@ private Path decisionPath(String symbol, LocalDate day) {
 			if (value == null) {
 				return null;
 			}
-			return value instanceof Number number ? number.doubleValue() : null;
+			if (!(value instanceof Number number)) {
+				return null;
+			}
+			double parsed = number.doubleValue();
+			return Double.isFinite(parsed) ? parsed : null;
 		} catch (ReflectiveOperationException ex) {
 			return null;
 		}
@@ -1227,10 +1252,66 @@ private Path decisionPath(String symbol, LocalDate day) {
 			if (value == null) {
 				return null;
 			}
-			return value instanceof Number number ? number.longValue() : null;
+			if (!(value instanceof Number number)) {
+				return null;
+			}
+			double parsed = number.doubleValue();
+			if (!Double.isFinite(parsed)) {
+				return null;
+			}
+			return number.longValue();
 		} catch (ReflectiveOperationException ex) {
 			return null;
 		}
+	}
+
+	private static Double readDoubleAccessorAny(Object target, String... methodNames) {
+		if (target == null || methodNames == null) {
+			return null;
+		}
+		for (String methodName : methodNames) {
+			if (methodName == null || methodName.isBlank()) {
+				continue;
+			}
+			Double value = readDoubleAccessor(target, methodName);
+			if (value != null) {
+				return value;
+			}
+		}
+		return null;
+	}
+
+	private static Long readLongAccessorAny(Object target, String... methodNames) {
+		if (target == null || methodNames == null) {
+			return null;
+		}
+		for (String methodName : methodNames) {
+			if (methodName == null || methodName.isBlank()) {
+				continue;
+			}
+			Long value = readLongAccessor(target, methodName);
+			if (value != null) {
+				return value;
+			}
+		}
+		return null;
+	}
+
+	private static String findAccessorName(Object target, String... methodNames) {
+		if (target == null || methodNames == null) {
+			return "NONE";
+		}
+		for (String methodName : methodNames) {
+			if (methodName == null || methodName.isBlank()) {
+				continue;
+			}
+			try {
+				target.getClass().getMethod(methodName);
+				return methodName;
+			} catch (ReflectiveOperationException ignored) {
+			}
+		}
+		return "NONE";
 	}
 
 	private record LongSetupEval(boolean signal,
