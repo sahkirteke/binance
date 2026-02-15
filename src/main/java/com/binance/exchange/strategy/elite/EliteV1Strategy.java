@@ -55,9 +55,8 @@ public class EliteV1Strategy implements Strategy {
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
 	private static final AtomicBoolean ORDERFLOW_ACCESSORS_LOGGED = new AtomicBoolean(false);
-	private static final int MAX_ACTIVE_ORDERS = 15;
-	private static final int MAX_OPEN_POSITIONS = 7;
-	private static final int ESTIMATED_ORDERS_FOR_NEW_ENTRY = 3;
+	private static final int MAX_OPEN_POSITIONS = 15;
+	private static final int MAX_NEW_POSITIONS_PER_BAR = 5;
 	private static final long RISK_RECONCILE_INTERVAL_MS = 45_000L;
 
 
@@ -91,10 +90,10 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
-	private final ConcurrentHashMap<Long, String> localActiveOrderIds = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, Boolean> localOpenPositionSymbols = new ConcurrentHashMap<>();
-	private final AtomicInteger cachedActiveOrdersCount = new AtomicInteger(0);
 	private final AtomicInteger cachedOpenPositionsCount = new AtomicInteger(0);
+	private final AtomicLong currentBarCloseTimeMs = new AtomicLong(-1L);
+	private final AtomicInteger entriesThisBar = new AtomicInteger(0);
 	private final AtomicLong lastRiskReconcileMs = new AtomicLong(0L);
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
@@ -322,7 +321,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		}
 
 		reconcileRiskStateIfDue();
-		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide, state.symbol);
+		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide, state.symbol, bar5m.closeTime());
 		if (preCheck.action != DecisionAction.CONTINUE) {
 			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null, preCheck.allowReason);
 			return;
@@ -360,7 +359,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		return Math.max(warmupProperties.candles5m(), 0);
 	}
 
-	PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide, String symbol) {
+	PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide, String symbol, long barCloseTimeMs) {
 		if (!baselinesReady) {
 			return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null, null);
 		}
@@ -369,30 +368,28 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		}
 		int openPositionsCount = getOpenPositionsCount();
 		if (openPositionsCount >= MAX_OPEN_POSITIONS) {
-			return new PreCheckAction(DecisionAction.NO_ENTRY, "POSITION_LIMIT_7_OPEN", null);
+			return new PreCheckAction(DecisionAction.NO_ENTRY, "POSITION_LIMIT_15_OPEN", null);
 		}
-		int activeOrdersCount = getActiveOrdersCount();
-		if (activeOrdersCount >= MAX_ACTIVE_ORDERS) {
-			return new PreCheckAction(DecisionAction.NO_ENTRY, "ORDER_LIMIT_15_ACTIVE", null);
-		}
-		if (!canPlaceNewEntryOrders(ESTIMATED_ORDERS_FOR_NEW_ENTRY)) {
-			String reason = "ORDER_CAPACITY_FAIL|activeOrders=" + activeOrdersCount + "|need="
-					+ ESTIMATED_ORDERS_FOR_NEW_ENTRY + "|limit=" + MAX_ACTIVE_ORDERS;
-			return new PreCheckAction(DecisionAction.NO_ENTRY, reason, null);
+		int entriesForBar = getEntriesThisBar(barCloseTimeMs);
+		if (entriesForBar >= MAX_NEW_POSITIONS_PER_BAR) {
+			return new PreCheckAction(DecisionAction.NO_ENTRY, "MAX_NEW_POSITIONS_PER_BAR_5", null);
 		}
 		return new PreCheckAction(DecisionAction.CONTINUE, null, "ENTRY_ALLOWED");
-	}
-
-	int getActiveOrdersCount() {
-		return Math.max(cachedActiveOrdersCount.get(), localActiveOrderIds.size());
 	}
 
 	int getOpenPositionsCount() {
 		return Math.max(cachedOpenPositionsCount.get(), localOpenPositionSymbols.size());
 	}
 
-	boolean canPlaceNewEntryOrders(int need) {
-		return getActiveOrdersCount() + Math.max(need, 0) <= MAX_ACTIVE_ORDERS;
+	private int getEntriesThisBar(long barCloseTimeMs) {
+		if (barCloseTimeMs <= 0L) {
+			return entriesThisBar.get();
+		}
+		long prev = currentBarCloseTimeMs.get();
+		if (prev != barCloseTimeMs && currentBarCloseTimeMs.compareAndSet(prev, barCloseTimeMs)) {
+			entriesThisBar.set(0);
+		}
+		return entriesThisBar.get();
 	}
 
 	private void reconcileRiskStateIfDue() {
@@ -405,32 +402,10 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			return;
 		}
 		try {
-			reconcileActiveOrdersFromRest();
 			reconcileOpenPositionsFromRest();
 		} catch (RuntimeException ex) {
 			LOGGER.debug("EVENT=RISK_RECONCILE_SKIPPED reason={}", ex.getMessage());
 		}
-	}
-
-	private void reconcileActiveOrdersFromRest() {
-		int activeOrders = 0;
-		for (String symbol : props.symbols()) {
-			try {
-				Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(symbol).block();
-				if (openOrders == null) {
-					continue;
-				}
-				activeOrders += openOrders.size();
-				for (Long orderId : openOrders.keySet()) {
-					if (orderId != null) {
-						localActiveOrderIds.put(orderId, symbol);
-					}
-				}
-			} catch (RuntimeException ex) {
-				LOGGER.debug("EVENT=ACTIVE_ORDER_RECONCILE_FAIL symbol={} reason={}", symbol, ex.getMessage());
-			}
-		}
-		cachedActiveOrdersCount.set(Math.max(activeOrders, 0));
 	}
 
 	private void reconcileOpenPositionsFromRest() {
@@ -449,22 +424,6 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			}
 		}
 		cachedOpenPositionsCount.set(Math.max(openPositions, 0));
-	}
-
-	private void markOrderActive(Long orderId, String symbol) {
-		if (orderId == null) {
-			return;
-		}
-		localActiveOrderIds.put(orderId, symbol == null ? "UNKNOWN" : symbol);
-		cachedActiveOrdersCount.updateAndGet(v -> Math.max(v, localActiveOrderIds.size()));
-	}
-
-	private void markOrderInactive(Long orderId) {
-		if (orderId == null) {
-			return;
-		}
-		localActiveOrderIds.remove(orderId);
-		cachedActiveOrdersCount.set(Math.max(localActiveOrderIds.size(), 0));
 	}
 
 	private void markPositionOpen(String symbol) {
@@ -604,9 +563,6 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 				return;
 			}
 			entryOrderId = entryResponse.orderId();
-			if (entryOrderId != null) {
-				markOrderActive(entryOrderId, state.symbol);
-			}
 			if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
 				entryPrice = entryResponse.avgPrice().doubleValue();
 			}
@@ -649,12 +605,6 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			}
 			slOrderId = slResponse.orderId();
 			tpOrderId = tpResponse.orderId();
-			if (slOrderId != null) {
-				markOrderActive(slOrderId, state.symbol);
-			}
-			if (tpOrderId != null) {
-				markOrderActive(tpOrderId, state.symbol);
-			}
 			LOGGER.info("EVENT=BRACKET_PLACED symbol={} bracketId={} slStop={} tpStop={} slOrderId={} tpOrderId={}",
 					state.symbol,
 					bracketId,
@@ -684,6 +634,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
 		markPositionOpen(state.symbol);
+		entriesThisBar.incrementAndGet();
 
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "ENTRY");
@@ -752,7 +703,6 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			OrderResponse filledOrder,
 			long closeTimeMs) {
 		if (otherOrderId != null) {
-			markOrderInactive(otherOrderId);
 			try {
 				orderClient.cancelOrder(state.symbol, otherOrderId).block();
 				LOGGER.info("EVENT=BRACKET_CANCEL_OTHER symbol={} canceledOrderId={}", state.symbol, otherOrderId);
@@ -762,9 +712,6 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		double exitPrice = filledOrder != null && filledOrder.avgPrice() != null && filledOrder.avgPrice().doubleValue() > 0
 				? filledOrder.avgPrice().doubleValue()
 				: ("TP_ORDER_FILLED".equals(reason) ? state.tpPrice : state.slPrice);
-		if (exitOrderId != null) {
-			markOrderInactive(exitOrderId);
-		}
 		LOGGER.info("EVENT=BRACKET_EXIT symbol={} by={} exitOrderId={}", state.symbol, reason, exitOrderId);
 		ExitReason exitReason = "TP_ORDER_FILLED".equals(reason) ? ExitReason.TP_ORDER_FILLED : ExitReason.SL_ORDER_FILLED;
 		exitPosition(state, exitReason, exitPrice, closeTimeMs,
@@ -853,15 +800,6 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		state.slHitTimeMs = null;
 		state.tpHitBar1m = null;
 		state.slHitBar1m = null;
-		if (state.entryOrderId != null) {
-			markOrderInactive(state.entryOrderId);
-		}
-		if (state.slOrderId != null) {
-			markOrderInactive(state.slOrderId);
-		}
-		if (state.tpOrderId != null) {
-			markOrderInactive(state.tpOrderId);
-		}
 		state.entryOrderId = null;
 		state.entryClientOrderId = null;
 		state.slOrderId = null;
@@ -913,11 +851,10 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		node.put("baselinesReady", baselinesReady);
 		node.put("globalOpenPositions", globalOpenPositions.get());
 		node.put("openPositionsCount", getOpenPositionsCount());
-		node.put("activeOrdersCount", getActiveOrdersCount());
 		node.put("maxOpenPositions", MAX_OPEN_POSITIONS);
-		node.put("maxActiveOrders", MAX_ACTIVE_ORDERS);
-		node.put("estimatedOrdersForNewEntry", ESTIMATED_ORDERS_FOR_NEW_ENTRY);
-		node.put("capacityCheck", canPlaceNewEntryOrders(ESTIMATED_ORDERS_FOR_NEW_ENTRY));
+		node.put("barCloseTimeMs", timeMs);
+		node.put("entriesThisBar", getEntriesThisBar(timeMs));
+		node.put("maxEntriesPerBar", MAX_NEW_POSITIONS_PER_BAR);
 		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
 		putOrderflow(node, bar5m);
 		putLiquidity(node, state.symbol, timeMs);
