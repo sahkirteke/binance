@@ -15,7 +15,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -58,6 +60,13 @@ public class EliteV1Strategy implements Strategy {
 	private static final int MAX_OPEN_POSITIONS = 15;
 	private static final int MAX_NEW_POSITIONS_PER_BAR = 5;
 	private static final long RISK_RECONCILE_INTERVAL_MS = 45_000L;
+	private static final boolean ENABLE_GATE_A = true;
+	private static final String BTC_REF_SYMBOL = "BTCUSDT";
+	private static final double BTC_RET30_MIN = -0.0010;
+	private static final double BTC_RET60_MIN = -0.0020;
+	private static final long BTC_MAX_STALE_MS = 2 * FIVE_MIN_MS;
+	private static final int BTC_BARS_30 = 6;
+	private static final int BTC_BARS_60 = 12;
 
 
 // Global cap to avoid spraying too many concurrent positions/brackets.
@@ -310,6 +319,14 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			return;
 		}
 
+		if (isBtcRefSymbol(state.symbol)) {
+			writeDecision(state, bar5m, "NO_ENTRY", null, "BTC_REFERENCE_SYMBOL", metrics, null, null);
+			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
+				state.prevEma20_5m = metrics.ema20_5m;
+			}
+			return;
+		}
+
 		if (state.positionSide == Side.LONG) {
 			boolean exited = props.mode() == EliteV1Properties.Mode.PAPER
 					? checkPaperExitOnFiveMinute(state, bar5m)
@@ -366,6 +383,22 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		if (positionSide != Side.NONE) {
 			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null, null);
 		}
+		if (ENABLE_GATE_A && !isBtcRefSymbol(symbol)) {
+			BtcGateSnapshot btcGateSnapshot = computeBtcGateSnapshot(barCloseTimeMs);
+			if (!btcGateSnapshot.ready()) {
+				return new PreCheckAction(DecisionAction.NO_ENTRY,
+						"BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars",
+						null);
+			}
+			if (!btcGateSnapshot.ok()) {
+				String regime = btcGateSnapshot.activeRegimeTag() == null ? "null" : btcGateSnapshot.activeRegimeTag();
+				String ret30 = btcGateSnapshot.ret30() == null ? "null" : String.format(Locale.ROOT, "%.6f", btcGateSnapshot.ret30());
+				String ret60 = btcGateSnapshot.ret60() == null ? "null" : String.format(Locale.ROOT, "%.6f", btcGateSnapshot.ret60());
+				return new PreCheckAction(DecisionAction.NO_ENTRY,
+						"BTC_GATEA_FAIL|regime=" + regime + "|ret30=" + ret30 + "|ret60=" + ret60,
+						null);
+			}
+		}
 		int openPositionsCount = getOpenPositionsCount();
 		if (openPositionsCount >= MAX_OPEN_POSITIONS) {
 			return new PreCheckAction(DecisionAction.NO_ENTRY, "POSITION_LIMIT_15_OPEN", null);
@@ -390,6 +423,55 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			entriesThisBar.set(0);
 		}
 		return entriesThisBar.get();
+	}
+
+	private boolean isBtcRefSymbol(String symbol) {
+		return symbol != null && BTC_REF_SYMBOL.equalsIgnoreCase(symbol);
+	}
+
+	private BtcGateSnapshot computeBtcGateSnapshot(long decisionTimeMs) {
+		if (!ENABLE_GATE_A) {
+			return new BtcGateSnapshot(false, true, true, null, null, null, null, null, null, null);
+		}
+		SymbolState btcState = states.get(BTC_REF_SYMBOL);
+		if (btcState == null || btcState.last5m == null || btcState.last5m.isEmpty()) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", null, null, null, null, null, null);
+		}
+		Metrics btcMetrics = btcState.indicators.metrics();
+		String btcRegime = btcMetrics == null || btcMetrics.activeRegimeTag == null ? null : btcMetrics.activeRegimeTag.name();
+		List<Candle> btcBars = new ArrayList<>();
+		for (Iterator<Candle> it = btcState.last5m.descendingIterator(); it.hasNext();) {
+			Candle c = it.next();
+			if (c.closeTime() <= decisionTimeMs) {
+				btcBars.add(c);
+				if (btcBars.size() >= BTC_BARS_60 + 1) {
+					break;
+				}
+			}
+		}
+		if (btcBars.size() < BTC_BARS_60 + 1) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", btcRegime, null, null, null, null, null);
+		}
+		Candle latest = btcBars.get(0);
+		long staleMs = Math.max(0L, decisionTimeMs - latest.closeTime());
+		if (staleMs > BTC_MAX_STALE_MS) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", btcRegime, latest.closeTime(), latest.close(), null, null, staleMs);
+		}
+		double closeNow = latest.close();
+		double close30 = btcBars.get(BTC_BARS_30).close();
+		double close60 = btcBars.get(BTC_BARS_60).close();
+		if (!Double.isFinite(closeNow) || !Double.isFinite(close30) || !Double.isFinite(close60)
+				|| closeNow <= 0.0 || close30 <= 0.0 || close60 <= 0.0) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", btcRegime, latest.closeTime(), closeNow, null, null, staleMs);
+		}
+		double ret30 = closeNow / close30 - 1.0;
+		double ret60 = closeNow / close60 - 1.0;
+		boolean regimeOk = RegimeTag.TREND.name().equals(btcRegime);
+		boolean ok = regimeOk && ret30 > BTC_RET30_MIN && ret60 > BTC_RET60_MIN;
+		String blockReason = ok ? null : "BTC_GATEA_FAIL|regime=" + (btcRegime == null ? "null" : btcRegime)
+				+ "|ret30=" + String.format(Locale.ROOT, "%.6f", ret30)
+				+ "|ret60=" + String.format(Locale.ROOT, "%.6f", ret60);
+		return new BtcGateSnapshot(true, true, ok, blockReason, btcRegime, latest.closeTime(), closeNow, ret30, ret60, staleMs);
 	}
 
 	private void reconcileRiskStateIfDue() {
@@ -862,6 +944,46 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		Candle last1m = state.last1m.peekLast();
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
+		}
+		BtcGateSnapshot btcGateSnapshot = computeBtcGateSnapshot(timeMs);
+		ObjectNode btcGateNode = node.putObject("btcGateA");
+		btcGateNode.put("enabled", btcGateSnapshot.enabled());
+		btcGateNode.put("ready", btcGateSnapshot.ready());
+		btcGateNode.put("ok", btcGateSnapshot.ok());
+		if (btcGateSnapshot.blockReason() != null) {
+			btcGateNode.put("blockReason", btcGateSnapshot.blockReason());
+		} else {
+			btcGateNode.putNull("blockReason");
+		}
+		if (btcGateSnapshot.activeRegimeTag() != null) {
+			btcGateNode.put("btcActiveRegimeTag", btcGateSnapshot.activeRegimeTag());
+		} else {
+			btcGateNode.putNull("btcActiveRegimeTag");
+		}
+		if (btcGateSnapshot.closeTimeMs() != null) {
+			btcGateNode.put("btcCloseTimeMs", btcGateSnapshot.closeTimeMs());
+		} else {
+			btcGateNode.putNull("btcCloseTimeMs");
+		}
+		if (btcGateSnapshot.close() != null && Double.isFinite(btcGateSnapshot.close())) {
+			btcGateNode.put("btcClose", btcGateSnapshot.close());
+		} else {
+			btcGateNode.putNull("btcClose");
+		}
+		if (btcGateSnapshot.ret30() != null && Double.isFinite(btcGateSnapshot.ret30())) {
+			btcGateNode.put("btcRet30", btcGateSnapshot.ret30());
+		} else {
+			btcGateNode.putNull("btcRet30");
+		}
+		if (btcGateSnapshot.ret60() != null && Double.isFinite(btcGateSnapshot.ret60())) {
+			btcGateNode.put("btcRet60", btcGateSnapshot.ret60());
+		} else {
+			btcGateNode.putNull("btcRet60");
+		}
+		if (btcGateSnapshot.staleMs() != null) {
+			btcGateNode.put("staleMs", btcGateSnapshot.staleMs());
+		} else {
+			btcGateNode.putNull("staleMs");
 		}
 
 		String effectiveAction = action;
@@ -1409,6 +1531,18 @@ private Path decisionPath(String symbol, LocalDate day) {
 			}
 		}
 		return "NONE";
+	}
+
+	private record BtcGateSnapshot(boolean enabled,
+			boolean ready,
+			boolean ok,
+			String blockReason,
+			String activeRegimeTag,
+			Long closeTimeMs,
+			Double close,
+			Double ret30,
+			Double ret60,
+			Long staleMs) {
 	}
 
 	private record LongSetupEval(boolean signal,
