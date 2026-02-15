@@ -55,6 +55,10 @@ public class EliteV1Strategy implements Strategy {
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
 	private static final AtomicBoolean ORDERFLOW_ACCESSORS_LOGGED = new AtomicBoolean(false);
+	private static final int MAX_ACTIVE_ORDERS = 15;
+	private static final int MAX_OPEN_POSITIONS = 7;
+	private static final int ESTIMATED_ORDERS_FOR_NEW_ENTRY = 3;
+	private static final long RISK_RECONCILE_INTERVAL_MS = 45_000L;
 
 
 // Global cap to avoid spraying too many concurrent positions/brackets.
@@ -87,6 +91,11 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
+	private final ConcurrentHashMap<Long, String> localActiveOrderIds = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<String, Boolean> localOpenPositionSymbols = new ConcurrentHashMap<>();
+	private final AtomicInteger cachedActiveOrdersCount = new AtomicInteger(0);
+	private final AtomicInteger cachedOpenPositionsCount = new AtomicInteger(0);
+	private final AtomicLong lastRiskReconcileMs = new AtomicLong(0L);
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -295,7 +304,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 					metrics.atrRatio5m);
 		}
 		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
-			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null);
+			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null, null);
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
 				state.prevEma20_5m = metrics.ema20_5m;
 			}
@@ -312,19 +321,20 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			}
 		}
 
-		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
+		reconcileRiskStateIfDue();
+		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide, state.symbol);
 		if (preCheck.action != DecisionAction.CONTINUE) {
-			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null);
+			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null, preCheck.allowReason);
 			return;
 		}
 
 		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
 		if (longEval.signal()) {
 			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval);
+			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval, "ENTRY_ALLOWED");
 			return;
 		}
-		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval);
+		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval, null);
 		state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 	}
 
@@ -350,14 +360,127 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		return Math.max(warmupProperties.candles5m(), 0);
 	}
 
-	PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide) {
+	PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide, String symbol) {
 		if (!baselinesReady) {
-			return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null);
+			return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null, null);
 		}
 		if (positionSide != Side.NONE) {
-			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null);
+			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null, null);
 		}
-		return new PreCheckAction(DecisionAction.CONTINUE, null);
+		int openPositionsCount = getOpenPositionsCount();
+		if (openPositionsCount >= MAX_OPEN_POSITIONS) {
+			return new PreCheckAction(DecisionAction.NO_ENTRY, "POSITION_LIMIT_7_OPEN", null);
+		}
+		int activeOrdersCount = getActiveOrdersCount();
+		if (activeOrdersCount >= MAX_ACTIVE_ORDERS) {
+			return new PreCheckAction(DecisionAction.NO_ENTRY, "ORDER_LIMIT_15_ACTIVE", null);
+		}
+		if (!canPlaceNewEntryOrders(ESTIMATED_ORDERS_FOR_NEW_ENTRY)) {
+			String reason = "ORDER_CAPACITY_FAIL|activeOrders=" + activeOrdersCount + "|need="
+					+ ESTIMATED_ORDERS_FOR_NEW_ENTRY + "|limit=" + MAX_ACTIVE_ORDERS;
+			return new PreCheckAction(DecisionAction.NO_ENTRY, reason, null);
+		}
+		return new PreCheckAction(DecisionAction.CONTINUE, null, "ENTRY_ALLOWED");
+	}
+
+	int getActiveOrdersCount() {
+		return Math.max(cachedActiveOrdersCount.get(), localActiveOrderIds.size());
+	}
+
+	int getOpenPositionsCount() {
+		return Math.max(cachedOpenPositionsCount.get(), localOpenPositionSymbols.size());
+	}
+
+	boolean canPlaceNewEntryOrders(int need) {
+		return getActiveOrdersCount() + Math.max(need, 0) <= MAX_ACTIVE_ORDERS;
+	}
+
+	private void reconcileRiskStateIfDue() {
+		long now = System.currentTimeMillis();
+		long last = lastRiskReconcileMs.get();
+		if (now - last < RISK_RECONCILE_INTERVAL_MS) {
+			return;
+		}
+		if (!lastRiskReconcileMs.compareAndSet(last, now)) {
+			return;
+		}
+		try {
+			reconcileActiveOrdersFromRest();
+			reconcileOpenPositionsFromRest();
+		} catch (RuntimeException ex) {
+			LOGGER.debug("EVENT=RISK_RECONCILE_SKIPPED reason={}", ex.getMessage());
+		}
+	}
+
+	private void reconcileActiveOrdersFromRest() {
+		int activeOrders = 0;
+		for (String symbol : props.symbols()) {
+			try {
+				Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(symbol).block();
+				if (openOrders == null) {
+					continue;
+				}
+				activeOrders += openOrders.size();
+				for (Long orderId : openOrders.keySet()) {
+					if (orderId != null) {
+						localActiveOrderIds.put(orderId, symbol);
+					}
+				}
+			} catch (RuntimeException ex) {
+				LOGGER.debug("EVENT=ACTIVE_ORDER_RECONCILE_FAIL symbol={} reason={}", symbol, ex.getMessage());
+			}
+		}
+		cachedActiveOrdersCount.set(Math.max(activeOrders, 0));
+	}
+
+	private void reconcileOpenPositionsFromRest() {
+		int openPositions = 0;
+		for (String symbol : props.symbols()) {
+			try {
+				BinanceFuturesOrderClient.ExchangePosition position = orderClient.fetchPosition(symbol).block();
+				if (position == null || position.positionAmt() == null || position.positionAmt().signum() == 0) {
+					localOpenPositionSymbols.remove(symbol);
+					continue;
+				}
+				openPositions++;
+				localOpenPositionSymbols.put(symbol, Boolean.TRUE);
+			} catch (RuntimeException ex) {
+				LOGGER.debug("EVENT=POSITION_RECONCILE_FAIL symbol={} reason={}", symbol, ex.getMessage());
+			}
+		}
+		cachedOpenPositionsCount.set(Math.max(openPositions, 0));
+	}
+
+	private void markOrderActive(Long orderId, String symbol) {
+		if (orderId == null) {
+			return;
+		}
+		localActiveOrderIds.put(orderId, symbol == null ? "UNKNOWN" : symbol);
+		cachedActiveOrdersCount.updateAndGet(v -> Math.max(v, localActiveOrderIds.size()));
+	}
+
+	private void markOrderInactive(Long orderId) {
+		if (orderId == null) {
+			return;
+		}
+		localActiveOrderIds.remove(orderId);
+		cachedActiveOrdersCount.set(Math.max(localActiveOrderIds.size(), 0));
+	}
+
+	private void markPositionOpen(String symbol) {
+		if (symbol == null || symbol.isBlank()) {
+			return;
+		}
+		localOpenPositionSymbols.put(symbol, Boolean.TRUE);
+		cachedOpenPositionsCount.updateAndGet(v -> Math.max(v, localOpenPositionSymbols.size()));
+	}
+
+	private void markPositionClosed(String symbol) {
+		if (symbol == null || symbol.isBlank()) {
+			return;
+		}
+		localOpenPositionSymbols.remove(symbol);
+		cachedOpenPositionsCount.set(Math.max(localOpenPositionSymbols.size(), 0));
 	}
 
 	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
@@ -481,6 +604,9 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 				return;
 			}
 			entryOrderId = entryResponse.orderId();
+			if (entryOrderId != null) {
+				markOrderActive(entryOrderId, state.symbol);
+			}
 			if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
 				entryPrice = entryResponse.avgPrice().doubleValue();
 			}
@@ -523,6 +649,12 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			}
 			slOrderId = slResponse.orderId();
 			tpOrderId = tpResponse.orderId();
+			if (slOrderId != null) {
+				markOrderActive(slOrderId, state.symbol);
+			}
+			if (tpOrderId != null) {
+				markOrderActive(tpOrderId, state.symbol);
+			}
 			LOGGER.info("EVENT=BRACKET_PLACED symbol={} bracketId={} slStop={} tpStop={} slOrderId={} tpOrderId={}",
 					state.symbol,
 					bracketId,
@@ -551,6 +683,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		state.tpClientOrderId = tpClientOrderId;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
+		markPositionOpen(state.symbol);
 
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "ENTRY");
@@ -619,6 +752,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			OrderResponse filledOrder,
 			long closeTimeMs) {
 		if (otherOrderId != null) {
+			markOrderInactive(otherOrderId);
 			try {
 				orderClient.cancelOrder(state.symbol, otherOrderId).block();
 				LOGGER.info("EVENT=BRACKET_CANCEL_OTHER symbol={} canceledOrderId={}", state.symbol, otherOrderId);
@@ -628,6 +762,9 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		double exitPrice = filledOrder != null && filledOrder.avgPrice() != null && filledOrder.avgPrice().doubleValue() > 0
 				? filledOrder.avgPrice().doubleValue()
 				: ("TP_ORDER_FILLED".equals(reason) ? state.tpPrice : state.slPrice);
+		if (exitOrderId != null) {
+			markOrderInactive(exitOrderId);
+		}
 		LOGGER.info("EVENT=BRACKET_EXIT symbol={} by={} exitOrderId={}", state.symbol, reason, exitOrderId);
 		ExitReason exitReason = "TP_ORDER_FILLED".equals(reason) ? ExitReason.TP_ORDER_FILLED : ExitReason.SL_ORDER_FILLED;
 		exitPosition(state, exitReason, exitPrice, closeTimeMs,
@@ -716,6 +853,15 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		state.slHitTimeMs = null;
 		state.tpHitBar1m = null;
 		state.slHitBar1m = null;
+		if (state.entryOrderId != null) {
+			markOrderInactive(state.entryOrderId);
+		}
+		if (state.slOrderId != null) {
+			markOrderInactive(state.slOrderId);
+		}
+		if (state.tpOrderId != null) {
+			markOrderInactive(state.tpOrderId);
+		}
 		state.entryOrderId = null;
 		state.entryClientOrderId = null;
 		state.slOrderId = null;
@@ -723,6 +869,7 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		state.tpOrderId = null;
 		state.tpClientOrderId = null;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
+		markPositionClosed(state.symbol);
 	}
 
 
@@ -743,7 +890,8 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 			String matchedSetup,
 			String blockReason,
 			Metrics metrics,
-			LongSetupEval longSetupEval) {
+			LongSetupEval longSetupEval,
+			String allowReason) {
 		ObjectNode node = objectMapper.createObjectNode();
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
@@ -764,6 +912,12 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		node.put("entriesToday", state.entriesToday);
 		node.put("baselinesReady", baselinesReady);
 		node.put("globalOpenPositions", globalOpenPositions.get());
+		node.put("openPositionsCount", getOpenPositionsCount());
+		node.put("activeOrdersCount", getActiveOrdersCount());
+		node.put("maxOpenPositions", MAX_OPEN_POSITIONS);
+		node.put("maxActiveOrders", MAX_ACTIVE_ORDERS);
+		node.put("estimatedOrdersForNewEntry", ESTIMATED_ORDERS_FOR_NEW_ENTRY);
+		node.put("capacityCheck", canPlaceNewEntryOrders(ESTIMATED_ORDERS_FOR_NEW_ENTRY));
 		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
 		putOrderflow(node, bar5m);
 		putLiquidity(node, state.symbol, timeMs);
@@ -813,6 +967,11 @@ private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
 		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
+		if (allowReason != null && !allowReason.isBlank()) {
+			node.put("allowReason", allowReason);
+		} else {
+			node.putNull("allowReason");
+		}
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
 		if ("INPUTS_NOT_READY".equals(effectiveAction)) {
 			node.put("inputsValid", false);
@@ -1149,10 +1308,11 @@ private Path decisionPath(String symbol, LocalDate day) {
 		CONTINUE,
 		INPUTS_NOT_READY,
 		IN_POSITION_NO_ENTRY,
+		NO_ENTRY,
 		GLOBAL_MAX_OPEN_POSITIONS
 	}
 
-	record PreCheckAction(DecisionAction action, String blockReason) {
+	record PreCheckAction(DecisionAction action, String blockReason, String allowReason) {
 	}
 
 	private record ExitEvaluation(ExitReason exitReason, String firstHit, String exitTrigger, String ambiguityRule, boolean timeoutLoss) {
