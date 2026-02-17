@@ -1,9 +1,12 @@
 package com.binance.strategy;
 
 import java.math.BigDecimal;
-import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
@@ -26,6 +29,11 @@ public class HistoricalWarmupService {
 	private static final int DEFAULT_CANDLES_1M = 240;
 	private static final int DEFAULT_CANDLES_5M = 120;
 	private static final int DEFAULT_CONCURRENCY = 3;
+	private static final int WARMUP_FETCH_BUFFER_5M = 10;
+	private static final int WARMUP_FETCH_RETRY_5M = 2;
+	private static final long FIVE_MIN_MS = 300_000L;
+	private static final int MIN_GLOBAL_SAMPLES = 120;
+	private static final double MIN_READY_RATIO = 0.70;
 
 	private final BinanceMarketClient marketClient;
 	private final StrategyRouter strategyRouter;
@@ -98,11 +106,141 @@ public class HistoricalWarmupService {
 
 	public Mono<Void> warmupAllSymbols(List<String> symbols) {
 		long start = System.currentTimeMillis();
-		int concurrency = resolveConcurrency();
 		strategyRouter.setWarmupMode(true);
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			return warmupEliteTimeMajor(symbols, start);
+		}
+		return warmupDefault(symbols, start);
+	}
+
+	private Mono<Void> warmupEliteTimeMajor(List<String> symbols, long startMs) {
+		int required = resolveCandles5m();
+		long endMs = closedFiveMinuteEndMs(System.currentTimeMillis());
+		LOGGER.info("EVENT=WARMUP_START required5m={} symbols={} endMs={}", required, symbols.size(), endMs);
+		AtomicInteger failedSymbols = new AtomicInteger();
+		Map<String, String> notReadyReasons = new java.util.concurrent.ConcurrentHashMap<>();
+
+		return Flux.fromIterable(symbols)
+				.flatMap(symbol -> fetchEliteWarmupCandles(symbol, required, endMs)
+						.map(candles -> {
+							if (candles.size() < required) {
+								failedSymbols.incrementAndGet();
+								notReadyReasons.put(symbol, "INSUFFICIENT_CLOSED_5M_BARS " + candles.size() + "/" + required);
+								LOGGER.warn("EVENT=WARMUP_SYMBOL_FAILED symbol={} have={} required={} reason=INSUFFICIENT_CLOSED_5M_BARS", symbol, candles.size(), required);
+							}
+							return Map.entry(symbol, candles);
+						})
+						.onErrorResume(error -> {
+							failedSymbols.incrementAndGet();
+							notReadyReasons.put(symbol, "EXCEPTION " + error.getMessage());
+							LOGGER.warn("EVENT=WARMUP_SYMBOL_FAILED symbol={} have=0 required={} reason={} ", symbol, required, error.getMessage());
+							return Mono.just(Map.entry(symbol, List.<WarmupCandle>of()));
+						}), resolveConcurrency())
+				.collectMap(Map.Entry::getKey, Map.Entry::getValue)
+				.flatMap(symbolCandles -> {
+					applyEliteWarmupTimeMajor(symbols, symbolCandles);
+					int ready = 0;
+					for (String symbol : symbols) {
+						var readiness = strategyRouter.eliteWarmupReadiness(symbol);
+						if (readiness != null && readiness.ready()) {
+							ready++;
+						} else {
+							String reason = readiness == null ? "STATUS_NULL" : readiness.reason();
+							notReadyReasons.put(symbol, reason);
+							long have = readiness == null ? 0 : readiness.have5m();
+							long req = readiness == null ? required : readiness.required5m();
+							LOGGER.info("EVENT=WARMUP_NOT_READY symbol={} reason={} have={}/{}", symbol, reason, have, req);
+						}
+						strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
+					}
+					int total = symbols.size();
+					double readyRatio = total == 0 ? 0.0 : ready / (double) total;
+					int globalSamples = strategyRouter.eliteGlobalSamples();
+					boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
+					boolean warmupReady = readyRatio >= MIN_READY_RATIO && globalSamples >= MIN_GLOBAL_SAMPLES && filtersReady;
+					if (warmupReady) {
+						klineStreamWatcher.markWarmupComplete();
+						klineStreamWatcher.startStreams();
+						markPriceStreamWatcher.markWarmupComplete();
+						markPriceStreamWatcher.startStreams();
+						strategyRouter.setWarmupMode(false);
+						strategyRouter.enableOrdersAfterWarmup(true);
+					}
+					long durationMs = System.currentTimeMillis() - startMs;
+					LOGGER.info("EVENT=WARMUP_DONE readySymbols={} notReadySymbols={} failedSymbols={} totalDurationMs={}",
+							ready,
+							Math.max(0, total - ready),
+							failedSymbols.get(),
+							durationMs);
+					notReadyReasons.forEach((symbol, reason) -> LOGGER.info("EVENT=WARMUP_NOT_READY symbol={} reason={}", symbol, reason));
+					return Mono.empty();
+				});
+	}
+
+	private void applyEliteWarmupTimeMajor(List<String> symbols, Map<String, List<WarmupCandle>> symbolCandles) {
+		TreeMap<Long, Map<String, WarmupCandle>> byClose = new TreeMap<>();
+		for (Map.Entry<String, List<WarmupCandle>> entry : symbolCandles.entrySet()) {
+			for (WarmupCandle candle : entry.getValue()) {
+				byClose.computeIfAbsent(candle.closeTime(), ignored -> new HashMap<>()).put(entry.getKey(), candle);
+			}
+		}
+		for (Map.Entry<Long, Map<String, WarmupCandle>> timeEntry : byClose.entrySet()) {
+			for (String symbol : symbols) {
+				WarmupCandle kline = timeEntry.getValue().get(symbol);
+				if (kline == null) {
+					continue;
+				}
+				Candle candle = new Candle(
+						kline.open().doubleValue(),
+						kline.high().doubleValue(),
+						kline.low().doubleValue(),
+						kline.close().doubleValue(),
+						kline.volume().doubleValue(),
+						kline.closeTime());
+				strategyRouter.warmupFiveMinuteCandle(symbol, candle);
+			}
+		}
+	}
+
+	private Mono<List<WarmupCandle>> fetchEliteWarmupCandles(String symbol, int required, long endMs) {
+		int fetchLimit = Math.max(required + WARMUP_FETCH_BUFFER_5M, required + 1);
+		return fetchEliteWarmupCandlesRecursive(symbol, required, fetchLimit, endMs, 0, new TreeMap<>());
+	}
+
+	private Mono<List<WarmupCandle>> fetchEliteWarmupCandlesRecursive(String symbol,
+			int required,
+			int fetchLimit,
+			long endMs,
+			int attempt,
+			TreeMap<Long, WarmupCandle> acc) {
+		return marketClient.fetchFuturesKlinesRaw(symbol, "5m", fetchLimit, endMs)
+				.map(response -> parseKlines(response.body(), symbol))
+				.flatMap(klines -> {
+					List<WarmupCandle> closed = klines.stream()
+							.sorted(Comparator.comparingLong(WarmupCandle::closeTime))
+							.filter(k -> k.closeTime() <= endMs)
+							.filter(k -> k.closeTime() % FIVE_MIN_MS == (FIVE_MIN_MS - 1))
+							.toList();
+					for (WarmupCandle candle : closed) {
+						acc.put(candle.closeTime(), candle);
+					}
+					while (acc.size() > required) {
+						acc.pollFirstEntry();
+					}
+					if (acc.size() >= required || attempt >= WARMUP_FETCH_RETRY_5M || closed.isEmpty()) {
+						return Mono.just(new ArrayList<>(acc.values()));
+					}
+					long nextEndMs = closed.stream().mapToLong(WarmupCandle::closeTime).min().orElse(endMs) - 1;
+					return fetchEliteWarmupCandlesRecursive(symbol, required, fetchLimit, nextEndMs, attempt + 1, acc);
+				})
+				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " 5m", error));
+	}
+
+	private Mono<Void> warmupDefault(List<String> symbols, long startMs) {
+		int concurrency = resolveConcurrency();
 		AtomicInteger readySymbols = new AtomicInteger();
 		AtomicInteger failedSymbols = new AtomicInteger();
-		java.util.concurrent.ConcurrentHashMap<String, String> notReadyReasons = new java.util.concurrent.ConcurrentHashMap<>();
+		Map<String, String> notReadyReasons = new java.util.concurrent.ConcurrentHashMap<>();
 
 		Mono<Void> warmupFlow = Flux.fromIterable(symbols)
 				.flatMap(symbol -> warmupSymbol(symbol)
@@ -122,7 +260,7 @@ public class HistoricalWarmupService {
 
 		if (strategyProperties.active() == StrategyType.CTI_LB) {
 			warmupFlow = warmupFlow.then(Flux.fromIterable(symbols)
-					.flatMap(symbol -> strategyRouter.refreshAfterWarmup(symbol), concurrency)
+					.flatMap(strategyRouter::refreshAfterWarmup, concurrency)
 					.then());
 		}
 
@@ -131,7 +269,7 @@ public class HistoricalWarmupService {
 			int ready = readySymbols.get();
 			int failed = failedSymbols.get();
 			int notReady = Math.max(0, total - ready);
-			long durationMs = System.currentTimeMillis() - start;
+			long durationMs = System.currentTimeMillis() - startMs;
 			if (ready == total) {
 				boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
 				klineStreamWatcher.markWarmupComplete();
@@ -149,7 +287,6 @@ public class HistoricalWarmupService {
 			notReadyReasons.forEach((symbol, reason) -> LOGGER.info("EVENT=WARMUP_NOT_READY symbol={} reason={}", symbol, reason));
 		});
 	}
-
 
 	public Mono<WarmupReport> warmupSymbol(String symbol) {
 		if (strategyProperties.active() == StrategyType.ELITE_V1) {
@@ -179,14 +316,10 @@ public class HistoricalWarmupService {
 				});
 	}
 
-
 	private Mono<Integer> warmupSymbolInterval(String symbol, String interval, int limit) {
 		return marketClient.fetchFuturesKlinesRaw(symbol, interval, limit)
-				.map(response -> {
-					return parseKlines(response.body(), symbol);
-				})
-				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " " + interval,
-						error))
+				.map(response -> parseKlines(response.body(), symbol))
+				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " " + interval, error))
 				.doOnNext(klines -> {
 					List<WarmupCandle> sorted = klines.stream()
 							.sorted(Comparator.comparingLong(WarmupCandle::closeTime))
@@ -209,13 +342,6 @@ public class HistoricalWarmupService {
 				.map(List::size);
 	}
 
-	private void scheduleRetry(String symbol) {
-		Mono.delay(Duration.ofSeconds(30))
-				.then(warmupSymbol(symbol).then())
-				.onErrorResume(error -> Mono.empty())
-				.subscribe();
-	}
-
 	private int resolveCandles1m() {
 		return warmupProperties.candles1m() > 0 ? warmupProperties.candles1m() : DEFAULT_CANDLES_1M;
 	}
@@ -231,13 +357,17 @@ public class HistoricalWarmupService {
 		return warmupProperties.concurrency() > 0 ? warmupProperties.concurrency() : DEFAULT_CONCURRENCY;
 	}
 
+	private long closedFiveMinuteEndMs(long nowMs) {
+		return (nowMs / FIVE_MIN_MS) * FIVE_MIN_MS - 1L;
+	}
+
 	private List<WarmupCandle> parseKlines(String json, String symbol) {
 		try {
 			JsonNode root = objectMapper.readTree(json);
 			if (root == null || !root.isArray()) {
 				throw new IllegalStateException("Unexpected kline payload for " + symbol);
 			}
-			java.util.ArrayList<WarmupCandle> candles = new java.util.ArrayList<>();
+			ArrayList<WarmupCandle> candles = new ArrayList<>();
 			for (JsonNode entry : root) {
 				if (!entry.isArray() || entry.size() < 7) {
 					continue;

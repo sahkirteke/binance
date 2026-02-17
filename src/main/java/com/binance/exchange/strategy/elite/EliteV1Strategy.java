@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.Set;
 import java.lang.reflect.Method;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -254,6 +255,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					"NOT_READY_REGIME_UNKNOWN");
 		}
 		return WarmupReadiness.ready(symbol, state.seen1mCloses, 0, state.processed5mCloses, requiredWarmup5m);
+	}
+
+	public int globalGateSamples() {
+		return globalMedBwHistory.size();
 	}
 
 	private SymbolState resolveState(String symbol) {

@@ -111,6 +111,13 @@ public class StrategyRouter {
 		}
 	}
 
+	public int eliteGlobalSamples() {
+		if (strategyProperties.active() != StrategyType.ELITE_V1) {
+			return 0;
+		}
+		return eliteV1Strategy.globalGateSamples();
+	}
+
 	public EliteV1Strategy.WarmupReadiness eliteWarmupReadiness(String symbol) {
 		if (strategyProperties.active() != StrategyType.ELITE_V1) {
 			return null;
