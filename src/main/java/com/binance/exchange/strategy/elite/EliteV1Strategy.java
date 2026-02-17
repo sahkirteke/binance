@@ -244,7 +244,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.lastMetrics = metrics;
 		state.lastEvaluatedCloseTimeMs = bar5m.closeTime();
 		OrderflowSnapshot orderflowSnapshot = OrderflowSnapshot.fromCandle(bar5m);
-		if (orderflowSnapshot != null && orderflowSnapshot.available() && bar5m.volume() > 0.0
+		if (orderflowSnapshot.available() && bar5m.volume() > 0.0
 				&& orderflowSnapshot.takerBuyBaseVolume() != null
 				&& Double.isFinite(orderflowSnapshot.takerBuyBaseVolume())) {
 			state.orderflowReadyBars = Math.min(3, state.orderflowReadyBars + 1);
