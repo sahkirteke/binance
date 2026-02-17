@@ -14,10 +14,12 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.lang.reflect.Method;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -96,6 +98,8 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
 	private final AtomicBoolean warmupModeEnabled = new AtomicBoolean(false);
 	private volatile boolean warmupCompleted;
+	private final Set<String> traceSymbols = new HashSet<>();
+	private final AtomicInteger traceEventsLeft = new AtomicInteger(0);
 	private final BookTickerStreamWatcher bookTickerStreamWatcher;
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
@@ -131,6 +135,13 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 		}
 		validateConfig();
 		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
+		LOGGER.info("EVENT=APP_START version={} tz={} symbols={}", "elite-v1-selfcheck-v1", props.zoneId(), props.symbols().size());
+		LOGGER.info("EVENT=WARMUP_START required5mBars={} globalHistWindow={} symbolHistWindow={} minGlobalSamples={} minSymbolSamples={}",
+				requiredWarmup5m,
+				HISTORY_CAPACITY,
+				HISTORY_CAPACITY,
+				MIN_GLOBAL_SAMPLES,
+				MIN_SYMBOL_SAMPLES);
 		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
 				props.symbols().size(),
 				requiredWarmup5m,
@@ -138,6 +149,7 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 		zoneId = ZoneId.of(props.zoneId());
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
+		prepareTraceSymbols();
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
 		startBookTickerWatcher();
 		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
@@ -178,11 +190,74 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 	public void setWarmupMode(boolean warmupMode) {
 		warmupModeEnabled.set(warmupMode);
 		warmupCompleted = false;
+		LOGGER.info("EVENT=WARMUP_MODE strategy=ELITE_V1 warmupModeEnabled={} warmupCompleted={}", warmupModeEnabled.get(), warmupCompleted);
 	}
 
 	public void enableOrdersAfterWarmup() {
 		warmupModeEnabled.set(false);
 		warmupCompleted = true;
+		LOGGER.info("EVENT=TRADING_FLAGS strategy=ELITE_V1 warmupModeEnabled={} warmupCompleted={} ordersAllowedCandidate={}",
+				warmupModeEnabled.get(),
+				warmupCompleted,
+				!warmupModeEnabled.get() && warmupCompleted);
+	}
+
+	public SymbolWarmupSummary symbolWarmupSummary(String symbol) {
+		SymbolState state = resolveState(symbol);
+		Metrics metrics = state.indicators.metrics();
+		List<String> reasons = new ArrayList<>();
+		boolean metricsOk = metrics != null;
+		boolean regimeOk = metrics != null && metrics.activeRegimeTag != null;
+		if (state.seen5mCloses < requiredWarmup5m) {
+			reasons.add("INSUFFICIENT_5M_BARS");
+		}
+		if (metrics == null) {
+			reasons.add("METRICS_NULL");
+		}
+		if (metrics != null && !Double.isFinite(metrics.bwRatio5m)) {
+			reasons.add("BWRATIO_NOT_FINITE");
+		}
+		if (!regimeOk) {
+			reasons.add("REGIME_UNKNOWN");
+		}
+		int symbolSamples = Math.min(state.ema20DistPctHist.size(), state.rsi9Hist.size());
+		if (symbolSamples < MIN_SYMBOL_SAMPLES) {
+			reasons.add("SYMBOL_HISTORY_NOT_READY");
+		}
+		if (metrics != null && (!Double.isFinite(metrics.ema20DistPct) || !Double.isFinite(metrics.rsi9_5m) || !Double.isFinite(metrics.bbPercentB_5m))) {
+			reasons.add("SYMBOL_METRICS_NOT_FINITE");
+		}
+		boolean ready = reasons.isEmpty();
+		return new SymbolWarmupSummary(symbol,
+				state.seen5mCloses,
+				requiredWarmup5m,
+				state.indicators.baselineIndicatorsSeeded(),
+				metricsOk,
+				regimeOk,
+				symbolSamples,
+				ready,
+				reasons.isEmpty() ? "READY" : String.join("|", reasons));
+	}
+
+	public GlobalGateStatus globalGateStatus() {
+		GlobalSnapshot snapshot = buildGlobalSnapshot();
+		GlobalGateContext context = evaluateGlobalGate(snapshot);
+		String reason = "";
+		if (context.includedSymbolsForGlobal < context.minSymbolsForGlobal) {
+			reason = "GLOBAL_SNAPSHOT_NOT_READY";
+		} else if (!context.ready) {
+			reason = "GLOBAL_HISTORY_NOT_READY";
+		}
+		return new GlobalGateStatus(context.globalSamples,
+				MIN_GLOBAL_SAMPLES,
+				context.includedSymbolsForGlobal,
+				context.minSymbolsForGlobal,
+				context.globalMedBw,
+				context.bwThr,
+				context.globalChopShare,
+				context.chopThr,
+				context.ready,
+				reason);
 	}
 
 	public boolean isWarmupReady(String symbol) {
@@ -275,6 +350,9 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 		GlobalSnapshot snapshot = buildGlobalSnapshot();
 		GlobalGateContext globalContext = evaluateGlobalGate(snapshot);
 		SymbolGateContext symbolContext = SymbolGateContext.empty();
+		int globalHistorySizeBeforePush = Math.min(globalMedBwHistory.size(), globalChopShareHistory.size());
+		int symbolHistorySizeBeforePush = Math.min(state.ema20DistPctHist.size(), state.rsi9Hist.size());
+		boolean pushedThisBar = false;
 		boolean baselinesReady = isBaselinesReady(state, metrics);
 		checkLiquidityHealth();
 		state.baselinesReady = baselinesReady;
@@ -304,7 +382,9 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
 			updateSymbolHistory(state, metrics);
 			updateGlobalHistory(snapshot);
-			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null, globalContext, symbolContext);
+			pushedThisBar = true;
+			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null, globalContext, symbolContext,
+					globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
 				state.prevEma20_5m = metrics.ema20_5m;
 			}
@@ -325,51 +405,80 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 		if (preCheck.action != DecisionAction.CONTINUE) {
 			updateSymbolHistory(state, metrics);
 			updateGlobalHistory(snapshot);
-			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null, globalContext, symbolContext);
+			pushedThisBar = true;
+			tracePipeline(state, bar5m, "PRECHECK_FAIL action=" + preCheck.action.name());
+			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null, globalContext, symbolContext,
+					globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 			return;
 		}
+		tracePipeline(state, bar5m, "PRECHECK_OK");
 
 		if (!globalContext.ready) {
 			updateSymbolHistory(state, metrics);
 			updateGlobalHistory(snapshot);
-			writeDecision(state, bar5m, "NO_ENTRY", null, "GLOBAL_HISTORY_NOT_READY", metrics, null, globalContext, symbolContext);
+			pushedThisBar = true;
+			tracePipeline(state, bar5m, "GLOBAL_GATE allow=false globalSamples=" + globalContext.globalSamples);
+			writeDecision(state, bar5m, "NO_ENTRY", null, "GLOBAL_HISTORY_NOT_READY", metrics, null, globalContext, symbolContext,
+					globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 			return;
 		}
 		if (!globalContext.allow) {
 			updateSymbolHistory(state, metrics);
 			updateGlobalHistory(snapshot);
-			writeDecision(state, bar5m, "NO_ENTRY", null, "GLOBAL_WORST_REGIME_VETO", metrics, null, globalContext, symbolContext);
+			pushedThisBar = true;
+			tracePipeline(state, bar5m, "GLOBAL_GATE allow=false globalMedBw=" + globalContext.globalMedBw + " bwThr=" + globalContext.bwThr
+					+ " globalChopShare=" + globalContext.globalChopShare + " chopThr=" + globalContext.chopThr + " globalSamples=" + globalContext.globalSamples);
+			writeDecision(state, bar5m, "NO_ENTRY", null, "GLOBAL_WORST_REGIME_VETO", metrics, null, globalContext, symbolContext,
+					globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 			return;
 		}
 
+		tracePipeline(state, bar5m, "GLOBAL_GATE allow=true globalMedBw=" + globalContext.globalMedBw + " bwThr=" + globalContext.bwThr
+				+ " globalChopShare=" + globalContext.globalChopShare + " chopThr=" + globalContext.chopThr + " globalSamples=" + globalContext.globalSamples);
 		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
+		tracePipeline(state, bar5m, "SETUP matched=" + longEval.signal() + " setupName=" + (longEval.signal() ? "ELIT_V1_LONG" : "NONE"));
 		if (longEval.signal()) {
 			symbolContext = evaluateSecondLayerVeto(state, metrics);
+			tracePipeline(state, bar5m, "SECOND_LAYER veto=" + symbolContext.vetoed + " emaDist=" + symbolContext.ema20DistPct
+					+ " emaThr=" + symbolContext.emaThr + " rsi=" + symbolContext.rsi9 + " rsiThr=" + symbolContext.rsiThr
+					+ " pb=" + symbolContext.bbPercentB + " pbThr=" + symbolContext.pbThr + " symbolSamples=" + symbolContext.symbolSamples);
 			if (!symbolContext.ready && BLOCK_ON_SYMBOL_HISTORY_NOT_READY) {
 				updateSymbolHistory(state, metrics);
 				updateGlobalHistory(snapshot);
-				writeDecision(state, bar5m, "NO_ENTRY", null, "SYMBOL_HISTORY_NOT_READY", metrics, longEval, globalContext, symbolContext);
+				pushedThisBar = true;
+				tracePipeline(state, bar5m, "FINAL_ACTION action=NO_ENTRY blockReason=SYMBOL_HISTORY_NOT_READY");
+				writeDecision(state, bar5m, "NO_ENTRY", null, "SYMBOL_HISTORY_NOT_READY", metrics, longEval, globalContext, symbolContext,
+						globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 				return;
 			}
 			if (symbolContext.vetoed) {
 				updateSymbolHistory(state, metrics);
 				updateGlobalHistory(snapshot);
-				writeDecision(state, bar5m, "NO_ENTRY", null, "CHASING_OVERBOUGHT_VETO", metrics, longEval, globalContext, symbolContext);
+				pushedThisBar = true;
+				tracePipeline(state, bar5m, "FINAL_ACTION action=NO_ENTRY blockReason=CHASING_OVERBOUGHT_VETO");
+				writeDecision(state, bar5m, "NO_ENTRY", null, "CHASING_OVERBOUGHT_VETO", metrics, longEval, globalContext, symbolContext,
+						globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 				return;
 			}
 			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
 			updateSymbolHistory(state, metrics);
 			updateGlobalHistory(snapshot);
-			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval, globalContext, symbolContext);
+			pushedThisBar = true;
+			tracePipeline(state, bar5m, "FINAL_ACTION action=ENTER_LONG blockReason=NONE");
+			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval, globalContext, symbolContext,
+					globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 			return;
 		}
 		updateSymbolHistory(state, metrics);
 		updateGlobalHistory(snapshot);
-		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval, globalContext, symbolContext);
+		pushedThisBar = true;
+		tracePipeline(state, bar5m, "FINAL_ACTION action=NO_ENTRY blockReason=" + longEval.blockReason());
+		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval, globalContext, symbolContext,
+				globalHistorySizeBeforePush, symbolHistorySizeBeforePush, pushedThisBar);
 		state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 	}
 
@@ -378,6 +487,30 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 		if (!Objects.equals(day, state.dayKey)) {
 			state.dayKey = day;
 			state.entriesToday = 0;
+		}
+	}
+
+	private void prepareTraceSymbols() {
+		traceSymbols.clear();
+		List<String> symbols = props.symbols();
+		for (int i = 0; i < Math.min(3, symbols.size()); i++) {
+			traceSymbols.add(symbols.get(i));
+		}
+		traceEventsLeft.set(Math.max(0, traceSymbols.size() * 5));
+	}
+
+	private void tracePipeline(SymbolState state, Candle bar5m, String message) {
+		if (props.selfCheck() == null || !props.selfCheck().trace()) {
+			return;
+		}
+		if (state == null || bar5m == null || !traceSymbols.contains(state.symbol)) {
+			return;
+		}
+		if (traceEventsLeft.get() <= 0) {
+			return;
+		}
+		if (traceEventsLeft.getAndDecrement() > 0) {
+			LOGGER.info("EVENT=PIPELINE_TRACE symbol={} closeTime={} step={}", state.symbol, bar5m.closeTime(), message);
 		}
 	}
 
@@ -832,7 +965,10 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 			Metrics metrics,
 			LongSetupEval longSetupEval,
 			GlobalGateContext globalContext,
-			SymbolGateContext symbolContext) {
+			SymbolGateContext symbolContext,
+			int globalHistorySizeBeforePush,
+			int symbolHistorySizeBeforePush,
+			boolean pushedThisBar) {
 		ObjectNode node = objectMapper.createObjectNode();
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
@@ -916,9 +1052,12 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 		putMetricOrNull(node, "pbThr", symCtx.pbThr);
 		node.put("symbolSamples", symCtx.symbolSamples);
 
+		node.put("globalHistorySizeBeforePush", globalHistorySizeBeforePush);
+		node.put("symbolHistorySizeBeforePush", symbolHistorySizeBeforePush);
+		node.put("pushedThisBar", pushedThisBar);
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
-		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
+		node.put("blockReason", enrichBlockReason(resolveDecisionBlockReason(effectiveAction, effectiveBlockReason), gateCtx, symCtx));
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
 		if ("INPUTS_NOT_READY".equals(effectiveAction)) {
 			node.put("inputsValid", false);
@@ -994,6 +1133,28 @@ private static final boolean BLOCK_ON_SYMBOL_HISTORY_NOT_READY = Boolean.parseBo
 			return "IN_POSITION_NO_ENTRY";
 		}
 		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
+	}
+
+	private static String enrichBlockReason(String baseReason, GlobalGateContext gateCtx, SymbolGateContext symCtx) {
+		if ("GLOBAL_WORST_REGIME_VETO".equals(baseReason)) {
+			return String.format("%s globalMedBw=%.8f bwThr=%.8f globalChopShare=%.8f chopThr=%.8f",
+					baseReason,
+					gateCtx.globalMedBw,
+					gateCtx.bwThr,
+					gateCtx.globalChopShare,
+					gateCtx.chopThr);
+		}
+		if ("CHASING_OVERBOUGHT_VETO".equals(baseReason)) {
+			return String.format("%s emaDist=%.8f emaThr=%.8f rsi=%.8f rsiThr=%.8f pb=%.8f pbThr=%.8f",
+					baseReason,
+					symCtx.ema20DistPct,
+					symCtx.emaThr,
+					symCtx.rsi9,
+					symCtx.rsiThr,
+					symCtx.bbPercentB,
+					symCtx.pbThr);
+		}
+		return baseReason;
 	}
 
 	private static void putBar(ObjectNode parent, String field, Candle c, long tfMs) {
@@ -1251,6 +1412,29 @@ private Path decisionPath(String symbol, LocalDate day) {
 		static WarmupReadiness statusNull(String symbol) {
 			return new WarmupReadiness(symbol, false, 0, 0, 0, 0, "STATUS_NULL");
 		}
+	}
+
+	public record SymbolWarmupSummary(String symbol,
+			long have5m,
+			int required5m,
+			boolean baselinesSeeded,
+			boolean metricsOk,
+			boolean regimeOk,
+			int symbolSamples,
+			boolean ready,
+			String reasonIfNotReady) {
+	}
+
+	public record GlobalGateStatus(int globalSamples,
+			int needed,
+			int includedSymbolsForLastSnapshot,
+			int minSymbolsForGlobal,
+			double globalMedBw,
+			double bwThr,
+			double globalChopShare,
+			double chopThr,
+			boolean ready,
+			String reasonIfNotReady) {
 	}
 
 		enum DecisionAction {

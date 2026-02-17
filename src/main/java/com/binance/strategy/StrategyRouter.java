@@ -118,6 +118,20 @@ public class StrategyRouter {
 		return eliteV1Strategy.warmupReadiness(symbol);
 	}
 
+	public EliteV1Strategy.SymbolWarmupSummary eliteSymbolWarmupSummary(String symbol) {
+		if (strategyProperties.active() != StrategyType.ELITE_V1) {
+			return null;
+		}
+		return eliteV1Strategy.symbolWarmupSummary(symbol);
+	}
+
+	public EliteV1Strategy.GlobalGateStatus eliteGlobalGateStatus() {
+		if (strategyProperties.active() != StrategyType.ELITE_V1) {
+			return null;
+		}
+		return eliteV1Strategy.globalGateStatus();
+	}
+
 	public boolean needsKlines() {
 		return needsKlines(strategyProperties.active());
 	}
