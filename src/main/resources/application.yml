@@ -239,32 +239,41 @@ elite-v1:
   mode: PAPER
   zone-id: Europe/Istanbul
   symbols:
+    - BTCUSDT
     - ETHUSDT
+    - BNBUSDT
+    - SOLUSDT
     - XRPUSDT
     - DOGEUSDT
-    - LTCUSDT
     - ADAUSDT
+    - TRXUSDT
     - AVAXUSDT
+    - DOTUSDT
+    - LTCUSDT
+    - BCHUSDT
+    - ETCUSDT
+    - EOSUSDT
+    - TONUSDT
+    - NEARUSDT
+    - ATOMUSDT
+    - AAVEUSDT
     - ARBUSDT
-    - MANAUSDT
+    - OPUSDT
+    - POLUSDT
     - XLMUSDT
-    - CHZUSDT
     - ALGOUSDT
+    - CHZUSDT
     - BANDUSDT
     - BATUSDT
     - CHRUSDT
-    - POLUSDT
-    - BTCUSDT
-    - BNBUSDT
-    - SOLUSDT
-    - AAVEUSDT
-    - TRXUSDT
-    - DOTUSDT
-    - ATOMUSDT
-    - NEARUSDT
-    - OPUSDT
+    - MANAUSDT
     - SANDUSDT
     - APEUSDT
+    - RUNEUSDT
+    - FTMUSDT
+    - GALAUSDT
+    - WLDUSDT
+    - ONDOUSDT
   paper-notional-usd: 50.0
   max-open-positions-global: 1
   max-entries-per-symbol-per-day: 1

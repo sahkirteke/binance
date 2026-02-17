@@ -89,6 +89,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private final RingBufferDouble globalChopShareHistory = new RingBufferDouble(GLOBAL_HIST_WINDOW);
 	private final Map<Long, GlobalBucket> globalBuckets = new ConcurrentHashMap<>();
 	private final AtomicBoolean tradingReadyEventLogged = new AtomicBoolean(false);
+	private volatile List<String> tradingSymbols = List.of();
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -123,22 +124,41 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		ensureInitialized();
 	}
 
+
+	private List<String> resolveTradingSymbols() {
+		List<String> configured = props.symbols() == null ? List.of() : props.symbols();
+		List<String> sanitized = configured.stream()
+				.filter(Objects::nonNull)
+				.map(String::trim)
+				.filter(symbol -> !symbol.isBlank())
+				.map(String::toUpperCase)
+				.distinct()
+				.filter(symbol -> !symbol.contains("I"))
+				.toList();
+		long dropped = configured.size() - sanitized.size();
+		if (dropped > 0) {
+			LOGGER.warn("EVENT=SYMBOL_SANITIZED dropped={} reason=CONTAINS_I_OR_INVALID", dropped);
+		}
+		return sanitized;
+	}
+
 	private void ensureInitialized() {
 		if (!started.compareAndSet(false, true)) {
 			return;
 		}
+		tradingSymbols = resolveTradingSymbols();
 		validateConfig();
 		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
 		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
-				props.symbols().size(),
+				tradingSymbols.size(),
 				requiredWarmup5m,
 				warmupMode.name());
 		zoneId = ZoneId.of(props.zoneId());
 		writer.start();
-		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
-		symbolFilterService.preloadFilters(props.symbols()).subscribe();
+		tradingSymbols.forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
+		symbolFilterService.preloadFilters(tradingSymbols).subscribe();
 		startBookTickerWatcher();
-		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
+		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), tradingSymbols.size(), props.zoneId());
 	}
 
 	@Override
@@ -378,7 +398,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private int minSymbolsForGlobal() {
-		return (int) Math.ceil(Math.max(1, props.symbols().size()) * MIN_READY_RATIO);
+		return (int) Math.ceil(Math.max(1, tradingSymbols.size()) * MIN_READY_RATIO);
 	}
 
 	private void updateGlobalSnapshotForCloseTime(long closeTimeMs) {
@@ -387,7 +407,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		int readyCount = 0;
 		List<Double> bwValues = new ArrayList<>();
 		int chopCount = 0;
-		for (String symbol : props.symbols()) {
+		for (String symbol : tradingSymbols) {
 			SymbolState symbolState = states.get(symbol);
 			if (symbolState == null || symbolState.lastEvaluatedCloseTimeMs != closeTimeMs) {
 				continue;
@@ -440,9 +460,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (!isBaselinesReady(state, metrics)) {
 			return "NOT_READY_WARMUP";
 		}
-		long readySymbols = props.symbols().stream().map(states::get).filter(Objects::nonNull)
+		long readySymbols = tradingSymbols.stream().map(states::get).filter(Objects::nonNull)
 				.filter(s -> s.lastMetrics != null && isBaselinesReady(s, s.lastMetrics)).count();
-		double symbolsReadyRatio = readySymbols / (double) Math.max(1, props.symbols().size());
+		double symbolsReadyRatio = readySymbols / (double) Math.max(1, tradingSymbols.size());
 		if (symbolsReadyRatio < MIN_READY_RATIO) {
 			return "NOT_READY_WARMUP";
 		}
@@ -477,7 +497,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (!tradingReadyEventLogged.compareAndSet(false, true)) {
 			return;
 		}
-		long readySymbols = props.symbols().stream().map(states::get).filter(Objects::nonNull)
+		long readySymbols = tradingSymbols.stream().map(states::get).filter(Objects::nonNull)
 				.filter(s -> s.lastMetrics != null && isBaselinesReady(s, s.lastMetrics)).count();
 		LOGGER.info("EVENT=TRADING_READY symbolsReady={} globalSamples={} timeTr={}",
 				readySymbols,
@@ -941,8 +961,8 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
 			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
 		} else {
-			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
-			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
+			node.put("rawRegimeTag", metrics.rawRegimeTag == null ? "UNKNOWN" : metrics.rawRegimeTag.name());
+			node.put("activeRegimeTag", metrics.activeRegimeTag == null ? "UNKNOWN" : metrics.activeRegimeTag.name());
 			ObjectNode metricNode = node.putObject("metrics");
 			putMetric(metricNode, "bbWidth_5m", metrics.bbWidth_5m, invalidReasons, "bbWidth_5m");
 			putMetric(metricNode, "bwEma_5m", metrics.bwEma_5m, invalidReasons, "bwEma_5m");
@@ -1263,6 +1283,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 	private void validateConfig() {
 		if (props.paperNotionalUsd() <= 0) {
 			throw new IllegalStateException("paperNotionalUsd must be > 0");
+		}
+		if (tradingSymbols == null || tradingSymbols.isEmpty()) {
+			throw new IllegalStateException("No eligible symbols after sanitization (contains I/invalid)");
 		}
 	}
 
