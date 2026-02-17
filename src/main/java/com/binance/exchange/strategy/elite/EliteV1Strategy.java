@@ -15,6 +15,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -54,6 +55,15 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
+	private static final int ROLLING_WINDOW_5M = 288;
+	private static final int GLOBAL_BOOTSTRAP_SAMPLES = 6;
+	private static final long TRADE_ENABLE_DELAY_MS = 35L * ONE_MIN_MS;
+	private static final double GLOBAL_MIN_SYMBOL_SHARE = 0.70;
+	private static final double BW_PCTL = 0.25;
+	private static final double CHOP_PCTL = 0.75;
+	private static final double EMA_PCTL = 0.80;
+	private static final double RSI_PCTL = 0.80;
+	private static final double PB_PCTL = 0.80;
 
 
 // Global cap to avoid spraying too many concurrent positions/brackets.
@@ -80,6 +90,12 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private final AtomicBoolean started = new AtomicBoolean(false);
 	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
 	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
+	private final Object globalGateLock = new Object();
+	private final Deque<Double> globalMedBwHistory = new ArrayDeque<>();
+	private final Deque<Double> globalChopShareHistory = new ArrayDeque<>();
+	private GlobalSnapshot pendingGlobalSnapshot;
+	private long globalSamples;
+	private long appStartMs;
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -126,6 +142,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 				warmupMode.name());
 		zoneId = ZoneId.of(props.zoneId());
 		writer.start();
+		appStartMs = System.currentTimeMillis();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
 		startBookTickerWatcher();
@@ -264,6 +281,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		boolean baselinesReady = isBaselinesReady(state, metrics);
 		checkLiquidityHealth();
 		state.baselinesReady = baselinesReady;
+		GlobalGateDecision globalGateDecision = updateAndEvaluateGlobalGate(state, bar5m.closeTime());
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
 			var at = Instant.ofEpochMilli(bar5m.closeTime());
@@ -288,7 +306,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					metrics.atrRatio5m);
 		}
 		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
-			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null);
+			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null, globalGateDecision, null);
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
 				state.prevEma20_5m = metrics.ema20_5m;
 			}
@@ -300,24 +318,67 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					? checkPaperExitOnFiveMinute(state, bar5m)
 					: checkLiveBracketExit(state, bar5m);
 			if (exited) {
+				appendSymbolHistory(state, metrics);
 				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 				return;
 			}
 		}
 
-		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
-		if (preCheck.action != DecisionAction.CONTINUE) {
-			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null);
+		long nowMs = bar5m.closeTime();
+		if (globalGateDecision.globalSamples() < GLOBAL_BOOTSTRAP_SAMPLES) {
+			String reason = "BOOTSTRAP_COLLECTING|globalSamples=" + globalGateDecision.globalSamples() + "/" + GLOBAL_BOOTSTRAP_SAMPLES;
+			writeDecision(state, bar5m, "NO_ENTRY", null, reason, metrics, null, globalGateDecision, null);
+			appendSymbolHistory(state, metrics);
+			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 			return;
 		}
 
-		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
-		if (longEval.signal()) {
-			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval);
+		boolean tradeEnabled = isTradeEnabled(nowMs);
+		if (!tradeEnabled) {
+			String reason = "BOOTSTRAP_TRADE_DELAY|globalSamples=" + globalGateDecision.globalSamples() + "|minStartMs=" + (appStartMs + TRADE_ENABLE_DELAY_MS);
+			writeDecision(state, bar5m, "NO_ENTRY", null, reason, metrics, null, globalGateDecision, null);
+			appendSymbolHistory(state, metrics);
+			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 			return;
 		}
-		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval);
+
+		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
+		if (preCheck.action != DecisionAction.CONTINUE) {
+			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null, globalGateDecision, null);
+			appendSymbolHistory(state, metrics);
+			return;
+		}
+
+		if (!globalGateDecision.inputsReady()) {
+			writeDecision(state, bar5m, "NO_ENTRY", null, globalGateDecision.notReadyBlockReason(), metrics, null, globalGateDecision, null);
+			appendSymbolHistory(state, metrics);
+			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+			return;
+		}
+		if (!globalGateDecision.allow()) {
+			writeDecision(state, bar5m, "NO_ENTRY", null, globalGateDecision.vetoBlockReason(), metrics, null, globalGateDecision, null);
+			appendSymbolHistory(state, metrics);
+			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+			return;
+		}
+
+		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, nowMs);
+		Stage2VetoDecision stage2Veto = null;
+		if (longEval.signal()) {
+			stage2Veto = evaluateStage2Veto(state, metrics, nowMs);
+			if (stage2Veto.veto()) {
+				writeDecision(state, bar5m, "NO_ENTRY", null, stage2Veto.blockReason(), metrics, longEval, globalGateDecision, stage2Veto);
+				appendSymbolHistory(state, metrics);
+				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+				return;
+			}
+			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
+			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval, globalGateDecision, stage2Veto);
+			appendSymbolHistory(state, metrics);
+			return;
+		}
+		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval, globalGateDecision, stage2Veto);
+		appendSymbolHistory(state, metrics);
 		state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 	}
 
@@ -412,6 +473,188 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 		boolean signal = failReasons.isEmpty();
 		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
+	}
+
+
+	private boolean isTradeEnabled(long nowMs) {
+		return (nowMs - appStartMs) >= TRADE_ENABLE_DELAY_MS;
+	}
+
+	private GlobalGateDecision updateAndEvaluateGlobalGate(SymbolState state, long closeTimeMs) {
+		synchronized (globalGateLock) {
+			if (pendingGlobalSnapshot == null) {
+				pendingGlobalSnapshot = new GlobalSnapshot(closeTimeMs);
+			} else if (pendingGlobalSnapshot.closeTimeMs() != closeTimeMs) {
+				finalizeGlobalSnapshot(pendingGlobalSnapshot);
+				pendingGlobalSnapshot = new GlobalSnapshot(closeTimeMs);
+			}
+			Metrics metrics = state.indicators.metrics();
+			if (metrics != null && Double.isFinite(metrics.bwRatio5m)
+					&& metrics.activeRegimeTag != null) {
+				pendingGlobalSnapshot.symbolData().put(state.symbol,
+						new GlobalSymbolMetrics(metrics.bwRatio5m, metrics.activeRegimeTag));
+			} else {
+				String reason = metrics == null ? "METRICS_NULL" : "MISSING_BW_OR_REGIME";
+				pendingGlobalSnapshot.missingReasons().put(state.symbol, reason);
+			}
+			return evaluateCurrentGlobalDecision();
+		}
+	}
+
+	private void finalizeGlobalSnapshot(GlobalSnapshot snapshot) {
+		int activeSymbols = Math.max(states.size(), 1);
+		int minSymbols = minSymbolsForGlobal(activeSymbols);
+		int included = snapshot.symbolData().size();
+		if (included < minSymbols) {
+			LOGGER.warn("EVENT=GLOBAL_SNAPSHOT_INCOMPLETE closeTimeMs={} included={} need={} missingSymbolsSample={}",
+					snapshot.closeTimeMs(), included, minSymbols, firstMissingReasons(snapshot.missingReasons()));
+			globalSamples++;
+			return;
+		}
+		double medBw = median(snapshot.symbolData().values().stream().mapToDouble(GlobalSymbolMetrics::bwRatio).toArray());
+		long chopCount = snapshot.symbolData().values().stream().filter(v -> v.regimeTag() == RegimeTag.CHOP).count();
+		double chopShare = included <= 0 ? Double.NaN : ((double) chopCount / included);
+		if (Double.isFinite(medBw)) {
+			pushRolling(globalMedBwHistory, medBw, ROLLING_WINDOW_5M);
+		}
+		if (Double.isFinite(chopShare)) {
+			pushRolling(globalChopShareHistory, chopShare, ROLLING_WINDOW_5M);
+		}
+		globalSamples++;
+	}
+
+	private GlobalGateDecision evaluateCurrentGlobalDecision() {
+		int activeSymbols = Math.max(states.size(), 1);
+		int minSymbols = minSymbolsForGlobal(activeSymbols);
+		int included = pendingGlobalSnapshot == null ? 0 : pendingGlobalSnapshot.symbolData().size();
+		Double globalMedBw = null;
+		Double globalChopShare = null;
+		if (included > 0 && pendingGlobalSnapshot != null) {
+			globalMedBw = median(pendingGlobalSnapshot.symbolData().values().stream().mapToDouble(GlobalSymbolMetrics::bwRatio).toArray());
+			long chopCount = pendingGlobalSnapshot.symbolData().values().stream().filter(v -> v.regimeTag() == RegimeTag.CHOP).count();
+			globalChopShare = (double) chopCount / included;
+		}
+		Double bwThr = percentile(globalMedBwHistory, BW_PCTL);
+		Double chopThr = percentile(globalChopShareHistory, CHOP_PCTL);
+		if (globalSamples >= GLOBAL_BOOTSTRAP_SAMPLES && included < minSymbols) {
+			LOGGER.warn("EVENT=GLOBAL_SNAPSHOT_INCOMPLETE closeTimeMs={} included={} need={} missingSymbolsSample={}",
+					pendingGlobalSnapshot == null ? -1L : pendingGlobalSnapshot.closeTimeMs(),
+					included,
+					minSymbols,
+					pendingGlobalSnapshot == null ? List.of() : firstMissingReasons(pendingGlobalSnapshot.missingReasons()));
+			return new GlobalGateDecision(globalMedBw, bwThr, globalChopShare, chopThr, null, included, minSymbols, globalSamples,
+					false, "GLOBAL_SNAPSHOT_NOT_READY|included=" + included + "|need=" + minSymbols, null);
+		}
+		if (globalSamples >= GLOBAL_BOOTSTRAP_SAMPLES && (!isFinite(bwThr) || !isFinite(chopThr))) {
+			LOGGER.warn("EVENT=GLOBAL_THRESH_NOT_READY closeTimeMs={} globalMedBwHistSize={} globalChopHistSize={}",
+					pendingGlobalSnapshot == null ? -1L : pendingGlobalSnapshot.closeTimeMs(),
+					globalMedBwHistory.size(),
+					globalChopShareHistory.size());
+			return new GlobalGateDecision(globalMedBw, bwThr, globalChopShare, chopThr, null, included, minSymbols, globalSamples,
+					false, "GLOBAL_HISTORY_NOT_READY|samples=" + globalSamples, null);
+		}
+		boolean bwGood = isFinite(globalMedBw) && isFinite(bwThr) && globalMedBw >= bwThr;
+		boolean chopGood = isFinite(globalChopShare) && isFinite(chopThr) && globalChopShare <= chopThr;
+		boolean allow = bwGood || chopGood;
+		String vetoReason = allow ? null : String.format("GLOBAL_WORST_REGIME_VETO|globalMedBw=%s|bwThr=%s|globalChopShare=%s|chopThr=%s|included=%d|need=%d",
+				formatDouble(globalMedBw), formatDouble(bwThr), formatDouble(globalChopShare), formatDouble(chopThr), included, minSymbols);
+		return new GlobalGateDecision(globalMedBw, bwThr, globalChopShare, chopThr, allow, included, minSymbols, globalSamples,
+				true, null, vetoReason);
+	}
+
+	private void appendSymbolHistory(SymbolState state, Metrics metrics) {
+		if (metrics == null) {
+			return;
+		}
+		pushRolling(state.ema20DistPctHistory, metrics.ema20DistPct, ROLLING_WINDOW_5M);
+		pushRolling(state.rsi9History, metrics.rsi9_5m, ROLLING_WINDOW_5M);
+		pushRolling(state.bbPercentBHistory, metrics.bbPercentB_5m, ROLLING_WINDOW_5M);
+	}
+
+	private Stage2VetoDecision evaluateStage2Veto(SymbolState state, Metrics m, long nowMs) {
+		Double emaThr = percentile(state.ema20DistPctHistory, EMA_PCTL);
+		Double rsiThr = percentile(state.rsi9History, RSI_PCTL);
+		Double pbThr = percentile(state.bbPercentBHistory, PB_PCTL);
+		int samples = state.ema20DistPctHistory.size();
+		if (!isFinite(emaThr)) {
+			LOGGER.warn("EVENT=SYMBOL_THRESH_NOT_READY symbol={} symbolSamples={} field={}", state.symbol, samples, "ema20DistPct");
+			return new Stage2VetoDecision(m.ema20DistPct, emaThr, m.rsi9_5m, rsiThr, m.bbPercentB_5m, pbThr, samples,
+					false, "SYMBOL_HISTORY_NOT_READY|symbolSamples=" + samples);
+		}
+		if (!isFinite(rsiThr)) {
+			LOGGER.warn("EVENT=SYMBOL_THRESH_NOT_READY symbol={} symbolSamples={} field={}", state.symbol, samples, "rsi9");
+			return new Stage2VetoDecision(m.ema20DistPct, emaThr, m.rsi9_5m, rsiThr, m.bbPercentB_5m, pbThr, samples,
+					false, "SYMBOL_HISTORY_NOT_READY|symbolSamples=" + samples);
+		}
+		if (!isFinite(pbThr)) {
+			LOGGER.warn("EVENT=SYMBOL_THRESH_NOT_READY symbol={} symbolSamples={} field={}", state.symbol, samples, "bbPercentB");
+			return new Stage2VetoDecision(m.ema20DistPct, emaThr, m.rsi9_5m, rsiThr, m.bbPercentB_5m, pbThr, samples,
+					false, "SYMBOL_HISTORY_NOT_READY|symbolSamples=" + samples);
+		}
+		boolean emaHigh = m.ema20DistPct >= emaThr;
+		boolean rsiHigh = m.rsi9_5m >= rsiThr;
+		boolean pbHigh = m.bbPercentB_5m >= pbThr;
+		boolean veto = emaHigh && (rsiHigh || pbHigh);
+		String block = veto ? String.format("CHASING_OVERBOUGHT_VETO|ema20DistPct=%s|emaThr=%s|rsi9=%s|rsiThr=%s|bbPercentB=%s|pbThr=%s|symbolSamples=%d",
+				formatDouble(m.ema20DistPct), formatDouble(emaThr), formatDouble(m.rsi9_5m), formatDouble(rsiThr), formatDouble(m.bbPercentB_5m), formatDouble(pbThr), samples)
+				: null;
+		return new Stage2VetoDecision(m.ema20DistPct, emaThr, m.rsi9_5m, rsiThr, m.bbPercentB_5m, pbThr, samples, veto, block);
+	}
+
+	private static List<String> firstMissingReasons(Map<String, String> reasons) {
+		List<String> items = new ArrayList<>();
+		for (var e : reasons.entrySet()) {
+			items.add(e.getKey() + ":" + e.getValue());
+			if (items.size() >= 10) {
+				break;
+			}
+		}
+		return items;
+	}
+
+	private static int minSymbolsForGlobal(int activeSymbolsCount) {
+		return Math.max(1, (int) Math.ceil(activeSymbolsCount * GLOBAL_MIN_SYMBOL_SHARE));
+	}
+
+	private static Double median(double[] values) {
+		if (values == null || values.length == 0) {
+			return null;
+		}
+		double[] copy = values.clone();
+		java.util.Arrays.sort(copy);
+		int n = copy.length;
+		if ((n & 1) == 1) {
+			return copy[n / 2];
+		}
+		return (copy[n / 2 - 1] + copy[n / 2]) / 2.0;
+	}
+
+	private static Double percentile(Deque<Double> values, double q) {
+		if (values == null || values.isEmpty()) {
+			return null;
+		}
+		double[] arr = values.stream().mapToDouble(Double::doubleValue).toArray();
+		java.util.Arrays.sort(arr);
+		int idx = (int) Math.floor(q * (arr.length - 1));
+		return arr[Math.max(0, Math.min(idx, arr.length - 1))];
+	}
+
+	private static void pushRolling(Deque<Double> deque, double value, int maxSize) {
+		if (!Double.isFinite(value)) {
+			return;
+		}
+		deque.addLast(value);
+		if (deque.size() > maxSize) {
+			deque.removeFirst();
+		}
+	}
+
+	private static boolean isFinite(Double value) {
+		return value != null && Double.isFinite(value);
+	}
+
+	private static String formatDouble(Double value) {
+		return isFinite(value) ? String.format("%.8f", value) : "null";
 	}
 
 
@@ -707,7 +950,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			String matchedSetup,
 			String blockReason,
 			Metrics metrics,
-			LongSetupEval longSetupEval) {
+			LongSetupEval longSetupEval,
+			GlobalGateDecision globalGateDecision,
+			Stage2VetoDecision stage2VetoDecision) {
 		ObjectNode node = objectMapper.createObjectNode();
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
@@ -774,6 +1019,15 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
 		}
 
+		putGlobalGateFields(node, globalGateDecision);
+		putStage2Fields(node, stage2VetoDecision, state, globalGateDecision);
+		if (globalGateDecision != null && globalGateDecision.globalSamples() >= GLOBAL_BOOTSTRAP_SAMPLES) {
+			if (globalGateDecision.globalMedBw() == null || globalGateDecision.bwThr() == null
+					|| globalGateDecision.globalChopShare() == null || globalGateDecision.chopThr() == null) {
+				LOGGER.warn("EVENT=GLOBAL_FIELDS_UNEXPECTED_NULL closeTimeMs={} globalSamples={}", timeMs, globalGateDecision.globalSamples());
+			}
+		}
+
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
 		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
@@ -785,7 +1039,8 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 				invalid.add("WARMUP");
 			}
 		} else {
-			node.put("inputsValid", eval.signal());
+			boolean inputsValid = eval.signal();
+			node.put("inputsValid", inputsValid);
 			var invalid = node.putArray("inputsInvalidReasons");
 			if (eval.blockReason() != null && !eval.blockReason().isBlank() && !"ELIT_V1_LONG_MATCH".equals(eval.blockReason())) {
 				for (String reason : eval.blockReason().split("\\|")) {
@@ -793,6 +1048,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 						invalid.add(reason);
 					}
 				}
+			}
+			if (!inputsValid && invalid.isEmpty()) {
+				invalid.add("UNKNOWN_INVALID_INPUT");
 			}
 		}
 		node.put("elit.tpPct", TP_PCT);
@@ -813,6 +1071,61 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.putNull("shortEliteMatchedSetup");
 		node.putArray("shortEliteFailReasons");
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+	}
+
+
+	private void putGlobalGateFields(ObjectNode node, GlobalGateDecision g) {
+		if (g == null || g.globalSamples() < GLOBAL_BOOTSTRAP_SAMPLES) {
+			node.putNull("globalMedBw");
+			node.putNull("bwThr");
+			node.putNull("globalChopShare");
+			node.putNull("chopThr");
+			node.putNull("globalGateAllow");
+			node.putNull("includedSymbolsForGlobal");
+			node.putNull("minSymbolsForGlobal");
+			node.put("globalSamples", g == null ? 0 : g.globalSamples());
+			return;
+		}
+		putNullable(node, "globalMedBw", g.globalMedBw());
+		putNullable(node, "bwThr", g.bwThr());
+		putNullable(node, "globalChopShare", g.globalChopShare());
+		putNullable(node, "chopThr", g.chopThr());
+		if (g.allow() == null) {
+			node.putNull("globalGateAllow");
+		} else {
+			node.put("globalGateAllow", g.allow());
+		}
+		node.put("includedSymbolsForGlobal", g.includedSymbolsForGlobal());
+		node.put("minSymbolsForGlobal", g.minSymbolsForGlobal());
+		node.put("globalSamples", g.globalSamples());
+	}
+
+	private void putStage2Fields(ObjectNode node, Stage2VetoDecision d, SymbolState state, GlobalGateDecision globalGateDecision) {
+		if (globalGateDecision == null || globalGateDecision.globalSamples() < GLOBAL_BOOTSTRAP_SAMPLES || d == null) {
+			node.putNull("ema20DistPct");
+			node.putNull("emaThr");
+			node.putNull("rsi9");
+			node.putNull("rsiThr");
+			node.putNull("bbPercentB");
+			node.putNull("pbThr");
+			node.putNull("symbolSamples");
+			return;
+		}
+		putNullable(node, "ema20DistPct", d.ema20DistPct());
+		putNullable(node, "emaThr", d.emaThr());
+		putNullable(node, "rsi9", d.rsi9());
+		putNullable(node, "rsiThr", d.rsiThr());
+		putNullable(node, "bbPercentB", d.bbPercentB());
+		putNullable(node, "pbThr", d.pbThr());
+		node.put("symbolSamples", d.symbolSamples());
+	}
+
+	private void putNullable(ObjectNode node, String field, Double value) {
+		if (value == null || !Double.isFinite(value)) {
+			node.putNull(field);
+		} else {
+			node.put(field, value);
+		}
 	}
 
 
@@ -1185,6 +1498,26 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 	}
 
+	private record GlobalSymbolMetrics(double bwRatio, RegimeTag regimeTag) {
+	}
+
+	private record GlobalSnapshot(long closeTimeMs, Map<String, GlobalSymbolMetrics> symbolData,
+			Map<String, String> missingReasons) {
+		private GlobalSnapshot(long closeTimeMs) {
+			this(closeTimeMs, new HashMap<>(), new HashMap<>());
+		}
+	}
+
+	private record GlobalGateDecision(Double globalMedBw, Double bwThr, Double globalChopShare, Double chopThr,
+			Boolean allow, int includedSymbolsForGlobal, int minSymbolsForGlobal, long globalSamples,
+			boolean inputsReady, String notReadyBlockReason, String vetoBlockReason) {
+	}
+
+	private record Stage2VetoDecision(Double ema20DistPct, Double emaThr, Double rsi9, Double rsiThr,
+			Double bbPercentB, Double pbThr, int symbolSamples, boolean veto, String blockReason) {
+	}
+
+
 	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend) {
 		private static LongSetupEval empty() {
 			return new LongSetupEval(false, null, null, null, false);
@@ -1219,6 +1552,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private Long tpOrderId;
 		private String tpClientOrderId;
 		private Double prevEma20_5m;
+		private final Deque<Double> ema20DistPctHistory = new ArrayDeque<>();
+		private final Deque<Double> rsi9History = new ArrayDeque<>();
+		private final Deque<Double> bbPercentBHistory = new ArrayDeque<>();
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
 		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
