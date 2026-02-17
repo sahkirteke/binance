@@ -15,7 +15,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -54,1653 +56,2018 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
+	private static final AtomicBoolean ORDERFLOW_ACCESSORS_LOGGED = new AtomicBoolean(false);
+	private static final int MAX_OPEN_POSITIONS = 15;
+	private static final int MAX_NEW_POSITIONS_PER_BAR = 5;
+	private static final long RISK_RECONCILE_INTERVAL_MS = 45_000L;
+	private static final boolean ENABLE_GATE_A = true;
+	private static final String BTC_REF_SYMBOL = "BTCUSDT";
+	private static final double BTC_RET30_MIN = -0.0010;
+	private static final double BTC_RET60_MIN = -0.0020;
+	private static final long BTC_MAX_STALE_MS = 2 * FIVE_MIN_MS;
+	private static final int BTC_BARS_30 = 6;
+	private static final int BTC_BARS_60 = 12;
 
 
-// Global cap to avoid spraying too many concurrent positions/brackets.
-// One ENTRY typically creates a bracket (TP+SL), so capping OPEN POSITIONS acts as a practical cap on orders.
-private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
+    // BEGIN PB_EMA_PATCH
+    private static final double CHOP_PB_MAX = 0.80;
+    private static final double GLOBAL_PB_MAX = 1.15;
+    private static final double EMA_SIGNED_DIST_MAX = 0.015; // 1.5%
+	// Mini sanity test checklist:
+	// - CHOP + pb=0.81 -> NO_ENTRY + FAIL_PB_MAX_CHOP
+	// - TREND + pb=1.16 -> NO_ENTRY + FAIL_PB_MAX_GLOBAL
+	// - emaSignedDist=0.016 -> NO_ENTRY + FAIL_EMA_CHASE
+	// - pb/ema uygun + setup match -> ENTER_LONG
+	// - Eğer metrics.activeRegimeTag null ise onu UNKNOWN kabul et ve pbMaxUsed için GLOBAL_PB_MAX kullan.
+	// END PB_EMA_PATCH
 
-// Winrate boosters (derived from DECISION/TRADES analysis):
-// - Avoid CHOP upper-band longs (top-buy)
-// - Avoid volume spikes (panic entries)
-// - Avoid EMA chase (too far above EMA20)
-private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
+    private static final Path DECISION_DIR = Paths.get("signals", "decisions");
+    private static final Path TRADE_DIR = Paths.get("signals", "trades");
 
-	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
-	private static final Path TRADE_DIR = Paths.get("signals", "trades");
+    private final BinanceProperties binanceProperties;
+    private final EliteV1Properties props;
+    private final ObjectMapper objectMapper;
+    private final SymbolFilterService symbolFilterService;
+    private final WarmupProperties warmupProperties;
+    private final ApplicationContext applicationContext;
+    private final BinanceFuturesOrderClient orderClient;
+    private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
+    private final AtomicBoolean started = new AtomicBoolean(false);
+    private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
+    private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
+    private final ConcurrentHashMap<String, Boolean> localOpenPositionSymbols = new ConcurrentHashMap<>();
+    private final AtomicInteger cachedOpenPositionsCount = new AtomicInteger(0);
+    private final AtomicLong currentBarCloseTimeMs = new AtomicLong(-1L);
+    private final AtomicInteger entriesThisBar = new AtomicInteger(0);
+    private final AtomicLong lastRiskReconcileMs = new AtomicLong(0L);
+    private ZoneId zoneId;
+    private int requiredWarmup5m;
+    private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
+    private final AtomicBoolean warmupModeEnabled = new AtomicBoolean(false);
+    private volatile boolean warmupCompleted;
+    private final BookTickerStreamWatcher bookTickerStreamWatcher;
 
-	private final BinanceProperties binanceProperties;
-	private final EliteV1Properties props;
-	private final ObjectMapper objectMapper;
-	private final SymbolFilterService symbolFilterService;
-	private final WarmupProperties warmupProperties;
-	private final ApplicationContext applicationContext;
-	private final BinanceFuturesOrderClient orderClient;
-	private final Map<String, SymbolState> states = new ConcurrentHashMap<>();
-	private final AtomicBoolean started = new AtomicBoolean(false);
-	private final AsyncJsonlWriter writer = new AsyncJsonlWriter(20_000);
-	private final AtomicInteger globalOpenPositions = new AtomicInteger(0);
-	private ZoneId zoneId;
-	private int requiredWarmup5m;
-	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
-	private final AtomicBoolean warmupModeEnabled = new AtomicBoolean(false);
-	private volatile boolean warmupCompleted;
-	private final BookTickerStreamWatcher bookTickerStreamWatcher;
-
-	public EliteV1Strategy(BinanceProperties binanceProperties,
+    public EliteV1Strategy(BinanceProperties binanceProperties,
                            EliteV1Properties props,
                            ObjectMapper objectMapper,
                            SymbolFilterService symbolFilterService,
                            WarmupProperties warmupProperties,
                            ApplicationContext applicationContext,
                            BinanceFuturesOrderClient orderClient, BookTickerStreamWatcher bookTickerStreamWatcher) {
-		this.binanceProperties = binanceProperties;
-		this.props = props;
-		this.objectMapper = objectMapper;
-		this.symbolFilterService = symbolFilterService;
-		this.warmupProperties = warmupProperties;
-		this.applicationContext = applicationContext;
-		this.orderClient = orderClient;
+        this.binanceProperties = binanceProperties;
+        this.props = props;
+        this.objectMapper = objectMapper;
+        this.symbolFilterService = symbolFilterService;
+        this.warmupProperties = warmupProperties;
+        this.applicationContext = applicationContext;
+        this.orderClient = orderClient;
         this.bookTickerStreamWatcher = bookTickerStreamWatcher;
     }
 
-	@Override
-	public StrategyType type() {
-		return StrategyType.ELITE_V1;
-	}
+    @Override
+    public StrategyType type() {
+        return StrategyType.ELITE_V1;
+    }
 
-	@Override
-	public void start() {
-		ensureInitialized();
-	}
+    @Override
+    public void start() {
+        ensureInitialized();
+    }
 
-	private void ensureInitialized() {
-		if (!started.compareAndSet(false, true)) {
-			return;
-		}
-		validateConfig();
-		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
-		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
-				props.symbols().size(),
-				requiredWarmup5m,
-				warmupMode.name());
-		zoneId = ZoneId.of(props.zoneId());
-		writer.start();
-		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
-		symbolFilterService.preloadFilters(props.symbols()).subscribe();
-		startBookTickerWatcher();
-		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
-	}
+    private void ensureInitialized() {
+        if (!started.compareAndSet(false, true)) {
+            return;
+        }
+        validateConfig();
+        requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
+        LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
+                props.symbols().size(),
+                requiredWarmup5m,
+                warmupMode.name());
+        zoneId = ZoneId.of(props.zoneId());
+        writer.start();
+        props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
+        symbolFilterService.preloadFilters(props.symbols()).subscribe();
+        startBookTickerWatcher();
+        LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
+    }
 
-	@Override
-	public void stop() {
-		if (!started.compareAndSet(true, false)) {
-			return;
-		}
-		writer.stop();
-	}
+    @Override
+    public void stop() {
+        if (!started.compareAndSet(true, false)) {
+            return;
+        }
+        writer.stop();
+    }
 
-	@PreDestroy
-	public void onDestroy() {
-		stop();
-	}
+    @PreDestroy
+    public void onDestroy() {
+        stop();
+    }
 
-	public void onExternalClosedOneMinuteCandle(String symbol, Candle candle) {
-		ensureInitialized();
-		SymbolState state = resolveState(symbol);
-		onClosed1m(state, candle);
-	}
+    public void onExternalClosedOneMinuteCandle(String symbol, Candle candle) {
+        ensureInitialized();
+        SymbolState state = resolveState(symbol);
+        onClosed1m(state, candle);
+    }
 
-	public void flushWarmup(String symbol) {
-		ensureInitialized();
-		SymbolState state = resolveState(symbol);
-		BucketTransition transition = state.aggregator.flush();
-		applyCompletedFiveMinute(state, transition);
-	}
+    public void flushWarmup(String symbol) {
+        ensureInitialized();
+        SymbolState state = resolveState(symbol);
+        BucketTransition transition = state.aggregator.flush();
+        applyCompletedFiveMinute(state, transition);
+    }
 
-	public void warmupFiveMinuteCandle(String symbol, Candle bar5m) {
-		ensureInitialized();
-		SymbolState state = resolveState(symbol);
-		applyCompletedFiveMinute(state, new BucketTransition(bar5m, null, 0));
-	}
+    public void warmupFiveMinuteCandle(String symbol, Candle bar5m) {
+        ensureInitialized();
+        SymbolState state = resolveState(symbol);
+        applyCompletedFiveMinute(state, new BucketTransition(bar5m, null, 0));
+    }
 
-	public void setWarmupMode(boolean warmupMode) {
-		warmupModeEnabled.set(warmupMode);
-		warmupCompleted = false;
-	}
+    public void setWarmupMode(boolean warmupMode) {
+        warmupModeEnabled.set(warmupMode);
+        warmupCompleted = false;
+    }
 
-	public void enableOrdersAfterWarmup() {
-		warmupModeEnabled.set(false);
-		warmupCompleted = true;
-	}
+    public void enableOrdersAfterWarmup() {
+        warmupModeEnabled.set(false);
+        warmupCompleted = true;
+    }
 
-	public boolean isWarmupReady(String symbol) {
-		SymbolState state = resolveState(symbol);
-		return isBaselinesReady(state, state.indicators.metrics());
-	}
+    public boolean isWarmupReady(String symbol) {
+        SymbolState state = resolveState(symbol);
+        return isBaselinesReady(state, state.indicators.metrics());
+    }
 
-	public WarmupReadiness warmupReadiness(String symbol) {
-		SymbolState state = resolveState(symbol);
-		Metrics metrics = state.indicators.metrics();
-		boolean seeded = state.indicators.baselineIndicatorsSeeded();
-		if (state.seen5mCloses < requiredWarmup5m) {
-			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
-					"INSUFFICIENT_5M_BARS " + state.seen5mCloses + "/" + requiredWarmup5m);
-		}
-		if (!seeded || metrics == null) {
-			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
-					"BASELINE_NOT_SEEDED");
-		}
-		return WarmupReadiness.ready(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m);
-	}
+    public WarmupReadiness warmupReadiness(String symbol) {
+        SymbolState state = resolveState(symbol);
+        Metrics metrics = state.indicators.metrics();
+        boolean seeded = state.indicators.baselineIndicatorsSeeded();
+        if (state.seen5mCloses < requiredWarmup5m) {
+            return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
+                    "INSUFFICIENT_5M_BARS " + state.seen5mCloses + "/" + requiredWarmup5m);
+        }
+        if (!seeded || metrics == null) {
+            return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
+                    "BASELINE_NOT_SEEDED");
+        }
+        return WarmupReadiness.ready(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m);
+    }
 
-	private SymbolState resolveState(String symbol) {
-		return states.computeIfAbsent(symbol, SymbolState::new);
-	}
+    private SymbolState resolveState(String symbol) {
+        return states.computeIfAbsent(symbol, SymbolState::new);
+    }
 
 
-	private void onClosed1m(SymbolState state, Candle bar1m) {
-		state.seen1mCloses++;
-		state.last1m.addLast(bar1m);
-		if (state.last1m.size() > 300) {
-			state.last1m.removeFirst();
-		}
-		logWarmupProgressIfDue(state);
+    private void onClosed1m(SymbolState state, Candle bar1m) {
+        state.seen1mCloses++;
+        state.last1m.addLast(bar1m);
+        if (state.last1m.size() > 300) {
+            state.last1m.removeFirst();
+        }
+        logWarmupProgressIfDue(state);
 
-		BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
-		applyCompletedFiveMinute(state, transition);
-	}
+        BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
+        applyCompletedFiveMinute(state, transition);
+    }
 
-	private void applyCompletedFiveMinute(SymbolState state, BucketTransition transition) {
-		if (transition == null) {
-			return;
-		}
-		if (transition.incompleteBucketStartMs != null) {
-			LOGGER.debug("EVENT=INCOMPLETE_5M_BUCKET symbol={} bucketStartMs={} count={}",
-					state.symbol,
-					transition.incompleteBucketStartMs,
-					transition.incompleteCount);
-		}
-		Candle bar5m = transition.completedCandle;
-		if (bar5m == null) {
-			return;
-		}
-		state.seen5mCloses++;
-		state.last5m.addLast(bar5m);
-		if (state.last5m.size() > 500) {
-			state.last5m.removeFirst();
-		}
-		state.indicators.update(bar5m);
-		Metrics metrics = state.indicators.metrics();
-		if (metrics != null) {
-			RegimeTag rawRegime = rawRegime(metrics.bwRatio5m, metrics.macdRatio5m,
-					props.regime().chopBwRatioMax(), props.regime().chopMacdRatioMax());
-			RegimeTag activeRegime = state.regimeState.update(rawRegime,
-					props.regime().debounceBars(), props.regime().cooldownBars());
-			state.indicators.setRegimes(rawRegime, activeRegime);
-		}
-		evaluateAt5m(state, bar5m);
-	}
+    private void applyCompletedFiveMinute(SymbolState state, BucketTransition transition) {
+        if (transition == null) {
+            return;
+        }
+        if (transition.incompleteBucketStartMs != null) {
+            LOGGER.debug("EVENT=INCOMPLETE_5M_BUCKET symbol={} bucketStartMs={} count={}",
+                    state.symbol,
+                    transition.incompleteBucketStartMs,
+                    transition.incompleteCount);
+        }
+        Candle bar5m = transition.completedCandle;
+        if (bar5m == null) {
+            return;
+        }
+        state.seen5mCloses++;
+        state.last5m.addLast(bar5m);
+        if (state.last5m.size() > 500) {
+            state.last5m.removeFirst();
+        }
+        state.indicators.update(bar5m);
+        Metrics metrics = state.indicators.metrics();
+        if (metrics != null) {
+            RegimeTag rawRegime = rawRegime(metrics.bwRatio5m, metrics.macdRatio5m,
+                    props.regime().chopBwRatioMax(), props.regime().chopMacdRatioMax());
+            RegimeTag activeRegime = state.regimeState.update(rawRegime,
+                    props.regime().debounceBars(), props.regime().cooldownBars());
+            state.indicators.setRegimes(rawRegime, activeRegime);
+        }
+        evaluateAt5m(state, bar5m);
+    }
 
-	private void logWarmupProgressIfDue(SymbolState state) {
-		if (state.warmupDoneLogged || state.seen1mCloses < state.nextWarmupProgressLogAt1m) {
-			return;
-		}
-		boolean seeded = state.indicators.baselineIndicatorsSeeded();
-		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={} seen5m={}/{} seeded={} baselinesReady={} nextLogAt1m={}",
-				state.symbol,
-				state.seen1mCloses,
-				state.seen5mCloses,
-				requiredWarmup5m,
-				seeded,
-				state.baselinesReady,
-				state.nextWarmupProgressLogAt1m);
-		state.nextWarmupProgressLogAt1m += state.nextWarmupProgressLogAt1m < 60 ? 10 : 60;
-	}
+    private void logWarmupProgressIfDue(SymbolState state) {
+        if (state.warmupDoneLogged || state.seen1mCloses < state.nextWarmupProgressLogAt1m) {
+            return;
+        }
+        boolean seeded = state.indicators.baselineIndicatorsSeeded();
+        LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={} seen5m={}/{} seeded={} baselinesReady={} nextLogAt1m={}",
+                state.symbol,
+                state.seen1mCloses,
+                state.seen5mCloses,
+                requiredWarmup5m,
+                seeded,
+                state.baselinesReady,
+                state.nextWarmupProgressLogAt1m);
+        state.nextWarmupProgressLogAt1m += state.nextWarmupProgressLogAt1m < 60 ? 10 : 60;
+    }
 
-	private void evaluateAt5m(SymbolState state, Candle bar5m) {
-		rollDay(state, bar5m.closeTime());
-		Metrics metrics = state.indicators.metrics();
-		boolean baselinesReady = isBaselinesReady(state, metrics);
-		checkLiquidityHealth();
-		state.baselinesReady = baselinesReady;
-		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
-			state.warmupDoneLogged = true;
-			var at = Instant.ofEpochMilli(bar5m.closeTime());
-			var atTr = at.atZone(zoneId);
-			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} timeUtc={} timeTr={}",
-					state.symbol,
-					state.seen1mCloses,
-					state.seen5mCloses,
-					requiredWarmup5m,
-					bar5m.closeTime(),
-					at.toString(),
-					ISO_OFFSET_FMT.format(atTr));
-			LOGGER.info("warm up bitti strategy=ELITE_V1 symbol={} seen1m={} seen5m={} atMs={}",
-					state.symbol,
-					state.seen1mCloses,
-					state.seen5mCloses,
-					bar5m.closeTime());
-			LOGGER.info("EVENT=ATR_BASELINE_OK strategy=ELITE_V1 symbol={} atr14={} atrEma={} atrRatio={}",
-					state.symbol,
-					metrics.atr14,
-					metrics.atrEma_5m,
-					metrics.atrRatio5m);
-		}
-		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
-			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null);
+    private void evaluateAt5m(SymbolState state, Candle bar5m) {
+        rollDay(state, bar5m.closeTime());
+        Metrics metrics = state.indicators.metrics();
+        boolean baselinesReady = isBaselinesReady(state, metrics);
+        checkLiquidityHealth();
+        state.baselinesReady = baselinesReady;
+        if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
+            state.warmupDoneLogged = true;
+            var at = Instant.ofEpochMilli(bar5m.closeTime());
+            var atTr = at.atZone(zoneId);
+            LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} timeUtc={} timeTr={}",
+                    state.symbol,
+                    state.seen1mCloses,
+                    state.seen5mCloses,
+                    requiredWarmup5m,
+                    bar5m.closeTime(),
+                    at.toString(),
+                    ISO_OFFSET_FMT.format(atTr));
+            LOGGER.info("warm up bitti strategy=ELITE_V1 symbol={} seen1m={} seen5m={} atMs={}",
+                    state.symbol,
+                    state.seen1mCloses,
+                    state.seen5mCloses,
+                    bar5m.closeTime());
+            LOGGER.info("EVENT=ATR_BASELINE_OK strategy=ELITE_V1 symbol={} atr14={} atrEma={} atrRatio={}",
+                    state.symbol,
+                    metrics.atr14,
+                    metrics.atrEma_5m,
+                    metrics.atrRatio5m);
+        }
+        if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
+            writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null, null);
+            if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
+                state.prevEma20_5m = metrics.ema20_5m;
+            }
+            return;
+        }
+
+		if (isBtcRefSymbol(state.symbol)) {
+			writeDecision(state, bar5m, "NO_ENTRY", null, "BTC_REFERENCE_SYMBOL", metrics, null, null);
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
 				state.prevEma20_5m = metrics.ema20_5m;
 			}
 			return;
 		}
 
-		if (state.positionSide == Side.LONG) {
-			boolean exited = props.mode() == EliteV1Properties.Mode.PAPER
-					? checkPaperExitOnFiveMinute(state, bar5m)
-					: checkLiveBracketExit(state, bar5m);
-			if (exited) {
-				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
-				return;
+        if (state.positionSide == Side.LONG) {
+            boolean exited = props.mode() == EliteV1Properties.Mode.PAPER
+                    ? checkPaperExitOnFiveMinute(state, bar5m)
+                    : checkLiveBracketExit(state, bar5m);
+            if (exited) {
+                state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+                return;
+            }
+        }
+
+        reconcileRiskStateIfDue();
+        PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide, state.symbol, bar5m.closeTime());
+        if (preCheck.action != DecisionAction.CONTINUE) {
+            writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null, preCheck.allowReason);
+            return;
+        }
+
+        LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
+        if (longEval.signal()) {
+            openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
+            writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval, "ENTRY_ALLOWED");
+            return;
+        }
+        writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval, null);
+        state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+    }
+
+    private void rollDay(SymbolState state, long closeTimeMs) {
+        LocalDate day = Instant.ofEpochMilli(closeTimeMs).atZone(zoneId).toLocalDate();
+        if (!Objects.equals(day, state.dayKey)) {
+            state.dayKey = day;
+            state.entriesToday = 0;
+        }
+    }
+
+    private boolean isBaselinesReady(SymbolState state, Metrics metrics) {
+        return state.seen5mCloses >= requiredWarmup5m
+                && metrics != null
+                && state.indicators.baselineIndicatorsSeeded();
+    }
+
+
+    static int resolveRequiredWarmup5m(EliteV1Properties props, WarmupProperties warmupProperties) {
+        if (props.warmup() != null && props.warmup().enabled()) {
+            return Math.max(props.warmup().candles5m(), 0);
+        }
+        return Math.max(warmupProperties.candles5m(), 0);
+    }
+
+    PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide, String symbol, long barCloseTimeMs) {
+        if (!baselinesReady) {
+            return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null, null);
+        }
+        if (positionSide != Side.NONE) {
+            return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null, null);
+        }
+        if (ENABLE_GATE_A && !isBtcRefSymbol(symbol)) {
+			BtcGateSnapshot btcGateSnapshot = computeBtcGateSnapshot(barCloseTimeMs);
+			if (!btcGateSnapshot.ready()) {
+				return new PreCheckAction(DecisionAction.NO_ENTRY,
+						"BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars",
+						null);
 			}
-		}
-
-		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
-		if (preCheck.action != DecisionAction.CONTINUE) {
-			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null);
-			return;
-		}
-
-		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
-		if (longEval.signal()) {
-			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval);
-			return;
-		}
-		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval);
-		state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
-	}
-
-	private void rollDay(SymbolState state, long closeTimeMs) {
-		LocalDate day = Instant.ofEpochMilli(closeTimeMs).atZone(zoneId).toLocalDate();
-		if (!Objects.equals(day, state.dayKey)) {
-			state.dayKey = day;
-			state.entriesToday = 0;
-		}
-	}
-
-	private boolean isBaselinesReady(SymbolState state, Metrics metrics) {
-		return state.seen5mCloses >= requiredWarmup5m
-				&& metrics != null
-				&& state.indicators.baselineIndicatorsSeeded();
-	}
-
-
-	static int resolveRequiredWarmup5m(EliteV1Properties props, WarmupProperties warmupProperties) {
-		if (props.warmup() != null && props.warmup().enabled()) {
-			return Math.max(props.warmup().candles5m(), 0);
-		}
-		return Math.max(warmupProperties.candles5m(), 0);
-	}
-
-	PreCheckAction evaluatePreChecks(boolean baselinesReady, Side positionSide) {
-		if (!baselinesReady) {
-			return new PreCheckAction(DecisionAction.INPUTS_NOT_READY, null);
-		}
-		if (positionSide != Side.NONE) {
-			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null);
-		}
-		return new PreCheckAction(DecisionAction.CONTINUE, null);
-	}
-
-	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
-		List<String> failReasons = new ArrayList<>();
-
-		Double takerBuyRatio = null;
-		OrderflowSnapshot orderflow = OrderflowSnapshot.fromCandle(bar5m);
-		if (orderflow == null || bar5m.volume() <= 0.0 || orderflow.takerBuyBaseVolume() == null || !Double.isFinite(orderflow.takerBuyBaseVolume())) {
-			failReasons.add("FAIL_ORDERFLOW_MISSING");
-		} else {
-			takerBuyRatio = orderflow.takerBuyBaseVolume() / bar5m.volume();
-			if (!Double.isFinite(takerBuyRatio) || takerBuyRatio <= 0.60) {
-				failReasons.add("FAIL_TAKER_BUY_RATIO");
+			if (!btcGateSnapshot.ok()) {
+				String regime = btcGateSnapshot.activeRegimeTag() == null ? "null" : btcGateSnapshot.activeRegimeTag();
+				String ret30 = btcGateSnapshot.ret30() == null ? "null" : String.format(Locale.ROOT, "%.6f", btcGateSnapshot.ret30());
+				String ret60 = btcGateSnapshot.ret60() == null ? "null" : String.format(Locale.ROOT, "%.6f", btcGateSnapshot.ret60());
+				return new PreCheckAction(DecisionAction.NO_ENTRY,
+						"BTC_GATEA_FAIL|regime=" + regime + "|ret30=" + ret30 + "|ret60=" + ret60,
+						null);
 			}
-		}
+		}int openPositionsCount = getOpenPositionsCount();
+        if (openPositionsCount >= MAX_OPEN_POSITIONS) {
+            return new PreCheckAction(DecisionAction.NO_ENTRY, "POSITION_LIMIT_15_OPEN", null);
+        }
+        int entriesForBar = getEntriesThisBar(barCloseTimeMs);
+        if (entriesForBar >= MAX_NEW_POSITIONS_PER_BAR) {
+            return new PreCheckAction(DecisionAction.NO_ENTRY, "MAX_NEW_POSITIONS_PER_BAR_5", null);
+        }
+        return new PreCheckAction(DecisionAction.CONTINUE, null, "ENTRY_ALLOWED");
+    }
 
-		Double imbalance = null;
-		LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
-		if (snapshot == null) {
-			failReasons.add("FAIL_LIQUIDITY_MISSING");
-		} else {
-			long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
-			if (ageMs > LIQUIDITY_MAX_AGE_MS) {
-				failReasons.add("FAIL_LIQUIDITY_MISSING");
-			} else {
-				double bidQty = snapshot.bestBidQty();
-				double askQty = snapshot.bestAskQty();
-				if (!Double.isFinite(bidQty) || !Double.isFinite(askQty) || bidQty < 0.0 || askQty < 0.0) {
-					failReasons.add("FAIL_LIQUIDITY_MISSING");
-				} else {
-					double denom = bidQty + askQty;
-					if (denom <= 0.0) {
-						failReasons.add("FAIL_LIQUIDITY_MISSING");
-					} else {
-						imbalance = (bidQty - askQty) / denom;
-						if (!Double.isFinite(imbalance) || imbalance <= 0.15) {
-							failReasons.add("FAIL_IMBALANCE");
-						}
-					}
+    int getOpenPositionsCount() {
+        return Math.max(cachedOpenPositionsCount.get(), localOpenPositionSymbols.size());
+    }
+
+    private int getEntriesThisBar(long barCloseTimeMs) {
+        if (barCloseTimeMs <= 0L) {
+            return entriesThisBar.get();
+        }
+        long prev = currentBarCloseTimeMs.get();
+        if (prev != barCloseTimeMs && currentBarCloseTimeMs.compareAndSet(prev, barCloseTimeMs)) {
+            entriesThisBar.set(0);
+        }
+        return entriesThisBar.get();
+    }
+
+    private boolean isBtcRefSymbol(String symbol) {
+		return symbol != null && BTC_REF_SYMBOL.equalsIgnoreCase(symbol);
+	}
+
+	private BtcGateSnapshot computeBtcGateSnapshot(long decisionTimeMs) {
+		if (!ENABLE_GATE_A) {
+			return new BtcGateSnapshot(false, true, true, null, null, null, null, null, null, null);
+		}
+		SymbolState btcState = states.get(BTC_REF_SYMBOL);
+		if (btcState == null || btcState.last5m == null || btcState.last5m.isEmpty()) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", null, null, null, null, null, null);
+		}
+		Metrics btcMetrics = btcState.indicators.metrics();
+		String btcRegime = btcMetrics == null || btcMetrics.activeRegimeTag == null ? null : btcMetrics.activeRegimeTag.name();
+		List<Candle> btcBars = new ArrayList<>();
+		for (Iterator<Candle> it = btcState.last5m.descendingIterator(); it.hasNext();) {
+			Candle c = it.next();
+			if (c.closeTime() <= decisionTimeMs) {
+				btcBars.add(c);
+				if (btcBars.size() >= BTC_BARS_60 + 1) {
+					break;
 				}
 			}
 		}
+		if (btcBars.size() < BTC_BARS_60 + 1) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", btcRegime, null, null, null, null, null);
+		}
+		Candle latest = btcBars.get(0);
+		long staleMs = Math.max(0L, decisionTimeMs - latest.closeTime());
+		if (staleMs > BTC_MAX_STALE_MS) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", btcRegime, latest.closeTime(), latest.close(), null, null, staleMs);
+		}
+		double closeNow = latest.close();
+		double close30 = btcBars.get(BTC_BARS_30).close();
+		double close60 = btcBars.get(BTC_BARS_60).close();
+		if (!Double.isFinite(closeNow) || !Double.isFinite(close30) || !Double.isFinite(close60)
+				|| closeNow <= 0.0 || close30 <= 0.0 || close60 <= 0.0) {
+			return new BtcGateSnapshot(true, false, false, "BTC_GATEA_NOT_READY|missing_or_stale_or_insufficient_bars", btcRegime, latest.closeTime(), closeNow, null, null, staleMs);
+		}
+		double ret30 = closeNow / close30 - 1.0;
+		double ret60 = closeNow / close60 - 1.0;
+		boolean regimeOk = RegimeTag.TREND.name().equals(btcRegime);
+		boolean ok = regimeOk && ret30 > BTC_RET30_MIN && ret60 > BTC_RET60_MIN;
+		String blockReason = ok ? null : "BTC_GATEA_FAIL|regime=" + (btcRegime == null ? "null" : btcRegime)
+				+ "|ret30=" + String.format(Locale.ROOT, "%.6f", ret30)
+				+ "|ret60=" + String.format(Locale.ROOT, "%.6f", ret60);
+		return new BtcGateSnapshot(true, true, ok, blockReason, btcRegime, latest.closeTime(), closeNow, ret30, ret60, staleMs);
+	}private void reconcileRiskStateIfDue() {
+        long now = System.currentTimeMillis();
+        long last = lastRiskReconcileMs.get();
+        if (now - last < RISK_RECONCILE_INTERVAL_MS) {
+            return;
+        }
+        if (!lastRiskReconcileMs.compareAndSet(last, now)) {
+            return;
+        }
+        try {
+            reconcileOpenPositionsFromRest();
+        } catch (RuntimeException ex) {
+            LOGGER.debug("EVENT=RISK_RECONCILE_SKIPPED reason={}", ex.getMessage());
+        }
+    }
 
-		boolean ema20SlopeDown = m.ema20SlopeDown;
-		if (state != null
-				&& state.prevEma20_5m != null
-				&& Double.isFinite(m.ema20_5m)
-				&& Double.isFinite(state.prevEma20_5m)) {
-			ema20SlopeDown = m.ema20_5m < state.prevEma20_5m;
-		}
-		boolean isDownTrend = m.activeRegimeTag == RegimeTag.TREND
-				&& m.close5m < m.ema20_5m
-				&& m.macdDelta < 0.0
-				&& ema20SlopeDown;
-		if (isDownTrend) {
-			failReasons.add("FAIL_DOWN_TREND");
-		}
+    private void reconcileOpenPositionsFromRest() {
+        int openPositions = 0;
+        for (String symbol : props.symbols()) {
+            try {
+                BinanceFuturesOrderClient.ExchangePosition position = orderClient.fetchPosition(symbol).block();
+                if (position == null || position.positionAmt() == null || position.positionAmt().signum() == 0) {
+                    localOpenPositionSymbols.remove(symbol);
+                    continue;
+                }
+                openPositions++;
+                localOpenPositionSymbols.put(symbol, Boolean.TRUE);
+            } catch (RuntimeException ex) {
+                LOGGER.debug("EVENT=POSITION_RECONCILE_FAIL symbol={} reason={}", symbol, ex.getMessage());
+            }
+        }
+        cachedOpenPositionsCount.set(Math.max(openPositions, 0));
+    }
+
+    private void markPositionOpen(String symbol) {
+        if (symbol == null || symbol.isBlank()) {
+            return;
+        }
+        localOpenPositionSymbols.put(symbol, Boolean.TRUE);
+        cachedOpenPositionsCount.updateAndGet(v -> Math.max(v, localOpenPositionSymbols.size()));
+    }
+
+    private void markPositionClosed(String symbol) {
+        if (symbol == null || symbol.isBlank()) {
+            return;
+        }
+        localOpenPositionSymbols.remove(symbol);
+        cachedOpenPositionsCount.set(Math.max(localOpenPositionSymbols.size(), 0));
+    }
+
+    private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
+        List<String> failReasons = new ArrayList<>();
+
+        // BEGIN PB_EMA_PATCH
+        RegimeTag activeRegimeTag = m.activeRegimeTag;
+        double pb = m.bbPercentB_5m;
+        double pbMaxUsed = activeRegimeTag == RegimeTag.CHOP ? CHOP_PB_MAX : GLOBAL_PB_MAX;
+        if (!Double.isFinite(pb)) {
+            failReasons.add("FAIL_PB_MISSING");
+        } else if (pb > pbMaxUsed) {
+            failReasons.add(activeRegimeTag == RegimeTag.CHOP ? "FAIL_PB_MAX_CHOP" : "FAIL_PB_MAX_GLOBAL");
+        }
+
+        double ema = m.ema20_5m;
+        Double emaSignedDist = null;
+        if (!Double.isFinite(ema) || ema <= 0.0) {
+            failReasons.add("FAIL_EMA_MISSING");
+        } else {
+            emaSignedDist = (m.close5m - ema) / ema;
+            if (emaSignedDist > EMA_SIGNED_DIST_MAX) {
+                failReasons.add("FAIL_EMA_CHASE");
+            }
+        }
+        // END PB_EMA_PATCH
+
+        Double takerBuyRatio = null;
+        OrderflowSnapshot orderflow = OrderflowSnapshot.fromCandle(bar5m);
+        if (orderflow == null || bar5m.volume() <= 0.0 || orderflow.takerBuyBaseVolume() == null || !Double.isFinite(orderflow.takerBuyBaseVolume())) {
+            failReasons.add("FAIL_ORDERFLOW_MISSING");
+        } else {
+            takerBuyRatio = orderflow.takerBuyBaseVolume() / bar5m.volume();
+            if (!Double.isFinite(takerBuyRatio) || takerBuyRatio <= 0.60) {
+                failReasons.add("FAIL_TAKER_BUY_RATIO");
+            }
+        }
+
+        Double imbalance = null;
+        LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
+        if (snapshot == null) {
+            failReasons.add("FAIL_LIQUIDITY_MISSING");
+        } else {
+            long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
+            if (ageMs > LIQUIDITY_MAX_AGE_MS) {
+                failReasons.add("FAIL_LIQUIDITY_MISSING");
+            } else {
+                double bidQty = snapshot.bestBidQty();
+                double askQty = snapshot.bestAskQty();
+                if (!Double.isFinite(bidQty) || !Double.isFinite(askQty) || bidQty < 0.0 || askQty < 0.0) {
+                    failReasons.add("FAIL_LIQUIDITY_MISSING");
+                } else {
+                    double denom = bidQty + askQty;
+                    if (denom <= 0.0) {
+                        failReasons.add("FAIL_LIQUIDITY_MISSING");
+                    } else {
+                        imbalance = (bidQty - askQty) / denom;
+                        if (!Double.isFinite(imbalance) || imbalance <= 0.15) {
+                            failReasons.add("FAIL_IMBALANCE");
+                        }
+                    }
+                }
+            }
+        }
+
+        boolean ema20SlopeDown = m.ema20SlopeDown;
+        if (state != null
+                && state.prevEma20_5m != null
+                && Double.isFinite(m.ema20_5m)
+                && Double.isFinite(state.prevEma20_5m)) {
+            ema20SlopeDown = m.ema20_5m < state.prevEma20_5m;
+        }
+        boolean isDownTrend = m.activeRegimeTag == RegimeTag.TREND
+                && m.close5m < m.ema20_5m
+                && m.macdDelta < 0.0
+                && ema20SlopeDown;
+        if (isDownTrend) {
+            failReasons.add("FAIL_DOWN_TREND");
+        }
 
 
-		boolean signal = failReasons.isEmpty();
-		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
-	}
+        boolean signal = failReasons.isEmpty();
+        return new LongSetupEval(signal,
+                signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons),
+                takerBuyRatio,
+                imbalance,
+                isDownTrend,
+                pbMaxUsed,
+                emaSignedDist,
+                EMA_SIGNED_DIST_MAX);
+    }
 
 
-	private void openPosition(SymbolState state,
-			Candle bar5m,
-			Side side,
-			String matchedSetup,
-			RegimeTag activeRegimeTag) {
-		double tickSize = resolveTickSize(state.symbol);
-		String bracketId = UUID.randomUUID().toString();
-		double estimatedEntryPrice = bar5m.close();
-		double qty = Math.max(props.paperNotionalUsd() / Math.max(estimatedEntryPrice, 1e-9), 1e-9);
-		double entryPrice = estimatedEntryPrice;
-		String entryOrderClientId = "ELITE_ENTRY_" + state.symbol + "_" + bracketId;
-		Long entryOrderId = null;
+    private void openPosition(SymbolState state,
+                              Candle bar5m,
+                              Side side,
+                              String matchedSetup,
+                              RegimeTag activeRegimeTag) {
+        double tickSize = resolveTickSize(state.symbol);
+        String bracketId = UUID.randomUUID().toString();
+        double estimatedEntryPrice = bar5m.close();
+        double qty = Math.max(props.paperNotionalUsd() / Math.max(estimatedEntryPrice, 1e-9), 1e-9);
+        double entryPrice = estimatedEntryPrice;
+        String entryOrderClientId = "ELITE_ENTRY_" + state.symbol + "_" + bracketId;
+        Long entryOrderId = null;
 
-		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			if (side != Side.LONG) {
-				LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-				return;
-			}
-			String entrySide = "BUY";
-			OrderResponse entryResponse = orderClient.placeMarketOrder(
-					state.symbol,
-					entrySide,
-					BigDecimal.valueOf(qty),
-					null,
-					entryOrderClientId).block();
-			if (entryResponse == null || entryResponse.orderId() == null) {
-				LOGGER.warn("EVENT=ENTRY_FAILED symbol={} side={} reason=NULL_RESPONSE", state.symbol, side);
-				return;
-			}
-			entryOrderId = entryResponse.orderId();
-			if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
-				entryPrice = entryResponse.avgPrice().doubleValue();
-			}
-		}
+        if (props.mode() == EliteV1Properties.Mode.LIVE) {
+            if (side != Side.LONG) {
+                LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
+                return;
+            }
+            String entrySide = "BUY";
+            OrderResponse entryResponse = orderClient.placeMarketOrder(
+                    state.symbol,
+                    entrySide,
+                    BigDecimal.valueOf(qty),
+                    null,
+                    entryOrderClientId).block();
+            if (entryResponse == null || entryResponse.orderId() == null) {
+                LOGGER.warn("EVENT=ENTRY_FAILED symbol={} side={} reason=NULL_RESPONSE", state.symbol, side);
+                return;
+            }
+            entryOrderId = entryResponse.orderId();
+            if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
+                entryPrice = entryResponse.avgPrice().doubleValue();
+            }
+        }
 
-		double tpRaw;
-		double slRaw;
-		double tpPrice;
-		double slPrice;
-		if (side != Side.LONG) {
-			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-			return;
-		}
-		tpRaw = entryPrice * (1.0 + TP_PCT);
-		slRaw = entryPrice * (1.0 - SL_PCT);
-		tpPrice = roundUp(tpRaw, tickSize);
-		slPrice = roundDown(slRaw, tickSize);
+        double tpRaw;
+        double slRaw;
+        double tpPrice;
+        double slPrice;
+        if (side != Side.LONG) {
+            LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
+            return;
+        }
+        tpRaw = entryPrice * (1.0 + TP_PCT);
+        slRaw = entryPrice * (1.0 - SL_PCT);
+        tpPrice = roundUp(tpRaw, tickSize);
+        slPrice = roundDown(slRaw, tickSize);
 
-		Long slOrderId = null;
-		Long tpOrderId = null;
-		String slClientOrderId = "ELITE_SL_" + state.symbol + "_" + bracketId;
-		String tpClientOrderId = "ELITE_TP_" + state.symbol + "_" + bracketId;
-		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			String exitSide = "SELL";
-			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
-					state.symbol,
-					exitSide,
-					BigDecimal.valueOf(slPrice),
-					"MARK_PRICE",
-					slClientOrderId).block();
-			OrderResponse tpResponse = orderClient.placeTakeProfitMarketClosePositionOrder(
-					state.symbol,
-					exitSide,
-					BigDecimal.valueOf(tpPrice),
-					"MARK_PRICE",
-					tpClientOrderId).block();
-			if (slResponse == null || slResponse.orderId() == null || tpResponse == null || tpResponse.orderId() == null) {
-				LOGGER.warn("EVENT=BRACKET_PLACE_FAIL symbol={} bracketId={}", state.symbol, bracketId);
-				return;
-			}
-			slOrderId = slResponse.orderId();
-			tpOrderId = tpResponse.orderId();
-			LOGGER.info("EVENT=BRACKET_PLACED symbol={} bracketId={} slStop={} tpStop={} slOrderId={} tpOrderId={}",
-					state.symbol,
-					bracketId,
-					slPrice,
-					tpPrice,
-					slOrderId,
-					tpOrderId);
-		}
+        Long slOrderId = null;
+        Long tpOrderId = null;
+        String slClientOrderId = "ELITE_SL_" + state.symbol + "_" + bracketId;
+        String tpClientOrderId = "ELITE_TP_" + state.symbol + "_" + bracketId;
+        if (props.mode() == EliteV1Properties.Mode.LIVE) {
+            String exitSide = "SELL";
+            OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
+                    state.symbol,
+                    exitSide,
+                    BigDecimal.valueOf(slPrice),
+                    "MARK_PRICE",
+                    slClientOrderId).block();
+            OrderResponse tpResponse = orderClient.placeTakeProfitMarketClosePositionOrder(
+                    state.symbol,
+                    exitSide,
+                    BigDecimal.valueOf(tpPrice),
+                    "MARK_PRICE",
+                    tpClientOrderId).block();
+            if (slResponse == null || slResponse.orderId() == null || tpResponse == null || tpResponse.orderId() == null) {
+                LOGGER.warn("EVENT=BRACKET_PLACE_FAIL symbol={} bracketId={}", state.symbol, bracketId);
+                return;
+            }
+            slOrderId = slResponse.orderId();
+            tpOrderId = tpResponse.orderId();
+            LOGGER.info("EVENT=BRACKET_PLACED symbol={} bracketId={} slStop={} tpStop={} slOrderId={} tpOrderId={}",
+                    state.symbol,
+                    bracketId,
+                    slPrice,
+                    tpPrice,
+                    slOrderId,
+                    tpOrderId);
+        }
 
-		state.positionSide = side;
-		state.entryPrice = entryPrice;
-		state.qty = qty;
-		state.entryTimeMs = bar5m.closeTime();
-		state.tpPrice = tpPrice;
-		state.slPrice = slPrice;
-		state.tpHitTimeMs = null;
-		state.slHitTimeMs = null;
-		state.tpHitBar1m = null;
-		state.slHitBar1m = null;
-		state.bracketId = bracketId;
-		state.entryOrderId = entryOrderId;
-		state.entryClientOrderId = entryOrderClientId;
-		state.slOrderId = slOrderId;
-		state.slClientOrderId = slClientOrderId;
-		state.tpOrderId = tpOrderId;
-		state.tpClientOrderId = tpClientOrderId;
-		state.entriesToday++;
-		globalOpenPositions.incrementAndGet();
+        state.positionSide = side;
+        state.entryPrice = entryPrice;
+        state.qty = qty;
+        state.entryTimeMs = bar5m.closeTime();
+        state.tpPrice = tpPrice;
+        state.slPrice = slPrice;
+        state.tpHitTimeMs = null;
+        state.slHitTimeMs = null;
+        state.tpHitBar1m = null;
+        state.slHitBar1m = null;
+        state.bracketId = bracketId;
+        state.entryOrderId = entryOrderId;
+        state.entryClientOrderId = entryOrderClientId;
+        state.slOrderId = slOrderId;
+        state.slClientOrderId = slClientOrderId;
+        state.tpOrderId = tpOrderId;
+        state.tpClientOrderId = tpClientOrderId;
+        state.entriesToday++;
+        globalOpenPositions.incrementAndGet();
+        markPositionOpen(state.symbol);
+        entriesThisBar.incrementAndGet();
 
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", "ENTRY");
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
-		node.put("side", side.name());
-		node.put("entryPrice", entryPrice);
-		node.put("qty", qty);
-		node.put("tpPrice", tpPrice);
-		node.put("slPrice", slPrice);
-		node.put("tpRaw", tpRaw);
-		node.put("slRaw", slRaw);
-		node.put("tickSize", tickSize);
-		node.put("matchedSetup", matchedSetup);
-		node.put("activeRegimeTag", activeRegimeTag.name());
-		node.put("elit.tpPct", TP_PCT);
-		node.put("elit.slPct", SL_PCT);
-		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
-		if (entryOrderId != null) {
-			node.put("entryOrderId", entryOrderId);
-		}
-		if (slOrderId != null) {
-			node.put("slOrderId", slOrderId);
-		}
-		if (tpOrderId != null) {
-			node.put("tpOrderId", tpOrderId);
-		}
-		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
-	}
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("type", "ENTRY");
+        node.put("symbol", state.symbol);
+        node.put("time", ISO_OFFSET_FMT.format(Instant.ofEpochMilli(bar5m.closeTime()).atZone(zoneId)));
+        node.put("side", side.name());
+        node.put("entryPrice", entryPrice);
+        node.put("qty", qty);
+        node.put("tpPrice", tpPrice);
+        node.put("slPrice", slPrice);
+        node.put("tpRaw", tpRaw);
+        node.put("slRaw", slRaw);
+        node.put("tickSize", tickSize);
+        node.put("matchedSetup", matchedSetup);
+        node.put("activeRegimeTag", activeRegimeTag.name());
+        node.put("elit.tpPct", TP_PCT);
+        node.put("elit.slPct", SL_PCT);
+        node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+        if (entryOrderId != null) {
+            node.put("entryOrderId", entryOrderId);
+        }
+        if (slOrderId != null) {
+            node.put("slOrderId", slOrderId);
+        }
+        if (tpOrderId != null) {
+            node.put("tpOrderId", tpOrderId);
+        }
+        writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+    }
 
-	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
-		if (state.positionSide == Side.NONE || state.bracketId == null || state.slOrderId == null || state.tpOrderId == null) {
-			return false;
-		}
-		Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(state.symbol).block();
-		if (openOrders == null) {
-			return false;
-		}
-		boolean slOpen = openOrders.containsKey(state.slOrderId);
-		boolean tpOpen = openOrders.containsKey(state.tpOrderId);
-		if (slOpen && tpOpen) {
-			return false;
-		}
-		if (!slOpen) {
-			OrderResponse sl = orderClient.fetchOrder(state.symbol, state.slOrderId).block();
-			if (sl != null && "FILLED".equalsIgnoreCase(sl.status())) {
-				handleBracketFill(state, "SL_ORDER_FILLED", state.slOrderId, state.slClientOrderId, state.tpOrderId, sl, oneMinuteBar.closeTime());
-				return true;
-			}
-		}
-		if (!tpOpen) {
-			OrderResponse tp = orderClient.fetchOrder(state.symbol, state.tpOrderId).block();
-			if (tp != null && "FILLED".equalsIgnoreCase(tp.status())) {
-				handleBracketFill(state, "TP_ORDER_FILLED", state.tpOrderId, state.tpClientOrderId, state.slOrderId, tp, oneMinuteBar.closeTime());
-				return true;
-			}
-		}
-		return false;
-	}
+    private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
+        if (state.positionSide == Side.NONE || state.bracketId == null || state.slOrderId == null || state.tpOrderId == null) {
+            return false;
+        }
+        Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(state.symbol).block();
+        if (openOrders == null) {
+            return false;
+        }
+        boolean slOpen = openOrders.containsKey(state.slOrderId);
+        boolean tpOpen = openOrders.containsKey(state.tpOrderId);
+        if (slOpen && tpOpen) {
+            return false;
+        }
+        if (!slOpen) {
+            OrderResponse sl = orderClient.fetchOrder(state.symbol, state.slOrderId).block();
+            if (sl != null && "FILLED".equalsIgnoreCase(sl.status())) {
+                handleBracketFill(state, "SL_ORDER_FILLED", state.slOrderId, state.slClientOrderId, state.tpOrderId, sl, oneMinuteBar.closeTime());
+                return true;
+            }
+        }
+        if (!tpOpen) {
+            OrderResponse tp = orderClient.fetchOrder(state.symbol, state.tpOrderId).block();
+            if (tp != null && "FILLED".equalsIgnoreCase(tp.status())) {
+                handleBracketFill(state, "TP_ORDER_FILLED", state.tpOrderId, state.tpClientOrderId, state.slOrderId, tp, oneMinuteBar.closeTime());
+                return true;
+            }
+        }
+        return false;
+    }
 
-	private void handleBracketFill(SymbolState state,
-			String reason,
-			Long exitOrderId,
-			String exitClientOrderId,
-			Long otherOrderId,
-			OrderResponse filledOrder,
-			long closeTimeMs) {
-		if (otherOrderId != null) {
-			try {
-				orderClient.cancelOrder(state.symbol, otherOrderId).block();
-				LOGGER.info("EVENT=BRACKET_CANCEL_OTHER symbol={} canceledOrderId={}", state.symbol, otherOrderId);
-			} catch (Exception ignored) {
-			}
-		}
-		double exitPrice = filledOrder != null && filledOrder.avgPrice() != null && filledOrder.avgPrice().doubleValue() > 0
-				? filledOrder.avgPrice().doubleValue()
-				: ("TP_ORDER_FILLED".equals(reason) ? state.tpPrice : state.slPrice);
-		LOGGER.info("EVENT=BRACKET_EXIT symbol={} by={} exitOrderId={}", state.symbol, reason, exitOrderId);
-		ExitReason exitReason = "TP_ORDER_FILLED".equals(reason) ? ExitReason.TP_ORDER_FILLED : ExitReason.SL_ORDER_FILLED;
-		exitPosition(state, exitReason, exitPrice, closeTimeMs,
-				new ExitEvaluation(exitReason, "NONE", reason, null, false));
-	}
+    private void handleBracketFill(SymbolState state,
+                                   String reason,
+                                   Long exitOrderId,
+                                   String exitClientOrderId,
+                                   Long otherOrderId,
+                                   OrderResponse filledOrder,
+                                   long closeTimeMs) {
+        if (otherOrderId != null) {
+            try {
+                orderClient.cancelOrder(state.symbol, otherOrderId).block();
+                LOGGER.info("EVENT=BRACKET_CANCEL_OTHER symbol={} canceledOrderId={}", state.symbol, otherOrderId);
+            } catch (Exception ignored) {
+            }
+        }
+        double exitPrice = filledOrder != null && filledOrder.avgPrice() != null && filledOrder.avgPrice().doubleValue() > 0
+                ? filledOrder.avgPrice().doubleValue()
+                : ("TP_ORDER_FILLED".equals(reason) ? state.tpPrice : state.slPrice);
+        LOGGER.info("EVENT=BRACKET_EXIT symbol={} by={} exitOrderId={}", state.symbol, reason, exitOrderId);
+        ExitReason exitReason = "TP_ORDER_FILLED".equals(reason) ? ExitReason.TP_ORDER_FILLED : ExitReason.SL_ORDER_FILLED;
+        exitPosition(state, exitReason, exitPrice, closeTimeMs,
+                new ExitEvaluation(exitReason, "NONE", reason, null, false));
+    }
 
-	private void checkPaperExit(SymbolState state, Candle oneMinuteBar) {
-		if (state == null || oneMinuteBar == null) {
-			return;
-		}
-		if (state.positionSide == Side.NONE || state.bracketId == null || state.positionSide != Side.LONG) {
-			return;
-		}
-		// no-op: paper exits are evaluated on final 5m bars via checkPaperExitOnFiveMinute
-	}
+    private void checkPaperExit(SymbolState state, Candle oneMinuteBar) {
+        if (state == null || oneMinuteBar == null) {
+            return;
+        }
+        if (state.positionSide == Side.NONE || state.bracketId == null || state.positionSide != Side.LONG) {
+            return;
+        }
+        // no-op: paper exits are evaluated on final 5m bars via checkPaperExitOnFiveMinute
+    }
 
-	private boolean checkPaperExitOnFiveMinute(SymbolState state, Candle bar5m) {
-		if (state == null || bar5m == null || state.positionSide != Side.LONG || state.bracketId == null) {
-			return false;
-		}
-		if (bar5m.low() <= state.slPrice) {
-			exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
-					new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
-			return true;
-		}
-		if (bar5m.high() >= state.tpPrice) {
-			exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
-					new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
-			return true;
-		}
-		if ((bar5m.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
-			exitPosition(state, ExitReason.TIMEOUT_36B, bar5m.close(), bar5m.closeTime(),
-					new ExitEvaluation(ExitReason.TIMEOUT_36B, "NONE", "TIMEOUT_36B", null, true));
-			return true;
-		}
-		return false;
-	}
+    private boolean checkPaperExitOnFiveMinute(SymbolState state, Candle bar5m) {
+        if (state == null || bar5m == null || state.positionSide != Side.LONG || state.bracketId == null) {
+            return false;
+        }
+        if (bar5m.low() <= state.slPrice) {
+            exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
+                    new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
+            return true;
+        }
+        if (bar5m.high() >= state.tpPrice) {
+            exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
+                    new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
+            return true;
+        }
+        if ((bar5m.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
+            exitPosition(state, ExitReason.TIMEOUT_36B, bar5m.close(), bar5m.closeTime(),
+                    new ExitEvaluation(ExitReason.TIMEOUT_36B, "NONE", "TIMEOUT_36B", null, true));
+            return true;
+        }
+        return false;
+    }
 
-	private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs, ExitEvaluation evaluation) {
-		double pnl = state.positionSide == Side.LONG
-				? (exitPrice - state.entryPrice) * state.qty
-				: (state.entryPrice - exitPrice) * state.qty;
+    private void exitPosition(SymbolState state, ExitReason reason, double exitPrice, long exitTimeMs, ExitEvaluation evaluation) {
+        double pnl = state.positionSide == Side.LONG
+                ? (exitPrice - state.entryPrice) * state.qty
+                : (state.entryPrice - exitPrice) * state.qty;
 
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", "EXIT");
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(exitTimeMs).toString());
-		node.put("side", state.positionSide.name());
-		node.put("entryPrice", state.entryPrice);
-		node.put("exitPrice", exitPrice);
-		node.put("qty", state.qty);
-		node.put("realizedPnl", pnl);
-		node.put("exitReason", reason.name());
-		if (state.entryOrderId != null) { node.put("entryOrderId", state.entryOrderId); }
-		if (state.slOrderId != null) { node.put("slOrderId", state.slOrderId); }
-		if (state.tpOrderId != null) { node.put("tpOrderId", state.tpOrderId); }
-		node.put("tpPrice", state.tpPrice);
-		node.put("slPrice", state.slPrice);
-		if (state.tpHitTimeMs != null) {
-			node.put("tpHitTimeMs", state.tpHitTimeMs);
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("type", "EXIT");
+        node.put("symbol", state.symbol);
+        node.put("time", ISO_OFFSET_FMT.format(Instant.ofEpochMilli(exitTimeMs).atZone(zoneId)));
+        node.put("side", state.positionSide.name());
+        node.put("entryPrice", state.entryPrice);
+        node.put("exitPrice", exitPrice);
+        node.put("qty", state.qty);
+        node.put("realizedPnl", pnl);
+        node.put("exitReason", reason.name());
+        if (state.entryOrderId != null) {
+            node.put("entryOrderId", state.entryOrderId);
+        }
+        if (state.slOrderId != null) {
+            node.put("slOrderId", state.slOrderId);
+        }
+        if (state.tpOrderId != null) {
+            node.put("tpOrderId", state.tpOrderId);
+        }
+        node.put("tpPrice", state.tpPrice);
+        node.put("slPrice", state.slPrice);
+        if (state.tpHitTimeMs != null) {
+            node.put("tpHitTimeMs", state.tpHitTimeMs);
+        } else {
+            node.putNull("tpHitTimeMs");
+        }
+        if (state.slHitTimeMs != null) {
+            node.put("slHitTimeMs", state.slHitTimeMs);
+        } else {
+            node.putNull("slHitTimeMs");
+        }
+        node.put("firstHit", evaluation == null ? "NONE" : evaluation.firstHit);
+        node.put("exitTrigger", evaluation == null ? "TIMEOUT_36B" : evaluation.exitTrigger);
+        node.put("elit.timeoutLoss", evaluation != null && evaluation.timeoutLoss);
+        if (evaluation != null && evaluation.ambiguityRule != null) {
+            node.put("ambiguityRule", evaluation.ambiguityRule);
+        }
+        if (state.tpHitBar1m != null) {
+            putHitBar(node, "tpHitBar1m", state.tpHitBar1m);
+        }
+        if (state.slHitBar1m != null) {
+            putHitBar(node, "slHitBar1m", state.slHitBar1m);
+        }
+        writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+
+        state.positionSide = Side.NONE;
+        state.bracketId = null;
+        state.tpHitTimeMs = null;
+        state.slHitTimeMs = null;
+        state.tpHitBar1m = null;
+        state.slHitBar1m = null;
+        state.entryOrderId = null;
+        state.entryClientOrderId = null;
+        state.slOrderId = null;
+        state.slClientOrderId = null;
+        state.tpOrderId = null;
+        state.tpClientOrderId = null;
+        globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
+        markPositionClosed(state.symbol);
+    }
+
+
+    private static void putHitBar(ObjectNode parent, String field, HitSnapshot c) {
+        ObjectNode b = parent.putObject(field);
+        b.put("open", c.open());
+        b.put("high", c.high());
+        b.put("low", c.low());
+        b.put("close", c.close());
+        b.put("volume", c.volume());
+        b.put("closeTimeMs", c.closeTimeMs());
+    }
+
+
+    private void writeDecision(SymbolState state,
+                               Candle bar5m,
+                               String action,
+                               String matchedSetup,
+                               String blockReason,
+                               Metrics metrics,
+                               LongSetupEval longSetupEval,
+                               String allowReason) {
+        ObjectNode node = objectMapper.createObjectNode();
+        long timeMs = bar5m.closeTime();
+        var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
+        LocalDate dayFromTimeMs = timeTr.toLocalDate();
+        boolean baselinesReady = isBaselinesReady(state, metrics);
+        node.put("type", "DECISION");
+        node.put("symbol", state.symbol);
+        node.put("strategy", "ELITE_V1");
+        node.put("tfDecision", "5m");
+        node.put("tfExecution", "1m");
+        node.put("version", "20260207-elitev1-logv2");
+        node.put("closeTimeMs", timeMs);
+        node.put("closeTime", ISO_OFFSET_FMT.format(timeTr));
+        node.put("timeMs", timeMs);
+        node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
+        node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+        node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
+        node.put("entriesToday", state.entriesToday);
+        node.put("baselinesReady", baselinesReady);
+        node.put("globalOpenPositions", globalOpenPositions.get());
+        node.put("openPositionsCount", getOpenPositionsCount());
+        node.put("maxOpenPositions", MAX_OPEN_POSITIONS);
+        node.put("barCloseTimeMs", timeMs);
+        node.put("entriesThisBar", getEntriesThisBar(timeMs));
+        node.put("maxEntriesPerBar", MAX_NEW_POSITIONS_PER_BAR);
+        putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
+        putOrderflow(node, bar5m);
+        putLiquidity(node, state.symbol, timeMs);
+        node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
+        Candle last1m = state.last1m.peekLast();
+        if (last1m != null) {
+            putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
+        }
+		BtcGateSnapshot btcGateSnapshot = computeBtcGateSnapshot(timeMs);
+		ObjectNode btcGateNode = node.putObject("btcGateA");
+		btcGateNode.put("enabled", btcGateSnapshot.enabled());
+		btcGateNode.put("ready", btcGateSnapshot.ready());
+		btcGateNode.put("ok", btcGateSnapshot.ok());
+		if (btcGateSnapshot.blockReason() != null) {
+			btcGateNode.put("blockReason", btcGateSnapshot.blockReason());
 		} else {
-			node.putNull("tpHitTimeMs");
+			btcGateNode.putNull("blockReason");
 		}
-		if (state.slHitTimeMs != null) {
-			node.put("slHitTimeMs", state.slHitTimeMs);
+		if (btcGateSnapshot.activeRegimeTag() != null) {
+			btcGateNode.put("btcActiveRegimeTag", btcGateSnapshot.activeRegimeTag());
 		} else {
-			node.putNull("slHitTimeMs");
+			btcGateNode.putNull("btcActiveRegimeTag");
 		}
-		node.put("firstHit", evaluation == null ? "NONE" : evaluation.firstHit);
-		node.put("exitTrigger", evaluation == null ? "TIMEOUT_36B" : evaluation.exitTrigger);
-		node.put("elit.timeoutLoss", evaluation != null && evaluation.timeoutLoss);
-		if (evaluation != null && evaluation.ambiguityRule != null) {
-			node.put("ambiguityRule", evaluation.ambiguityRule);
+		if (btcGateSnapshot.closeTimeMs() != null) {
+			btcGateNode.put("btcCloseTimeMs", btcGateSnapshot.closeTimeMs());
+		} else {
+			btcGateNode.putNull("btcCloseTimeMs");
 		}
-		if (state.tpHitBar1m != null) {
-			putHitBar(node, "tpHitBar1m", state.tpHitBar1m);
+		if (btcGateSnapshot.close() != null && Double.isFinite(btcGateSnapshot.close())) {
+			btcGateNode.put("btcClose", btcGateSnapshot.close());
+		} else {
+			btcGateNode.putNull("btcClose");
 		}
-		if (state.slHitBar1m != null) {
-			putHitBar(node, "slHitBar1m", state.slHitBar1m);
+		if (btcGateSnapshot.ret30() != null && Double.isFinite(btcGateSnapshot.ret30())) {
+			btcGateNode.put("btcRet30", btcGateSnapshot.ret30());
+		} else {
+			btcGateNode.putNull("btcRet30");
 		}
-		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+		if (btcGateSnapshot.ret60() != null && Double.isFinite(btcGateSnapshot.ret60())) {
+			btcGateNode.put("btcRet60", btcGateSnapshot.ret60());
+		} else {
+			btcGateNode.putNull("btcRet60");
+		}
+		if (btcGateSnapshot.staleMs() != null) {
+			btcGateNode.put("staleMs", btcGateSnapshot.staleMs());
+		} else {
+			btcGateNode.putNull("staleMs");
+		}
 
-		state.positionSide = Side.NONE;
-		state.bracketId = null;
-		state.tpHitTimeMs = null;
-		state.slHitTimeMs = null;
-		state.tpHitBar1m = null;
-		state.slHitBar1m = null;
-		state.entryOrderId = null;
-		state.entryClientOrderId = null;
-		state.slOrderId = null;
-		state.slClientOrderId = null;
-		state.tpOrderId = null;
-		state.tpClientOrderId = null;
-		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
-	}
+        String effectiveAction = action;
+        String effectiveMatchedSetup = matchedSetup;
+        String effectiveBlockReason = blockReason;
+        List<String> invalidReasons = new ArrayList<>();
+
+        if (!baselinesReady) {
+            effectiveAction = "INPUTS_NOT_READY";
+            effectiveMatchedSetup = null;
+            effectiveBlockReason = "INPUTS_NOT_READY";
+            applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
+            node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
+        } else {
+            node.put("rawRegimeTag", metrics.rawRegimeTag.name());
+            node.put("activeRegimeTag", metrics.activeRegimeTag.name());
+            ObjectNode metricNode = node.putObject("metrics");
+            putMetric(metricNode, "bbWidth_5m", metrics.bbWidth_5m, invalidReasons, "bbWidth_5m");
+            putMetric(metricNode, "bwEma_5m", metrics.bwEma_5m, invalidReasons, "bwEma_5m");
+            putMetric(metricNode, "bwRatio_5m", metrics.bwRatio5m, invalidReasons, "bwRatio_5m");
+            putMetric(metricNode, "volRatio", metrics.volRatio, invalidReasons, "volRatio");
+            putMetric(metricNode, "volEma_5m", metrics.volEma_5m, invalidReasons, "volEma_5m");
+            putMetric(metricNode, "volRatioOfEma", metrics.volRatioOfEma, invalidReasons, "volRatioOfEma");
+            putMetric(metricNode, "ema20", metrics.ema20_5m, invalidReasons, "ema20");
+            putMetric(metricNode, "ema20DistPct", metrics.ema20DistPct, invalidReasons, "ema20DistPct");
+            putMetric(metricNode, "rsi9", metrics.rsi9_5m, invalidReasons, "rsi9");
+            putMetric(metricNode, "bbLower", metrics.bbLower, invalidReasons, "bbLower");
+            putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
+            putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
+            putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
+            putMetric(metricNode, "ema20_5m", metrics.ema20_5m, invalidReasons, "ema20_5m");
+            putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
+            putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
+            putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
+            putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
+            putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
+            putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
+        }
+
+        node.put("action", effectiveAction);
+        node.put("matchedSetup", effectiveMatchedSetup);
+        node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
+        if (allowReason != null && !allowReason.isBlank()) {
+            node.put("allowReason", allowReason);
+        } else {
+            node.putNull("allowReason");
+        }
+        LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
+        if ("INPUTS_NOT_READY".equals(effectiveAction)) {
+            node.put("inputsValid", false);
+            if (!node.has("inputsInvalidReasons")) {
+                var invalid = node.putArray("inputsInvalidReasons");
+                invalid.add("WARMUP");
+            }
+        } else {
+            node.put("inputsValid", eval.signal());
+            var invalid = node.putArray("inputsInvalidReasons");
+            if (eval.blockReason() != null && !eval.blockReason().isBlank() && !"ELIT_V1_LONG_MATCH".equals(eval.blockReason())) {
+                for (String reason : eval.blockReason().split("\\|")) {
+                    if (!reason.isBlank()) {
+                        invalid.add(reason);
+                    }
+                }
+            }
+        }
+        node.put("elit.tpPct", TP_PCT);
+        node.put("elit.slPct", SL_PCT);
+        node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+        if (eval.takerBuyRatio != null && Double.isFinite(eval.takerBuyRatio)) {
+            node.put("elit.takerBuyRatio", eval.takerBuyRatio);
+        } else {
+            node.putNull("elit.takerBuyRatio");
+        }
+        if (eval.imbalance != null && Double.isFinite(eval.imbalance)) {
+            node.put("elit.imbalance", eval.imbalance);
+        } else {
+            node.putNull("elit.imbalance");
+        }
+        node.put("elit.isDownTrend", eval.isDownTrend);
+        // BEGIN PB_EMA_PATCH
+        if (Double.isFinite(eval.pbMaxUsed)) {
+            node.put("pbMaxUsed", eval.pbMaxUsed);
+        } else {
+            node.putNull("pbMaxUsed");
+        }
+        if (eval.emaSignedDist != null && Double.isFinite(eval.emaSignedDist)) {
+            node.put("emaSignedDist", eval.emaSignedDist);
+        } else {
+            node.putNull("emaSignedDist");
+        }
+        node.put("emaMaxUsed", eval.emaMaxUsed);
+        // END PB_EMA_PATCH
+        node.put("shortEliteMatched", false);
+        node.putNull("shortEliteMatchedSetup");
+        node.putArray("shortEliteFailReasons");
+        writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+    }
 
 
-	private static void putHitBar(ObjectNode parent, String field, HitSnapshot c) {
-		ObjectNode b = parent.putObject(field);
-		b.put("open", c.open());
-		b.put("high", c.high());
-		b.put("low", c.low());
-		b.put("close", c.close());
-		b.put("volume", c.volume());
-		b.put("closeTimeMs", c.closeTimeMs());
-	}
+    static String resolveDecisionBlockReason(String action, String blockReason) {
+        if (blockReason != null && !blockReason.isBlank()) {
+            return blockReason;
+        }
+        if ("ENTER_LONG".equals(action)) {
+            return "NONE";
+        }
+        if ("NO_ENTRY".equals(action)) {
+            return "NO_ENTRY";
+        }
+        if ("INPUTS_NOT_READY".equals(action)) {
+            return "INPUTS_NOT_READY";
+        }
+        if ("IN_POSITION_NO_ENTRY".equals(action)) {
+            return "IN_POSITION_NO_ENTRY";
+        }
+        return (action == null || action.isBlank()) ? "UNKNOWN" : action;
+    }
+
+    private static void putBar(ObjectNode parent, String field, Candle c, long tfMs) {
+        ObjectNode b = parent.putObject(field);
+        b.put("open", c.open());
+        b.put("high", c.high());
+        b.put("low", c.low());
+        b.put("close", c.close());
+        b.put("volume", c.volume());
+        long closeTimeMs = c.closeTime();
+        b.put("closeTimeMs", closeTimeMs);
+        b.put("openTimeMs", closeTimeMs - tfMs + 1);
+    }
+
+    private void putOrderflow(ObjectNode parent, Candle bar5m) {
+        ObjectNode orderflow = parent.putObject("orderflow5m");
+        orderflow.put("baseVolume", bar5m.volume());
+        OrderflowSnapshot of = OrderflowSnapshot.fromCandle(bar5m);
+        if (of == null || bar5m.volume() <= 0.0 || of.takerBuyBaseVolume() == null || !Double.isFinite(of.takerBuyBaseVolume())) {
+            orderflow.put("reason", "KLINE_TAKER_FIELDS_MISSING");
+            orderflow.putNull("quoteVolume");
+            orderflow.putNull("trades");
+            orderflow.putNull("takerBuyBase");
+            orderflow.putNull("takerBuyQuote");
+            orderflow.putNull("takerSellBase");
+            orderflow.putNull("deltaBase");
+            orderflow.putNull("takerBuyRatio");
+            return;
+        }
+
+        double takerBuyBase = of.takerBuyBaseVolume();
+        double takerSellBase = bar5m.volume() - takerBuyBase;
+        double deltaBase = takerBuyBase - takerSellBase;
+        if (of.quoteVolume() != null) {
+            orderflow.put("quoteVolume", of.quoteVolume());
+        } else {
+            orderflow.putNull("quoteVolume");
+        }
+        if (of.tradeCount() != null) {
+            orderflow.put("trades", of.tradeCount());
+        } else {
+            orderflow.putNull("trades");
+        }
+        orderflow.put("takerBuyBase", takerBuyBase);
+        if (of.takerBuyQuoteVolume() != null) {
+            orderflow.put("takerBuyQuote", of.takerBuyQuoteVolume());
+        } else {
+            orderflow.putNull("takerBuyQuote");
+        }
+        orderflow.put("takerSellBase", takerSellBase);
+        orderflow.put("deltaBase", deltaBase);
+        orderflow.put("takerBuyRatio", takerBuyBase / bar5m.volume());
+        orderflow.put("reason", "OK");
+    }
+
+    // --- DEĞİŞECEK YER 3: putLiquidity Metodu ---
+    private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
+        // Doğrudan yeni watcher üzerinden snapshot alıyoruz
+        var snap = bookTickerStreamWatcher.getSnapshot(symbol);
+
+        if (snap == null) {
+            parent.put("liqOk", false);
+            return;
+        }
+
+        // Zaman farkını ve verileri hesapla
+        long ageMs = Math.max(0L, nowMs - snap.eventTimeMs());
+        double bid = snap.bestBidPrice();
+        double ask = snap.bestAskPrice();
+        double bidQty = snap.bestBidQty();
+        double askQty = snap.bestAskQty();
+
+        double mid = (bid + ask) / 2.0;
+        double spreadPct = (mid <= 0) ? 0.0 : (ask - bid) / mid;
+        double denom = (bidQty + askQty);
+        double imbalance = (denom <= 0) ? 0.0 : (bidQty - askQty) / denom;
+
+        // JSON objesine ekle
+        parent.put("liqOk", true);
+        parent.put("liqAgeMs", ageMs);
+        parent.put("bid", bid);
+        parent.put("ask", ask);
+        parent.put("bidQty", bidQty);
+        parent.put("askQty", askQty);
+        parent.put("spreadPct", spreadPct);
+        parent.put("imbalance", imbalance);
+    }
+
+    // --- DEĞİŞECEK YER 4: Yardımcı Metotlar ---
+    private void checkLiquidityHealth() {
+        // Artık yavaş metod çağırma (invoke) yok, doğrudan erişim var
+        long last = bookTickerStreamWatcher.lastMsgMs();
+        long age = System.currentTimeMillis() - last;
+        if (age > 30000) {
+            LOGGER.warn("Likidite verisi çok eski! Age: {}ms", age);
+        }
+    }
+
+    private long resolveLiquidityHealthAgeMs() {
+        try {
+            Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
+            Object bean = applicationContext.getBean(watcherClass);
+            Method lastMsgMsMethod = watcherClass.getMethod("lastMsgMs");
+            Object value = lastMsgMsMethod.invoke(bean);
+            if (value instanceof Number number) {
+                long last = number.longValue();
+                if (last <= 0L) {
+                    return -1L;
+                }
+                return Math.max(0L, System.currentTimeMillis() - last);
+            }
+        } catch (Exception ignored) {
+        }
+        return -1L;
+    }
+
+    private void startBookTickerWatcher() {
+        try {
+            Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
+            Object bean = applicationContext.getBean(watcherClass);
+            Method startMethod = watcherClass.getMethod("start");
+            startMethod.invoke(bean);
+        } catch (Exception ex) {
+            LOGGER.debug("EVENT=LIQUIDITY_WATCHER_START_SKIPPED reason={}", ex.toString());
+        }
+    }
+
+    static void applyWarmupNotReadyFields(ObjectNode node, int required1mBars, long have1mBars, int required5mBars, long have5mBars) {
+        node.put("rawRegimeTag", "UNKNOWN");
+        node.put("activeRegimeTag", "UNKNOWN");
+        node.putNull("metrics");
+        ObjectNode warmup = node.putObject("warmup");
+        warmup.put("required1mBars", required1mBars);
+        warmup.put("have1mBars", have1mBars);
+        warmup.put("missing1mBars", Math.max(0L, required1mBars - have1mBars));
+        warmup.put("required5mBars", required5mBars);
+        warmup.put("have5mBars", have5mBars);
+        warmup.put("missing5mBars", Math.max(0L, required5mBars - have5mBars));
+        node.put("inputsValid", false);
+        var invalid = node.putArray("inputsInvalidReasons");
+        invalid.add("WARMUP");
+    }
+
+    static void putMetric(ObjectNode metricNode, String key, double value, List<String> invalidReasons, String reasonKey) {
+        if (Double.isFinite(value)) {
+            metricNode.put(key, value);
+        } else {
+            metricNode.putNull(key);
+            invalidReasons.add(reasonKey);
+        }
+    }
+
+    private Path decisionPath(String symbol, LocalDate day) {
+        return DECISION_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
+    }
+
+    private Path tradePath(String symbol, LocalDate day) {
+        return TRADE_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
+    }
+
+    private double resolveTickSize(String symbol) {
+        var filters = symbolFilterService.getFilters(symbol);
+        if (filters == null || filters.tickSize() == null) {
+            return DEFAULT_TICK_SIZE;
+        }
+        return filters.tickSize().doubleValue();
+    }
+
+    static ExitReason resolveTouchExit(Side side,
+                                       double tpPrice,
+                                       double slPrice,
+                                       Candle oneMinuteBar,
+                                       EliteV1Properties.ConflictResolution conflictResolution) {
+        boolean touchedTp;
+        boolean touchedSl;
+        if (side == Side.LONG) {
+            touchedTp = oneMinuteBar.high() >= tpPrice;
+            touchedSl = oneMinuteBar.low() <= slPrice;
+        } else if (side == Side.SHORT) {
+            touchedTp = oneMinuteBar.low() <= tpPrice;
+            touchedSl = oneMinuteBar.high() >= slPrice;
+        } else {
+            return null;
+        }
+        if (!touchedTp && !touchedSl) {
+            return null;
+        }
+        if (touchedTp && touchedSl) {
+            return conflictResolution == EliteV1Properties.ConflictResolution.SL_FIRST
+                    ? ExitReason.STOP_LOSS
+                    : ExitReason.TAKE_PROFIT;
+        }
+        return touchedSl ? ExitReason.STOP_LOSS : ExitReason.TAKE_PROFIT;
+    }
+
+    static double roundUp(double raw, double tickSize) {
+        BigDecimal tick = BigDecimal.valueOf(tickSize);
+        return BigDecimal.valueOf(raw)
+                .divide(tick, 0, RoundingMode.CEILING)
+                .multiply(tick)
+                .doubleValue();
+    }
+
+    static double roundDown(double raw, double tickSize) {
+        BigDecimal tick = BigDecimal.valueOf(tickSize);
+        return BigDecimal.valueOf(raw)
+                .divide(tick, 0, RoundingMode.FLOOR)
+                .multiply(tick)
+                .doubleValue();
+    }
+
+    static RegimeTag rawRegime(double bwRatio, double macdRatio, double chopBwRatioMax, double chopMacdRatioMax) {
+        if (bwRatio < chopBwRatioMax && macdRatio < chopMacdRatioMax) {
+            return RegimeTag.CHOP;
+        }
+        return RegimeTag.TREND;
+    }
+
+    private void validateConfig() {
+        if (props.paperNotionalUsd() <= 0) {
+            throw new IllegalStateException("paperNotionalUsd must be > 0");
+        }
+    }
+
+    enum Side {
+        NONE,
+        LONG,
+        SHORT
+    }
+
+    enum RegimeTag {
+        CHOP,
+        TREND
+    }
+
+    enum ExitReason {
+        TAKE_PROFIT,
+        STOP_LOSS,
+        TIMEOUT_36B,
+        TP_ORDER_FILLED,
+        SL_ORDER_FILLED
+    }
+
+    enum WarmupMode {
+        DERIVE_5M_FROM_1M,
+        DIRECT_5M
+    }
 
 
-	private void writeDecision(SymbolState state,
-			Candle bar5m,
-			String action,
-			String matchedSetup,
+    public record WarmupReadiness(String symbol, boolean ready, long have1m, int required1m, long have5m,
+                                  int required5m, String reason) {
+        static WarmupReadiness ready(String symbol, long have1m, int required1m, long have5m, int required5m) {
+            return new WarmupReadiness(symbol, true, have1m, required1m, have5m, required5m, "READY");
+        }
+
+        static WarmupReadiness notReady(String symbol, long have1m, int required1m, long have5m, int required5m, String reason) {
+            return new WarmupReadiness(symbol, false, have1m, required1m, have5m, required5m, reason);
+        }
+
+        static WarmupReadiness statusNull(String symbol) {
+            return new WarmupReadiness(symbol, false, 0, 0, 0, 0, "STATUS_NULL");
+        }
+    }
+
+    enum DecisionAction {
+        CONTINUE,
+        INPUTS_NOT_READY,
+        IN_POSITION_NO_ENTRY,
+        NO_ENTRY,
+        GLOBAL_MAX_OPEN_POSITIONS
+    }
+
+    record PreCheckAction(DecisionAction action, String blockReason, String allowReason) {
+    }
+
+    private record ExitEvaluation(ExitReason exitReason, String firstHit, String exitTrigger, String ambiguityRule,
+                                  boolean timeoutLoss) {
+    }
+
+    private record HitSnapshot(double open, double high, double low, double close, double volume, long closeTimeMs) {
+        static HitSnapshot fromCandle(Candle c) {
+            return new HitSnapshot(c.open(), c.high(), c.low(), c.close(), c.volume(), c.closeTime());
+        }
+    }
+
+    private record OrderflowSnapshot(Double quoteVolume, Long tradeCount, Double takerBuyBaseVolume,
+                                     Double takerBuyQuoteVolume) {
+
+        boolean available() {
+            return takerBuyBaseVolume != null;
+        }
+
+        static OrderflowSnapshot fromCandle(Candle candle) {
+            if (candle == null) {
+                return null;
+            }
+            if (ORDERFLOW_ACCESSORS_LOGGED.compareAndSet(false, true)) {
+                LOGGER.info("ORDERFLOW_ACCESSORS candleClass={} quoteVolume={} trades={} takerBuyBaseVolume={} takerBuyQuoteVolume={}",
+                        candle.getClass().getName(),
+                        findAccessorName(candle, "quoteVolume", "quoteAssetVolume", "getQuoteVolume", "getQuoteAssetVolume"),
+                        findAccessorName(candle, "trades", "tradeCount", "getTrades", "getTradeCount"),
+                        findAccessorName(candle, "takerBuyBaseVolume", "takerBuyBase", "takerBuyBaseAssetVolume", "getTakerBuyBaseVolume"),
+                        findAccessorName(candle, "takerBuyQuoteVolume", "takerBuyQuote", "takerBuyQuoteAssetVolume", "getTakerBuyQuoteVolume"));
+            }
+            return new OrderflowSnapshot(
+                    readDoubleAccessorAny(candle, "quoteVolume", "quoteAssetVolume", "getQuoteVolume", "getQuoteAssetVolume"),
+                    readLongAccessorAny(candle, "trades", "tradeCount", "getTrades", "getTradeCount"),
+                    readDoubleAccessorAny(candle, "takerBuyBaseVolume", "takerBuyBase", "takerBuyBaseAssetVolume", "getTakerBuyBaseVolume"),
+                    readDoubleAccessorAny(candle, "takerBuyQuoteVolume", "takerBuyQuote", "takerBuyQuoteAssetVolume", "getTakerBuyQuoteVolume"));
+        }
+    }
+
+    private record LiquiditySnapshot(double bestBidPrice, double bestBidQty, double bestAskPrice, double bestAskQty,
+                                     long eventTimeMs) {
+
+        static LiquiditySnapshot fromContext(ApplicationContext context, String symbol) {
+            if (context == null || symbol == null || symbol.isBlank()) {
+                return null;
+            }
+            try {
+                Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
+                Object bean = context.getBean(watcherClass);
+                Method getSnapshot = watcherClass.getMethod("getSnapshot", String.class);
+                Object snapshot = getSnapshot.invoke(bean, symbol);
+                if (snapshot == null) {
+                    return null;
+                }
+                Double bid = readDoubleAccessor(snapshot, "bestBidPrice");
+                Double bidQty = readDoubleAccessor(snapshot, "bestBidQty");
+                Double ask = readDoubleAccessor(snapshot, "bestAskPrice");
+                Double askQty = readDoubleAccessor(snapshot, "bestAskQty");
+                Long eventTime = readLongAccessor(snapshot, "eventTimeMs");
+                if (bid == null || bidQty == null || ask == null || askQty == null || eventTime == null) {
+                    return null;
+                }
+                return new LiquiditySnapshot(bid, bidQty, ask, askQty, eventTime);
+            } catch (ReflectiveOperationException | RuntimeException ex) {
+                LOGGER.debug("BookTicker reflection lookup unavailable: {}", ex.getMessage());
+                return null;
+            }
+        }
+    }
+
+    private static Double readDoubleAccessor(Object target, String accessorName) {
+        if (target == null) {
+            return null;
+        }
+        try {
+            Method method = target.getClass().getMethod(accessorName);
+            Object value = method.invoke(target);
+            if (value == null) {
+                return null;
+            }
+            if (!(value instanceof Number number)) {
+                return null;
+            }
+            double parsed = number.doubleValue();
+            return Double.isFinite(parsed) ? parsed : null;
+        } catch (ReflectiveOperationException ex) {
+            return null;
+        }
+    }
+
+    private static Long readLongAccessor(Object target, String accessorName) {
+        if (target == null) {
+            return null;
+        }
+        try {
+            Method method = target.getClass().getMethod(accessorName);
+            Object value = method.invoke(target);
+            if (value == null) {
+                return null;
+            }
+            if (!(value instanceof Number number)) {
+                return null;
+            }
+            double parsed = number.doubleValue();
+            if (!Double.isFinite(parsed)) {
+                return null;
+            }
+            return number.longValue();
+        } catch (ReflectiveOperationException ex) {
+            return null;
+        }
+    }
+
+    private static Double readDoubleAccessorAny(Object target, String... methodNames) {
+        if (target == null || methodNames == null) {
+            return null;
+        }
+        for (String methodName : methodNames) {
+            if (methodName == null || methodName.isBlank()) {
+                continue;
+            }
+            Double value = readDoubleAccessor(target, methodName);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static Long readLongAccessorAny(Object target, String... methodNames) {
+        if (target == null || methodNames == null) {
+            return null;
+        }
+        for (String methodName : methodNames) {
+            if (methodName == null || methodName.isBlank()) {
+                continue;
+            }
+            Long value = readLongAccessor(target, methodName);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static String findAccessorName(Object target, String... methodNames) {
+        if (target == null || methodNames == null) {
+            return "NONE";
+        }
+        for (String methodName : methodNames) {
+            if (methodName == null || methodName.isBlank()) {
+                continue;
+            }
+            try {
+                target.getClass().getMethod(methodName);
+                return methodName;
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+        return "NONE";
+    }
+
+    private record BtcGateSnapshot(boolean enabled,
+			boolean ready,
+			boolean ok,
 			String blockReason,
-			Metrics metrics,
-			LongSetupEval longSetupEval) {
-		ObjectNode node = objectMapper.createObjectNode();
-		long timeMs = bar5m.closeTime();
-		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
-		LocalDate dayFromTimeMs = timeTr.toLocalDate();
-		boolean baselinesReady = isBaselinesReady(state, metrics);
-		node.put("type", "DECISION");
-		node.put("symbol", state.symbol);
-		node.put("strategy", "ELITE_V1");
-		node.put("tfDecision", "5m");
-		node.put("tfExecution", "1m");
-		node.put("version", "20260207-elitev1-logv2");
-		node.put("closeTimeMs", timeMs);
-		node.put("closeTime", ISO_OFFSET_FMT.format(timeTr));
-		node.put("timeMs", timeMs);
-		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
-		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
-		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
-		node.put("entriesToday", state.entriesToday);
-		node.put("baselinesReady", baselinesReady);
-		node.put("globalOpenPositions", globalOpenPositions.get());
-		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
-		putOrderflow(node, bar5m);
-		putLiquidity(node, state.symbol, timeMs);
-		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
-		Candle last1m = state.last1m.peekLast();
-		if (last1m != null) {
-			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
-		}
-
-		String effectiveAction = action;
-		String effectiveMatchedSetup = matchedSetup;
-		String effectiveBlockReason = blockReason;
-		List<String> invalidReasons = new ArrayList<>();
-
-		if (!baselinesReady) {
-			effectiveAction = "INPUTS_NOT_READY";
-			effectiveMatchedSetup = null;
-			effectiveBlockReason = "INPUTS_NOT_READY";
-			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
-			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
-		} else {
-			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
-			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
-			ObjectNode metricNode = node.putObject("metrics");
-			putMetric(metricNode, "bbWidth_5m", metrics.bbWidth_5m, invalidReasons, "bbWidth_5m");
-			putMetric(metricNode, "bwEma_5m", metrics.bwEma_5m, invalidReasons, "bwEma_5m");
-			putMetric(metricNode, "bwRatio_5m", metrics.bwRatio5m, invalidReasons, "bwRatio_5m");
-			putMetric(metricNode, "volRatio", metrics.volRatio, invalidReasons, "volRatio");
-			putMetric(metricNode, "volEma_5m", metrics.volEma_5m, invalidReasons, "volEma_5m");
-			putMetric(metricNode, "volRatioOfEma", metrics.volRatioOfEma, invalidReasons, "volRatioOfEma");
-			putMetric(metricNode, "ema20", metrics.ema20_5m, invalidReasons, "ema20");
-			putMetric(metricNode, "ema20DistPct", metrics.ema20DistPct, invalidReasons, "ema20DistPct");
-			putMetric(metricNode, "rsi9", metrics.rsi9_5m, invalidReasons, "rsi9");
-			putMetric(metricNode, "bbLower", metrics.bbLower, invalidReasons, "bbLower");
-			putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
-			putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
-			putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
-			putMetric(metricNode, "ema20_5m", metrics.ema20_5m, invalidReasons, "ema20_5m");
-			putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
-			putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
-			putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
-			putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
-			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
-			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
-		}
-
-		node.put("action", effectiveAction);
-		node.put("matchedSetup", effectiveMatchedSetup);
-		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
-		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
-		if ("INPUTS_NOT_READY".equals(effectiveAction)) {
-			node.put("inputsValid", false);
-			if (!node.has("inputsInvalidReasons")) {
-				var invalid = node.putArray("inputsInvalidReasons");
-				invalid.add("WARMUP");
-			}
-		} else {
-			node.put("inputsValid", eval.signal());
-			var invalid = node.putArray("inputsInvalidReasons");
-			if (eval.blockReason() != null && !eval.blockReason().isBlank() && !"ELIT_V1_LONG_MATCH".equals(eval.blockReason())) {
-				for (String reason : eval.blockReason().split("\\|")) {
-					if (!reason.isBlank()) {
-						invalid.add(reason);
-					}
-				}
-			}
-		}
-		node.put("elit.tpPct", TP_PCT);
-		node.put("elit.slPct", SL_PCT);
-		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
-		if (eval.takerBuyRatio != null && Double.isFinite(eval.takerBuyRatio)) {
-			node.put("elit.takerBuyRatio", eval.takerBuyRatio);
-		} else {
-			node.putNull("elit.takerBuyRatio");
-		}
-		if (eval.imbalance != null && Double.isFinite(eval.imbalance)) {
-			node.put("elit.imbalance", eval.imbalance);
-		} else {
-			node.putNull("elit.imbalance");
-		}
-		node.put("elit.isDownTrend", eval.isDownTrend);
-		node.put("shortEliteMatched", false);
-		node.putNull("shortEliteMatchedSetup");
-		node.putArray("shortEliteFailReasons");
-		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
-	}
-
-
-	static String resolveDecisionBlockReason(String action, String blockReason) {
-		if (blockReason != null && !blockReason.isBlank()) {
-			return blockReason;
-		}
-		if ("ENTER_LONG".equals(action)) {
-			return "NONE";
-		}
-		if ("NO_ENTRY".equals(action)) {
-			return "NO_ENTRY";
-		}
-		if ("INPUTS_NOT_READY".equals(action)) {
-			return "INPUTS_NOT_READY";
-		}
-		if ("IN_POSITION_NO_ENTRY".equals(action)) {
-			return "IN_POSITION_NO_ENTRY";
-		}
-		return (action == null || action.isBlank()) ? "UNKNOWN" : action;
-	}
-
-	private static void putBar(ObjectNode parent, String field, Candle c, long tfMs) {
-		ObjectNode b = parent.putObject(field);
-		b.put("open", c.open());
-		b.put("high", c.high());
-		b.put("low", c.low());
-		b.put("close", c.close());
-		b.put("volume", c.volume());
-		long closeTimeMs = c.closeTime();
-		b.put("closeTimeMs", closeTimeMs);
-		b.put("openTimeMs", closeTimeMs - tfMs + 1);
-	}
-
-	private void putOrderflow(ObjectNode parent, Candle bar5m) {
-		ObjectNode orderflow = parent.putObject("orderflow5m");
-		orderflow.put("baseVolume", bar5m.volume());
-		OrderflowSnapshot of = OrderflowSnapshot.fromCandle(bar5m);
-		if (of == null || !of.available() || bar5m.volume() <= 0.0) {
-			orderflow.put("reason", "KLINE_TAKER_FIELDS_MISSING");
-			orderflow.putNull("quoteVolume");
-			orderflow.putNull("trades");
-			orderflow.putNull("takerBuyBase");
-			orderflow.putNull("takerBuyQuote");
-			orderflow.putNull("takerSellBase");
-			orderflow.putNull("deltaBase");
-			orderflow.putNull("takerBuyRatio");
-			return;
-		}
-
-		double takerBuyBase = of.takerBuyBaseVolume();
-		double takerSellBase = bar5m.volume() - takerBuyBase;
-		double deltaBase = takerBuyBase - takerSellBase;
-		orderflow.put("quoteVolume", of.quoteVolume());
-		orderflow.put("trades", of.tradeCount());
-		orderflow.put("takerBuyBase", takerBuyBase);
-		orderflow.put("takerBuyQuote", of.takerBuyQuoteVolume());
-		orderflow.put("takerSellBase", takerSellBase);
-		orderflow.put("deltaBase", deltaBase);
-		orderflow.put("takerBuyRatio", takerBuyBase / bar5m.volume());
-		orderflow.put("reason", "OK");
-	}
-
-	// --- DEĞİŞECEK YER 3: putLiquidity Metodu ---
-	private void putLiquidity(ObjectNode parent, String symbol, long nowMs) {
-		// Doğrudan yeni watcher üzerinden snapshot alıyoruz
-		var snap = bookTickerStreamWatcher.getSnapshot(symbol);
-
-		if (snap == null) {
-			parent.put("liqOk", false);
-			return;
-		}
-
-		// Zaman farkını ve verileri hesapla
-		long ageMs = Math.max(0L, nowMs - snap.eventTimeMs());
-		double bid = snap.bestBidPrice();
-		double ask = snap.bestAskPrice();
-		double bidQty = snap.bestBidQty();
-		double askQty = snap.bestAskQty();
-
-		double mid = (bid + ask) / 2.0;
-		double spreadPct = (mid <= 0) ? 0.0 : (ask - bid) / mid;
-		double denom = (bidQty + askQty);
-		double imbalance = (denom <= 0) ? 0.0 : (bidQty - askQty) / denom;
-
-		// JSON objesine ekle
-		parent.put("liqOk", true);
-		parent.put("liqAgeMs", ageMs);
-		parent.put("bid", bid);
-		parent.put("ask", ask);
-		parent.put("bidQty", bidQty);
-		parent.put("askQty", askQty);
-		parent.put("spreadPct", spreadPct);
-		parent.put("imbalance", imbalance);
-	}
-
-	// --- DEĞİŞECEK YER 4: Yardımcı Metotlar ---
-	private void checkLiquidityHealth() {
-		// Artık yavaş metod çağırma (invoke) yok, doğrudan erişim var
-		long last = bookTickerStreamWatcher.lastMsgMs();
-		long age = System.currentTimeMillis() - last;
-		if (age > 30000) {
-			LOGGER.warn("Likidite verisi çok eski! Age: {}ms", age);
-		}
-	}
-
-	private long resolveLiquidityHealthAgeMs() {
-		try {
-			Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
-			Object bean = applicationContext.getBean(watcherClass);
-			Method lastMsgMsMethod = watcherClass.getMethod("lastMsgMs");
-			Object value = lastMsgMsMethod.invoke(bean);
-			if (value instanceof Number number) {
-				long last = number.longValue();
-				if (last <= 0L) {
-					return -1L;
-				}
-				return Math.max(0L, System.currentTimeMillis() - last);
-			}
-		} catch (Exception ignored) {
-		}
-		return -1L;
-	}
-
-	private void startBookTickerWatcher() {
-		try {
-			Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
-			Object bean = applicationContext.getBean(watcherClass);
-			Method startMethod = watcherClass.getMethod("start");
-			startMethod.invoke(bean);
-		} catch (Exception ex) {
-			LOGGER.debug("EVENT=LIQUIDITY_WATCHER_START_SKIPPED reason={}", ex.toString());
-		}
-	}
-
-	static void applyWarmupNotReadyFields(ObjectNode node, int required1mBars, long have1mBars, int required5mBars, long have5mBars) {
-		node.put("rawRegimeTag", "UNKNOWN");
-		node.put("activeRegimeTag", "UNKNOWN");
-		node.putNull("metrics");
-		ObjectNode warmup = node.putObject("warmup");
-		warmup.put("required1mBars", required1mBars);
-		warmup.put("have1mBars", have1mBars);
-		warmup.put("missing1mBars", Math.max(0L, required1mBars - have1mBars));
-		warmup.put("required5mBars", required5mBars);
-		warmup.put("have5mBars", have5mBars);
-		warmup.put("missing5mBars", Math.max(0L, required5mBars - have5mBars));
-		node.put("inputsValid", false);
-		var invalid = node.putArray("inputsInvalidReasons");
-		invalid.add("WARMUP");
-	}
-
-	static void putMetric(ObjectNode metricNode, String key, double value, List<String> invalidReasons, String reasonKey) {
-		if (Double.isFinite(value)) {
-			metricNode.put(key, value);
-		} else {
-			metricNode.putNull(key);
-			invalidReasons.add(reasonKey);
-		}
-	}
-
-private Path decisionPath(String symbol, LocalDate day) {
-		return DECISION_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
-	}
-
-	private Path tradePath(String symbol, LocalDate day) {
-		return TRADE_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
-	}
-
-	private double resolveTickSize(String symbol) {
-		var filters = symbolFilterService.getFilters(symbol);
-		if (filters == null || filters.tickSize() == null) {
-			return DEFAULT_TICK_SIZE;
-		}
-		return filters.tickSize().doubleValue();
-	}
-
-	static ExitReason resolveTouchExit(Side side,
-			double tpPrice,
-			double slPrice,
-			Candle oneMinuteBar,
-			EliteV1Properties.ConflictResolution conflictResolution) {
-		boolean touchedTp;
-		boolean touchedSl;
-		if (side == Side.LONG) {
-			touchedTp = oneMinuteBar.high() >= tpPrice;
-			touchedSl = oneMinuteBar.low() <= slPrice;
-		} else if (side == Side.SHORT) {
-			touchedTp = oneMinuteBar.low() <= tpPrice;
-			touchedSl = oneMinuteBar.high() >= slPrice;
-		} else {
-			return null;
-		}
-		if (!touchedTp && !touchedSl) {
-			return null;
-		}
-		if (touchedTp && touchedSl) {
-			return conflictResolution == EliteV1Properties.ConflictResolution.SL_FIRST
-					? ExitReason.STOP_LOSS
-					: ExitReason.TAKE_PROFIT;
-		}
-		return touchedSl ? ExitReason.STOP_LOSS : ExitReason.TAKE_PROFIT;
-	}
-
-	static double roundUp(double raw, double tickSize) {
-		BigDecimal tick = BigDecimal.valueOf(tickSize);
-		return BigDecimal.valueOf(raw)
-				.divide(tick, 0, RoundingMode.CEILING)
-				.multiply(tick)
-				.doubleValue();
-	}
-
-	static double roundDown(double raw, double tickSize) {
-		BigDecimal tick = BigDecimal.valueOf(tickSize);
-		return BigDecimal.valueOf(raw)
-				.divide(tick, 0, RoundingMode.FLOOR)
-				.multiply(tick)
-				.doubleValue();
-	}
-
-	static RegimeTag rawRegime(double bwRatio, double macdRatio, double chopBwRatioMax, double chopMacdRatioMax) {
-		if (bwRatio < chopBwRatioMax && macdRatio < chopMacdRatioMax) {
-			return RegimeTag.CHOP;
-		}
-		return RegimeTag.TREND;
-	}
-
-	private void validateConfig() {
-		if (props.paperNotionalUsd() <= 0) {
-			throw new IllegalStateException("paperNotionalUsd must be > 0");
-		}
-	}
-
-	enum Side {
-		NONE,
-		LONG,
-		SHORT
-	}
-
-	enum RegimeTag {
-		CHOP,
-		TREND
-	}
-
-	enum ExitReason {
-		TAKE_PROFIT,
-		STOP_LOSS,
-		TIMEOUT_36B,
-		TP_ORDER_FILLED,
-		SL_ORDER_FILLED
-	}
-
-	enum WarmupMode {
-		DERIVE_5M_FROM_1M,
-		DIRECT_5M
-	}
-
-
-	public record WarmupReadiness(String symbol, boolean ready, long have1m, int required1m, long have5m, int required5m, String reason) {
-		static WarmupReadiness ready(String symbol, long have1m, int required1m, long have5m, int required5m) {
-			return new WarmupReadiness(symbol, true, have1m, required1m, have5m, required5m, "READY");
-		}
-
-		static WarmupReadiness notReady(String symbol, long have1m, int required1m, long have5m, int required5m, String reason) {
-			return new WarmupReadiness(symbol, false, have1m, required1m, have5m, required5m, reason);
-		}
-
-		static WarmupReadiness statusNull(String symbol) {
-			return new WarmupReadiness(symbol, false, 0, 0, 0, 0, "STATUS_NULL");
-		}
-	}
-
-		enum DecisionAction {
-		CONTINUE,
-		INPUTS_NOT_READY,
-		IN_POSITION_NO_ENTRY,
-		GLOBAL_MAX_OPEN_POSITIONS
-	}
-
-	record PreCheckAction(DecisionAction action, String blockReason) {
-	}
-
-	private record ExitEvaluation(ExitReason exitReason, String firstHit, String exitTrigger, String ambiguityRule, boolean timeoutLoss) {
-	}
-
-	private record HitSnapshot(double open, double high, double low, double close, double volume, long closeTimeMs) {
-		static HitSnapshot fromCandle(Candle c) {
-			return new HitSnapshot(c.open(), c.high(), c.low(), c.close(), c.volume(), c.closeTime());
-		}
-	}
-
-	private record OrderflowSnapshot(Double quoteVolume, Long tradeCount, Double takerBuyBaseVolume,
-			Double takerBuyQuoteVolume) {
-
-		boolean available() {
-			return quoteVolume != null && tradeCount != null && takerBuyBaseVolume != null && takerBuyQuoteVolume != null;
-		}
-
-		static OrderflowSnapshot fromCandle(Candle candle) {
-			if (candle == null) {
-				return null;
-			}
-			return new OrderflowSnapshot(
-					readDoubleAccessor(candle, "quoteVolume"),
-					readLongAccessor(candle, "tradeCount"),
-					readDoubleAccessor(candle, "takerBuyBaseVolume"),
-					readDoubleAccessor(candle, "takerBuyQuoteVolume"));
-		}
-	}
-
-	private record LiquiditySnapshot(double bestBidPrice, double bestBidQty, double bestAskPrice, double bestAskQty,
-			long eventTimeMs) {
-
-		static LiquiditySnapshot fromContext(ApplicationContext context, String symbol) {
-			if (context == null || symbol == null || symbol.isBlank()) {
-				return null;
-			}
-			try {
-				Class<?> watcherClass = Class.forName("com.binance.strategy.BookTickerStreamWatcher");
-				Object bean = context.getBean(watcherClass);
-				Method getSnapshot = watcherClass.getMethod("getSnapshot", String.class);
-				Object snapshot = getSnapshot.invoke(bean, symbol);
-				if (snapshot == null) {
-					return null;
-				}
-				Double bid = readDoubleAccessor(snapshot, "bestBidPrice");
-				Double bidQty = readDoubleAccessor(snapshot, "bestBidQty");
-				Double ask = readDoubleAccessor(snapshot, "bestAskPrice");
-				Double askQty = readDoubleAccessor(snapshot, "bestAskQty");
-				Long eventTime = readLongAccessor(snapshot, "eventTimeMs");
-				if (bid == null || bidQty == null || ask == null || askQty == null || eventTime == null) {
-					return null;
-				}
-				return new LiquiditySnapshot(bid, bidQty, ask, askQty, eventTime);
-			} catch (ReflectiveOperationException | RuntimeException ex) {
-				LOGGER.debug("BookTicker reflection lookup unavailable: {}", ex.getMessage());
-				return null;
-			}
-		}
-	}
-
-	private static Double readDoubleAccessor(Object target, String accessorName) {
-		if (target == null) {
-			return null;
-		}
-		try {
-			Method method = target.getClass().getMethod(accessorName);
-			Object value = method.invoke(target);
-			if (value == null) {
-				return null;
-			}
-			return value instanceof Number number ? number.doubleValue() : null;
-		} catch (ReflectiveOperationException ex) {
-			return null;
-		}
-	}
-
-	private static Long readLongAccessor(Object target, String accessorName) {
-		if (target == null) {
-			return null;
-		}
-		try {
-			Method method = target.getClass().getMethod(accessorName);
-			Object value = method.invoke(target);
-			if (value == null) {
-				return null;
-			}
-			return value instanceof Number number ? number.longValue() : null;
-		} catch (ReflectiveOperationException ex) {
-			return null;
-		}
-	}
-
-	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend) {
-		private static LongSetupEval empty() {
-			return new LongSetupEval(false, null, null, null, false);
-		}
-	}
-
-
-	private static final class SymbolState {
-		private final String symbol;
-		private long seen1mCloses;
-		private long seen5mCloses;
-		private boolean baselinesReady;
-		private boolean warmupDoneLogged;
-		private long nextWarmupProgressLogAt1m = 10;
-		private LocalDate dayKey;
-		private int entriesToday;
-		private Side positionSide = Side.NONE;
-		private long entryTimeMs;
-		private double entryPrice;
-		private double qty;
-		private double tpPrice;
-		private double slPrice;
-		private Long tpHitTimeMs;
-		private Long slHitTimeMs;
-		private HitSnapshot tpHitBar1m;
-		private HitSnapshot slHitBar1m;
-		private String bracketId;
-		private Long entryOrderId;
-		private String entryClientOrderId;
-		private Long slOrderId;
-		private String slClientOrderId;
-		private Long tpOrderId;
-		private String tpClientOrderId;
-		private Double prevEma20_5m;
-		private final Deque<Candle> last1m = new ArrayDeque<>();
-		private final Deque<Candle> last5m = new ArrayDeque<>();
-		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
-		private final IndicatorState indicators = new IndicatorState();
-		private final RegimeState regimeState = new RegimeState();
-
-		private SymbolState(String symbol) {
-			this.symbol = symbol;
-		}
-	}
-
-	static final class BucketTransition {
-		private final Candle completedCandle;
-		private final Long incompleteBucketStartMs;
-		private final int incompleteCount;
-
-		private BucketTransition(Candle completedCandle, Long incompleteBucketStartMs, int incompleteCount) {
-			this.completedCandle = completedCandle;
-			this.incompleteBucketStartMs = incompleteBucketStartMs;
-			this.incompleteCount = incompleteCount;
-		}
-
-		Candle completedCandle() {
-			return completedCandle;
-		}
-
-		Long incompleteBucketStartMs() {
-			return incompleteBucketStartMs;
-		}
-
-		int incompleteCount() {
-			return incompleteCount;
-		}
-	}
-
-	static final class BucketedFiveMinuteAggregator {
-		private Long currentBucketStartMs;
-		private final List<Candle> currentBucketCandles = new ArrayList<>(5);
-
-		private BucketTransition addFinalOneMinute(Candle candle1m) {
-			long openTimeMs = inferOpenTimeMsFromClose(candle1m.closeTime());
-			long candleBucketStartMs = bucketStartMs(openTimeMs);
-			if (currentBucketStartMs == null) {
-				currentBucketStartMs = candleBucketStartMs;
-				currentBucketCandles.add(candle1m);
-				return new BucketTransition(null, null, 0);
-			}
-			if (candleBucketStartMs < currentBucketStartMs) {
-				return new BucketTransition(null, null, 0);
-			}
-			if (candleBucketStartMs == currentBucketStartMs) {
-				currentBucketCandles.add(candle1m);
-				return new BucketTransition(null, null, 0);
-			}
-
-			BucketTransition finalized = finalizeCurrentBucket();
-			currentBucketStartMs = candleBucketStartMs;
-			currentBucketCandles.clear();
-			currentBucketCandles.add(candle1m);
-			return finalized;
-		}
-
-		private BucketTransition finalizeCurrentBucket() {
-			if (currentBucketStartMs == null) {
-				return new BucketTransition(null, null, 0);
-			}
-			if (currentBucketCandles.size() != 5) {
-				return new BucketTransition(null, currentBucketStartMs, currentBucketCandles.size());
-			}
-			Candle first = currentBucketCandles.get(0);
-			Candle last = currentBucketCandles.get(4);
-			double high = currentBucketCandles.stream().mapToDouble(Candle::high).max().orElse(first.high());
-			double low = currentBucketCandles.stream().mapToDouble(Candle::low).min().orElse(first.low());
-			double volume = currentBucketCandles.stream().mapToDouble(Candle::volume).sum();
-			Double quoteVolume = sumNullableDouble(currentBucketCandles, Candle::quoteVolume);
-			Long tradeCount = sumNullableLong(currentBucketCandles, Candle::tradeCount);
-			Double takerBuyBaseVolume = sumNullableDouble(currentBucketCandles, Candle::takerBuyBaseVolume);
-			Double takerBuyQuoteVolume = sumNullableDouble(currentBucketCandles, Candle::takerBuyQuoteVolume);
-			Candle candle5m = new Candle(
-					first.open(),
-					high,
-					low,
-					last.close(),
-					volume,
-					bucketEndMs(currentBucketStartMs),
-					quoteVolume,
-					tradeCount,
-					takerBuyBaseVolume,
-					takerBuyQuoteVolume);
-			return new BucketTransition(candle5m, null, 0);
-		}
-
-		private BucketTransition flush() {
-			return finalizeCurrentBucket();
-		}
-	}
-
-	private static Double sumNullableDouble(List<Candle> candles, java.util.function.Function<Candle, Double> getter) {
-		double sum = 0.0;
-		for (Candle candle : candles) {
-			Double value = getter.apply(candle);
-			if (value == null) {
-				return null;
-			}
-			sum += value;
-		}
-		return sum;
-	}
-
-	private static Long sumNullableLong(List<Candle> candles, java.util.function.Function<Candle, Long> getter) {
-		long sum = 0L;
-		for (Candle candle : candles) {
-			Long value = getter.apply(candle);
-			if (value == null) {
-				return null;
-			}
-			sum += value;
-		}
-		return sum;
-	}
-
-	private static final class RegimeState {
-		private RegimeTag rawRegimeTag = RegimeTag.CHOP;
-		private RegimeTag activeRegimeTag = RegimeTag.CHOP;
-		private int debounceCounter;
-		private int cooldownCounter;
-		private RegimeTag pendingRegime;
-
-		private RegimeTag update(RegimeTag raw, int debounceBars, int cooldownBars) {
-			rawRegimeTag = raw;
-			if (cooldownCounter > 0) {
-				cooldownCounter--;
-				return activeRegimeTag;
-			}
-			if (pendingRegime != raw) {
-				pendingRegime = raw;
-				debounceCounter = 1;
-				return activeRegimeTag;
-			}
-			debounceCounter++;
-			if (debounceCounter >= debounceBars && activeRegimeTag != raw) {
-				activeRegimeTag = raw;
-				cooldownCounter = cooldownBars;
-				debounceCounter = 0;
-			}
-			return activeRegimeTag;
-		}
-	}
-
-	private static final class IndicatorState {
-		private final Deque<Double> closeWindow20 = new ArrayDeque<>();
-				private final Deque<Double> trWindow14 = new ArrayDeque<>();
-		private double ema20;
-		private double ema20Prev;
-		private boolean ema20Ready;
-		private double prevClose;
-		private boolean prevCloseReady;
-		private double prevCloseAtr;
-		private boolean prevCloseAtrReady;
-		private double avgGain;
-		private double avgLoss;
-		private int rsiCounter;
-		private double ema12;
-		private boolean ema12Ready;
-		private double ema26;
-		private boolean ema26Ready;
-		private double macdSignal;
-		private boolean macdSignalReady;
-		private int bars;
-		private final Ewma bwEma = new Ewma(20);
-		private final Ewma atrEma = new Ewma(20);
-		private final Ewma macdAbsEma = new Ewma(20);
-		private final Ewma volEma = new Ewma(20);
-		private final Ewma volRatioEma = new Ewma(20);
-		private Metrics latest;
-
-		private void update(Candle bar) {
-			bars++;
-			updateEma20(bar.close());
-			updateRsi(bar.close());
-			double atr14 = updateAtr(bar);
-			double atrEmaValue = atrEma.update(atr14);
-			double atrRatio = ratioOrNaN(atr14, atrEmaValue);
-			double bbWidth = computeBbWidth(bar.close());
-			double bwEmaValue = bwEma.update(bbWidth);
-			double bwRatio = ratioOrNaN(bbWidth, bwEmaValue);
-
-			updateMacd(bar.close());
-			double macd = ema12 - ema26;
-			double macdDelta = macd - macdSignal;
-			double macdAbsEmaValue = macdAbsEma.update(Math.abs(macdDelta));
-			double macdRatio = ratioOrNaN(Math.abs(macdDelta), macdAbsEmaValue);
-			double ema20Prev = this.ema20Prev;
-
-			double volEmaValue = volEma.update(bar.volume());
-			double volRatio = ratioOrNaN(bar.volume(), volEmaValue);
-			double volRatioOfEma = volRatioEma.initialized() ? ratioOrNaN(volRatio, volRatioEma.update(volRatio)) : 1.0;
-			if (!volRatioEma.initialized()) {
-				volRatioEma.update(volRatio);
-			}
-
-			double std = std(closeWindow20);
-			double sma = average(closeWindow20);
-			double bbUpper = sma + 2.0 * std;
-			double bbLower = sma - 2.0 * std;
-			double percentB = ratioOrNaN(bar.close() - bbLower, Math.max(bbUpper - bbLower, 1e-9));
-			boolean bbOutside = bar.close() > bbUpper || bar.close() < bbLower;
-			double ema20DistPct = ratio(Math.abs(bar.close() - ema20), Math.max(bar.close(), 1e-9));
-			boolean ema20SlopeDown = ema20Ready && ema20 < ema20Prev;
-			double rsi = computeRsi();
-
-			latest = new Metrics(bbWidth, bwEmaValue, bwRatio, volRatio, volEmaValue, volRatioOfEma, macdRatio, atrRatio,
-					ema20DistPct, percentB, rsi, bbLower, sma, bbUpper, bbOutside, bar.close(), ema20, ema20SlopeDown, macdDelta, macdAbsEmaValue, atr14, atrEmaValue, RegimeTag.CHOP, RegimeTag.CHOP);
-		}
-
-		private void setRegimes(RegimeTag raw, RegimeTag active) {
-			if (latest != null) {
-				latest = latest.withRegimes(raw, active);
-			}
-		}
-
-		private Metrics metrics() {
-			return latest;
-		}
-
-		private boolean baselineIndicatorsSeeded() {
-			return bwEma.initialized() && atrEma.initialized() && macdAbsEma.initialized();
-		}
-
-		private double updateAtr(Candle bar) {
-			double tr;
-			if (!prevCloseAtrReady) {
-				tr = bar.high() - bar.low();
-				prevCloseAtrReady = true;
-			} else {
-				tr = Math.max(bar.high() - bar.low(),
-						Math.max(Math.abs(bar.high() - prevCloseAtr), Math.abs(bar.low() - prevCloseAtr)));
-			}
-			prevCloseAtr = bar.close();
-			push(trWindow14, tr, 14);
-			return average(trWindow14);
-		}
-
-		private void updateEma20(double close) {
-			if (!ema20Ready) {
-				ema20 = close;
-				ema20Prev = close;
-				ema20Ready = true;
-			} else {
-				ema20Prev = ema20;
-				ema20 = ema(ema20, close, 20);
-			}
-			push(closeWindow20, close, 20);
-		}
-
-		private void updateRsi(double close) {
-			if (!prevCloseReady) {
-				prevClose = close;
-				prevCloseReady = true;
-				return;
-			}
-			double change = close - prevClose;
-			double gain = Math.max(change, 0.0);
-			double loss = Math.max(-change, 0.0);
-			rsiCounter++;
-			if (rsiCounter == 1) {
-				avgGain = gain;
-				avgLoss = loss;
-			} else {
-				avgGain = (avgGain * 8 + gain) / 9;
-				avgLoss = (avgLoss * 8 + loss) / 9;
-			}
-			prevClose = close;
-		}
-
-		private void updateMacd(double close) {
-			if (!ema12Ready) {
-				ema12 = close;
-				ema12Ready = true;
-			} else {
-				ema12 = ema(ema12, close, 12);
-			}
-			if (!ema26Ready) {
-				ema26 = close;
-				ema26Ready = true;
-			} else {
-				ema26 = ema(ema26, close, 26);
-			}
-			double macd = ema12 - ema26;
-			if (!macdSignalReady) {
-				macdSignal = macd;
-				macdSignalReady = true;
-			} else {
-				macdSignal = ema(macdSignal, macd, 9);
-			}
-		}
-
-		private double computeBbWidth(double close) {
-			double std = std(closeWindow20);
-			double sma = average(closeWindow20);
-			double upper = sma + 2.0 * std;
-			double lower = sma - 2.0 * std;
-			return ratio(upper - lower, Math.max(close, 1e-9));
-		}
-
-		private double computeRsi() {
-			if (avgLoss <= 1e-9) {
-				return 100.0;
-			}
-			double rs = avgGain / avgLoss;
-			return 100.0 - (100.0 / (1.0 + rs));
-		}
-
-		private double ema(double prev, double current, int period) {
-			double alpha = 2.0 / (period + 1.0);
-			return alpha * current + (1.0 - alpha) * prev;
-		}
-
-		private double average(Deque<Double> values) {
-			if (values.isEmpty()) {
-				return 0.0;
-			}
-			return values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
-		}
-
-		private double std(Deque<Double> values) {
-			if (values.size() < 2) {
-				return 0.0;
-			}
-			double avg = average(values);
-			double var = values.stream().mapToDouble(v -> (v - avg) * (v - avg)).average().orElse(0.0);
-			return Math.sqrt(var);
-		}
-
-		private double ratio(double value, double base) {
-			return base <= 1e-9 ? 1.0 : value / base;
-		}
-
-		private double ratioOrNaN(double value, double base) {
-			return base <= 1e-9 ? Double.NaN : value / base;
-		}
-
-		private void push(Deque<Double> values, double value, int maxSize) {
-			values.addLast(value);
-			if (values.size() > maxSize) {
-				values.removeFirst();
-			}
-		}
-
-	}
-
-	private record Metrics(
-			double bbWidth_5m,
-			double bwEma_5m,
-			double bwRatio5m,
-			double volRatio,
-			double volEma_5m,
-			double volRatioOfEma,
-			double macdRatio5m,
-			double atrRatio5m,
-			double ema20DistPct,
-			double bbPercentB_5m,
-			double rsi9_5m,
-			double bbLower,
-			double bbMiddle,
-			double bbUpper,
-			boolean bbOutside_5m,
-			double close5m,
-			double ema20_5m,
-			boolean ema20SlopeDown,
-			double macdDelta,
-			double macdAbsEma_5m,
-			double atr14,
-			double atrEma_5m,
-			RegimeTag rawRegimeTag,
-			RegimeTag activeRegimeTag) {
-
-		private Metrics withRegimes(RegimeTag raw, RegimeTag active) {
-			return new Metrics(bbWidth_5m, bwEma_5m, bwRatio5m, volRatio, volEma_5m, volRatioOfEma, macdRatio5m, atrRatio5m,
-					ema20DistPct, bbPercentB_5m, rsi9_5m, bbLower, bbMiddle, bbUpper, bbOutside_5m,
-					close5m, ema20_5m, ema20SlopeDown, macdDelta, macdAbsEma_5m, atr14, atrEma_5m, raw, active);
-		}
-	}
-
-private static final class Ewma {
-		private final double alpha;
-		private boolean initialized;
-		private double value;
-
-		private Ewma(int period) {
-			this.alpha = 2.0 / (period + 1.0);
-		}
-
-		private double update(double next) {
-			if (!initialized) {
-				value = next;
-				initialized = true;
-			} else {
-				value = alpha * next + (1.0 - alpha) * value;
-			}
-			return value;
-		}
-
-		private boolean initialized() {
-			return initialized;
-		}
-	}
-
-	private static final class AsyncJsonlWriter {
-		private final Logger logger = LoggerFactory.getLogger(AsyncJsonlWriter.class);
-		private final ArrayBlockingQueue<LogItem> queue;
-		private final AtomicBoolean running = new AtomicBoolean(false);
-		private final AtomicLong dropped = new AtomicLong();
-		private Thread worker;
-
-		private AsyncJsonlWriter(int capacity) {
-			this.queue = new ArrayBlockingQueue<>(capacity);
-		}
-
-		private void start() {
-			if (!running.compareAndSet(false, true)) {
-				return;
-			}
-			worker = new Thread(() -> {
-				while (running.get() || !queue.isEmpty()) {
-					try {
-						LogItem item = queue.poll();
-						if (item == null) {
-							Thread.sleep(10);
-							continue;
-						}
-						Files.createDirectories(item.path().getParent());
-						Files.writeString(item.path(), item.line() + "\n", StandardCharsets.UTF_8,
-								StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-					} catch (InterruptedException e) {
-						Thread.currentThread().interrupt();
-					} catch (IOException ioe) {
-						logger.warn("elite log write failed", ioe);
-					}
-				}
-			});
-			worker.setName("elite-v1-log-writer");
-			worker.start();
-		}
-
-		private void write(Path path, String line, boolean critical) {
-			LogItem item = new LogItem(path, line);
-			if (critical) {
-				try {
-					queue.put(item);
-				} catch (InterruptedException e) {
-					Thread.currentThread().interrupt();
-				}
-				return;
-			}
-			if (!queue.offer(item)) {
-				long droppedCount = dropped.incrementAndGet();
-				if (droppedCount % 100 == 0) {
-					logger.warn("elite decision log dropped={} entries", droppedCount);
-				}
-			}
-		}
-
-		private void stop() {
-			running.set(false);
-			if (worker != null) {
-				worker.interrupt();
-			}
-		}
-
-		private record LogItem(Path path, String line) {
-		}
-	}
-	static long bucketStartMs(long openTimeMs) {
-		return (openTimeMs / FIVE_MIN_MS) * FIVE_MIN_MS;
-	}
-
-	static long bucketEndMs(long bucketStartMs) {
-		return bucketStartMs + FIVE_MIN_MS - 1;
-	}
-
-	static long inferOpenTimeMsFromClose(long closeTimeMs) {
-		return closeTimeMs - (ONE_MIN_MS - 1);
-	}
+			String activeRegimeTag,
+			Long closeTimeMs,
+			Double close,
+			Double ret30,
+			Double ret60,
+			Long staleMs) {
+	}private record LongSetupEval(boolean signal,
+                                 String blockReason,
+                                 Double takerBuyRatio,
+                                 Double imbalance,
+                                 boolean isDownTrend,
+                                 double pbMaxUsed,
+                                 Double emaSignedDist,
+                                 double emaMaxUsed) {
+        private static LongSetupEval empty() {
+            return new LongSetupEval(false, null, null, null, false, Double.NaN, null, EMA_SIGNED_DIST_MAX);
+        }
+    }
+
+
+    private static final class SymbolState {
+        private final String symbol;
+        private long seen1mCloses;
+        private long seen5mCloses;
+        private boolean baselinesReady;
+        private boolean warmupDoneLogged;
+        private long nextWarmupProgressLogAt1m = 10;
+        private LocalDate dayKey;
+        private int entriesToday;
+        private Side positionSide = Side.NONE;
+        private long entryTimeMs;
+        private double entryPrice;
+        private double qty;
+        private double tpPrice;
+        private double slPrice;
+        private Long tpHitTimeMs;
+        private Long slHitTimeMs;
+        private HitSnapshot tpHitBar1m;
+        private HitSnapshot slHitBar1m;
+        private String bracketId;
+        private Long entryOrderId;
+        private String entryClientOrderId;
+        private Long slOrderId;
+        private String slClientOrderId;
+        private Long tpOrderId;
+        private String tpClientOrderId;
+        private Double prevEma20_5m;
+        private final Deque<Candle> last1m = new ArrayDeque<>();
+        private final Deque<Candle> last5m = new ArrayDeque<>();
+        private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
+        private final IndicatorState indicators = new IndicatorState();
+        private final RegimeState regimeState = new RegimeState();
+
+        private SymbolState(String symbol) {
+            this.symbol = symbol;
+        }
+    }
+
+    static final class BucketTransition {
+        private final Candle completedCandle;
+        private final Long incompleteBucketStartMs;
+        private final int incompleteCount;
+
+        private BucketTransition(Candle completedCandle, Long incompleteBucketStartMs, int incompleteCount) {
+            this.completedCandle = completedCandle;
+            this.incompleteBucketStartMs = incompleteBucketStartMs;
+            this.incompleteCount = incompleteCount;
+        }
+
+        Candle completedCandle() {
+            return completedCandle;
+        }
+
+        Long incompleteBucketStartMs() {
+            return incompleteBucketStartMs;
+        }
+
+        int incompleteCount() {
+            return incompleteCount;
+        }
+    }
+
+    static final class BucketedFiveMinuteAggregator {
+        private Long currentBucketStartMs;
+        private final List<Candle> currentBucketCandles = new ArrayList<>(5);
+
+        private BucketTransition addFinalOneMinute(Candle candle1m) {
+            long openTimeMs = inferOpenTimeMsFromClose(candle1m.closeTime());
+            long candleBucketStartMs = bucketStartMs(openTimeMs);
+            if (currentBucketStartMs == null) {
+                currentBucketStartMs = candleBucketStartMs;
+                currentBucketCandles.add(candle1m);
+                return new BucketTransition(null, null, 0);
+            }
+            if (candleBucketStartMs < currentBucketStartMs) {
+                return new BucketTransition(null, null, 0);
+            }
+            if (candleBucketStartMs == currentBucketStartMs) {
+                currentBucketCandles.add(candle1m);
+                return new BucketTransition(null, null, 0);
+            }
+
+            BucketTransition finalized = finalizeCurrentBucket();
+            currentBucketStartMs = candleBucketStartMs;
+            currentBucketCandles.clear();
+            currentBucketCandles.add(candle1m);
+            return finalized;
+        }
+
+        private BucketTransition finalizeCurrentBucket() {
+            if (currentBucketStartMs == null) {
+                return new BucketTransition(null, null, 0);
+            }
+            if (currentBucketCandles.size() != 5) {
+                return new BucketTransition(null, currentBucketStartMs, currentBucketCandles.size());
+            }
+            Candle first = currentBucketCandles.get(0);
+            Candle last = currentBucketCandles.get(4);
+            double high = currentBucketCandles.stream().mapToDouble(Candle::high).max().orElse(first.high());
+            double low = currentBucketCandles.stream().mapToDouble(Candle::low).min().orElse(first.low());
+            double volume = currentBucketCandles.stream().mapToDouble(Candle::volume).sum();
+            Double quoteVolume = sumNullableDouble(currentBucketCandles, Candle::quoteVolume);
+            Long tradeCount = sumNullableLong(currentBucketCandles, Candle::tradeCount);
+            Double takerBuyBaseVolume = sumNullableDouble(currentBucketCandles, Candle::takerBuyBaseVolume);
+            Double takerBuyQuoteVolume = sumNullableDouble(currentBucketCandles, Candle::takerBuyQuoteVolume);
+            Candle candle5m = new Candle(
+                    first.open(),
+                    high,
+                    low,
+                    last.close(),
+                    volume,
+                    bucketEndMs(currentBucketStartMs),
+                    quoteVolume,
+                    tradeCount,
+                    takerBuyBaseVolume,
+                    takerBuyQuoteVolume);
+            return new BucketTransition(candle5m, null, 0);
+        }
+
+        private BucketTransition flush() {
+            return finalizeCurrentBucket();
+        }
+    }
+
+    private static Double sumNullableDouble(List<Candle> candles, java.util.function.Function<Candle, Double> getter) {
+        double sum = 0.0;
+        for (Candle candle : candles) {
+            Double value = getter.apply(candle);
+            if (value == null) {
+                return null;
+            }
+            sum += value;
+        }
+        return sum;
+    }
+
+    private static Long sumNullableLong(List<Candle> candles, java.util.function.Function<Candle, Long> getter) {
+        long sum = 0L;
+        for (Candle candle : candles) {
+            Long value = getter.apply(candle);
+            if (value == null) {
+                return null;
+            }
+            sum += value;
+        }
+        return sum;
+    }
+
+    private static final class RegimeState {
+        private RegimeTag rawRegimeTag = RegimeTag.CHOP;
+        private RegimeTag activeRegimeTag = RegimeTag.CHOP;
+        private int debounceCounter;
+        private int cooldownCounter;
+        private RegimeTag pendingRegime;
+
+        private RegimeTag update(RegimeTag raw, int debounceBars, int cooldownBars) {
+            rawRegimeTag = raw;
+            if (cooldownCounter > 0) {
+                cooldownCounter--;
+                return activeRegimeTag;
+            }
+            if (pendingRegime != raw) {
+                pendingRegime = raw;
+                debounceCounter = 1;
+                return activeRegimeTag;
+            }
+            debounceCounter++;
+            if (debounceCounter >= debounceBars && activeRegimeTag != raw) {
+                activeRegimeTag = raw;
+                cooldownCounter = cooldownBars;
+                debounceCounter = 0;
+            }
+            return activeRegimeTag;
+        }
+    }
+
+    private static final class IndicatorState {
+        private final Deque<Double> closeWindow20 = new ArrayDeque<>();
+        private final Deque<Double> trWindow14 = new ArrayDeque<>();
+        private double ema20;
+        private double ema20Prev;
+        private boolean ema20Ready;
+        private double prevClose;
+        private boolean prevCloseReady;
+        private double prevCloseAtr;
+        private boolean prevCloseAtrReady;
+        private double avgGain;
+        private double avgLoss;
+        private int rsiCounter;
+        private double ema12;
+        private boolean ema12Ready;
+        private double ema26;
+        private boolean ema26Ready;
+        private double macdSignal;
+        private boolean macdSignalReady;
+        private int bars;
+        private final Ewma bwEma = new Ewma(20);
+        private final Ewma atrEma = new Ewma(20);
+        private final Ewma macdAbsEma = new Ewma(20);
+        private final Ewma volEma = new Ewma(20);
+        private final Ewma volRatioEma = new Ewma(20);
+        private Metrics latest;
+
+        private void update(Candle bar) {
+            bars++;
+            updateEma20(bar.close());
+            updateRsi(bar.close());
+            double atr14 = updateAtr(bar);
+            double atrEmaValue = atrEma.update(atr14);
+            double atrRatio = ratioOrNaN(atr14, atrEmaValue);
+            double bbWidth = computeBbWidth(bar.close());
+            double bwEmaValue = bwEma.update(bbWidth);
+            double bwRatio = ratioOrNaN(bbWidth, bwEmaValue);
+
+            updateMacd(bar.close());
+            double macd = ema12 - ema26;
+            double macdDelta = macd - macdSignal;
+            double macdAbsEmaValue = macdAbsEma.update(Math.abs(macdDelta));
+            double macdRatio = ratioOrNaN(Math.abs(macdDelta), macdAbsEmaValue);
+            double ema20Prev = this.ema20Prev;
+
+            double volEmaValue = volEma.update(bar.volume());
+            double volRatio = ratioOrNaN(bar.volume(), volEmaValue);
+            double volRatioOfEma = volRatioEma.initialized() ? ratioOrNaN(volRatio, volRatioEma.update(volRatio)) : 1.0;
+            if (!volRatioEma.initialized()) {
+                volRatioEma.update(volRatio);
+            }
+
+            double std = std(closeWindow20);
+            double sma = average(closeWindow20);
+            double bbUpper = sma + 2.0 * std;
+            double bbLower = sma - 2.0 * std;
+            double percentB = ratioOrNaN(bar.close() - bbLower, Math.max(bbUpper - bbLower, 1e-9));
+            boolean bbOutside = bar.close() > bbUpper || bar.close() < bbLower;
+            double ema20DistPct = ratio(Math.abs(bar.close() - ema20), Math.max(bar.close(), 1e-9));
+            boolean ema20SlopeDown = ema20Ready && ema20 < ema20Prev;
+            double rsi = computeRsi();
+
+            latest = new Metrics(bbWidth, bwEmaValue, bwRatio, volRatio, volEmaValue, volRatioOfEma, macdRatio, atrRatio,
+                    ema20DistPct, percentB, rsi, bbLower, sma, bbUpper, bbOutside, bar.close(), ema20, ema20SlopeDown, macdDelta, macdAbsEmaValue, atr14, atrEmaValue, RegimeTag.CHOP, RegimeTag.CHOP);
+        }
+
+        private void setRegimes(RegimeTag raw, RegimeTag active) {
+            if (latest != null) {
+                latest = latest.withRegimes(raw, active);
+            }
+        }
+
+        private Metrics metrics() {
+            return latest;
+        }
+
+        private boolean baselineIndicatorsSeeded() {
+            return bwEma.initialized() && atrEma.initialized() && macdAbsEma.initialized();
+        }
+
+        private double updateAtr(Candle bar) {
+            double tr;
+            if (!prevCloseAtrReady) {
+                tr = bar.high() - bar.low();
+                prevCloseAtrReady = true;
+            } else {
+                tr = Math.max(bar.high() - bar.low(),
+                        Math.max(Math.abs(bar.high() - prevCloseAtr), Math.abs(bar.low() - prevCloseAtr)));
+            }
+            prevCloseAtr = bar.close();
+            push(trWindow14, tr, 14);
+            return average(trWindow14);
+        }
+
+        private void updateEma20(double close) {
+            if (!ema20Ready) {
+                ema20 = close;
+                ema20Prev = close;
+                ema20Ready = true;
+            } else {
+                ema20Prev = ema20;
+                ema20 = ema(ema20, close, 20);
+            }
+            push(closeWindow20, close, 20);
+        }
+
+        private void updateRsi(double close) {
+            if (!prevCloseReady) {
+                prevClose = close;
+                prevCloseReady = true;
+                return;
+            }
+            double change = close - prevClose;
+            double gain = Math.max(change, 0.0);
+            double loss = Math.max(-change, 0.0);
+            rsiCounter++;
+            if (rsiCounter == 1) {
+                avgGain = gain;
+                avgLoss = loss;
+            } else {
+                avgGain = (avgGain * 8 + gain) / 9;
+                avgLoss = (avgLoss * 8 + loss) / 9;
+            }
+            prevClose = close;
+        }
+
+        private void updateMacd(double close) {
+            if (!ema12Ready) {
+                ema12 = close;
+                ema12Ready = true;
+            } else {
+                ema12 = ema(ema12, close, 12);
+            }
+            if (!ema26Ready) {
+                ema26 = close;
+                ema26Ready = true;
+            } else {
+                ema26 = ema(ema26, close, 26);
+            }
+            double macd = ema12 - ema26;
+            if (!macdSignalReady) {
+                macdSignal = macd;
+                macdSignalReady = true;
+            } else {
+                macdSignal = ema(macdSignal, macd, 9);
+            }
+        }
+
+        private double computeBbWidth(double close) {
+            double std = std(closeWindow20);
+            double sma = average(closeWindow20);
+            double upper = sma + 2.0 * std;
+            double lower = sma - 2.0 * std;
+            return ratio(upper - lower, Math.max(close, 1e-9));
+        }
+
+        private double computeRsi() {
+            if (avgLoss <= 1e-9) {
+                return 100.0;
+            }
+            double rs = avgGain / avgLoss;
+            return 100.0 - (100.0 / (1.0 + rs));
+        }
+
+        private double ema(double prev, double current, int period) {
+            double alpha = 2.0 / (period + 1.0);
+            return alpha * current + (1.0 - alpha) * prev;
+        }
+
+        private double average(Deque<Double> values) {
+            if (values.isEmpty()) {
+                return 0.0;
+            }
+            return values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+        }
+
+        private double std(Deque<Double> values) {
+            if (values.size() < 2) {
+                return 0.0;
+            }
+            double avg = average(values);
+            double var = values.stream().mapToDouble(v -> (v - avg) * (v - avg)).average().orElse(0.0);
+            return Math.sqrt(var);
+        }
+
+        private double ratio(double value, double base) {
+            return base <= 1e-9 ? 1.0 : value / base;
+        }
+
+        private double ratioOrNaN(double value, double base) {
+            return base <= 1e-9 ? Double.NaN : value / base;
+        }
+
+        private void push(Deque<Double> values, double value, int maxSize) {
+            values.addLast(value);
+            if (values.size() > maxSize) {
+                values.removeFirst();
+            }
+        }
+
+    }
+
+    private record Metrics(
+            double bbWidth_5m,
+            double bwEma_5m,
+            double bwRatio5m,
+            double volRatio,
+            double volEma_5m,
+            double volRatioOfEma,
+            double macdRatio5m,
+            double atrRatio5m,
+            double ema20DistPct,
+            double bbPercentB_5m,
+            double rsi9_5m,
+            double bbLower,
+            double bbMiddle,
+            double bbUpper,
+            boolean bbOutside_5m,
+            double close5m,
+            double ema20_5m,
+            boolean ema20SlopeDown,
+            double macdDelta,
+            double macdAbsEma_5m,
+            double atr14,
+            double atrEma_5m,
+            RegimeTag rawRegimeTag,
+            RegimeTag activeRegimeTag) {
+
+        private Metrics withRegimes(RegimeTag raw, RegimeTag active) {
+            return new Metrics(bbWidth_5m, bwEma_5m, bwRatio5m, volRatio, volEma_5m, volRatioOfEma, macdRatio5m, atrRatio5m,
+                    ema20DistPct, bbPercentB_5m, rsi9_5m, bbLower, bbMiddle, bbUpper, bbOutside_5m,
+                    close5m, ema20_5m, ema20SlopeDown, macdDelta, macdAbsEma_5m, atr14, atrEma_5m, raw, active);
+        }
+    }
+
+    private static final class Ewma {
+        private final double alpha;
+        private boolean initialized;
+        private double value;
+
+        private Ewma(int period) {
+            this.alpha = 2.0 / (period + 1.0);
+        }
+
+        private double update(double next) {
+            if (!initialized) {
+                value = next;
+                initialized = true;
+            } else {
+                value = alpha * next + (1.0 - alpha) * value;
+            }
+            return value;
+        }
+
+        private boolean initialized() {
+            return initialized;
+        }
+    }
+
+    private static final class AsyncJsonlWriter {
+        private final Logger logger = LoggerFactory.getLogger(AsyncJsonlWriter.class);
+        private final ArrayBlockingQueue<LogItem> queue;
+        private final AtomicBoolean running = new AtomicBoolean(false);
+        private final AtomicLong dropped = new AtomicLong();
+        private Thread worker;
+
+        private AsyncJsonlWriter(int capacity) {
+            this.queue = new ArrayBlockingQueue<>(capacity);
+        }
+
+        private void start() {
+            if (!running.compareAndSet(false, true)) {
+                return;
+            }
+            worker = new Thread(() -> {
+                while (running.get() || !queue.isEmpty()) {
+                    try {
+                        LogItem item = queue.poll();
+                        if (item == null) {
+                            Thread.sleep(10);
+                            continue;
+                        }
+                        Files.createDirectories(item.path().getParent());
+                        Files.writeString(item.path(), item.line() + "\n", StandardCharsets.UTF_8,
+                                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } catch (IOException ioe) {
+                        logger.warn("elite log write failed", ioe);
+                    }
+                }
+            });
+            worker.setName("elite-v1-log-writer");
+            worker.start();
+        }
+
+        private void write(Path path, String line, boolean critical) {
+            LogItem item = new LogItem(path, line);
+            if (critical) {
+                try {
+                    queue.put(item);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return;
+            }
+            if (!queue.offer(item)) {
+                long droppedCount = dropped.incrementAndGet();
+                if (droppedCount % 100 == 0) {
+                    logger.warn("elite decision log dropped={} entries", droppedCount);
+                }
+            }
+        }
+
+        private void stop() {
+            running.set(false);
+            if (worker != null) {
+                worker.interrupt();
+            }
+        }
+
+        private record LogItem(Path path, String line) {
+        }
+    }
+
+    static long bucketStartMs(long openTimeMs) {
+        return (openTimeMs / FIVE_MIN_MS) * FIVE_MIN_MS;
+    }
+
+    static long bucketEndMs(long bucketStartMs) {
+        return bucketStartMs + FIVE_MIN_MS - 1;
+    }
+
+    static long inferOpenTimeMsFromClose(long closeTimeMs) {
+        return closeTimeMs - (ONE_MIN_MS - 1);
+    }
 }
