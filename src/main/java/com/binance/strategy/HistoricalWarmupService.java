@@ -62,7 +62,7 @@ public class HistoricalWarmupService {
 		if (!isWarmupEnabled() || !strategyRouter.needsKlines()) {
 			return;
 		}
-		List<String> symbols = strategyProperties.resolvedTradeSymbols();
+		List<String> symbols = resolveWarmupSymbols();
 		symbolFilterService.preloadFilters(symbols)
 				.then(warmupAllSymbols(symbols))
 				.subscribe();
@@ -73,6 +73,27 @@ public class HistoricalWarmupService {
 			return eliteV1Properties.warmup() != null && eliteV1Properties.warmup().enabled();
 		}
 		return warmupProperties.enabled();
+	}
+
+	private List<String> resolveWarmupSymbols() {
+		List<String> source = strategyProperties.active() == StrategyType.ELITE_V1
+				? eliteV1Properties.symbols()
+				: strategyProperties.resolvedTradeSymbols();
+		if (source == null) {
+			return List.of();
+		}
+		List<String> sanitized = source.stream()
+				.filter(java.util.Objects::nonNull)
+				.map(String::trim)
+				.filter(symbol -> !symbol.isBlank())
+				.map(String::toUpperCase)
+				.distinct()
+				.filter(symbol -> strategyProperties.active() != StrategyType.ELITE_V1 || !symbol.contains("I"))
+				.toList();
+		if (strategyProperties.active() == StrategyType.ELITE_V1 && sanitized.size() != source.size()) {
+			LOGGER.warn("EVENT=WARMUP_SYMBOLS_SANITIZED dropped={} reason=CONTAINS_I_OR_INVALID", source.size() - sanitized.size());
+		}
+		return sanitized;
 	}
 
 	public Mono<Void> warmupAllSymbols(List<String> symbols) {
