@@ -71,12 +71,38 @@ public class BinanceMarketClient {
 	}
 
 	public Mono<KlineResponse> fetchFuturesKlinesRaw(String symbol, String interval, int limit) {
+		return fetchFuturesKlinesRaw(symbol, interval, limit, null);
+	}
+
+	public Mono<KlineResponse> fetchFuturesKlinesRaw(String symbol, String interval, int limit, Long endTimeMs) {
+		return binanceWebClient
+				.get()
+				.uri(uriBuilder -> {
+					var builder = uriBuilder
+							.path("/fapi/v1/klines")
+							.queryParam("symbol", symbol)
+							.queryParam("interval", interval)
+							.queryParam("limit", limit);
+					if (endTimeMs != null && endTimeMs > 0L) {
+						builder = builder.queryParam("endTime", endTimeMs);
+					}
+					return builder.build();
+				})
+				.exchangeToMono(response -> response.bodyToMono(String.class)
+						.defaultIfEmpty("")
+						.map(body -> new KlineResponse(response.statusCode().value(), body)));
+	}
+
+
+	public Mono<KlineResponse> fetchFuturesKlinesRaw(String symbol, String interval, long startTimeMs, long endTimeMs, int limit) {
 		return binanceWebClient
 				.get()
 				.uri(uriBuilder -> uriBuilder
 						.path("/fapi/v1/klines")
 						.queryParam("symbol", symbol)
 						.queryParam("interval", interval)
+						.queryParam("startTime", startTimeMs)
+						.queryParam("endTime", endTimeMs)
 						.queryParam("limit", limit)
 						.build())
 				.exchangeToMono(response -> response.bodyToMono(String.class)
