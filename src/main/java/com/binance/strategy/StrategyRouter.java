@@ -111,6 +111,12 @@ public class StrategyRouter {
 		}
 	}
 
+	public void disableEliteSymbol(String symbol, String reason) {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			eliteV1Strategy.disableSymbol(symbol, reason);
+		}
+	}
+
 	public int eliteGlobalSamples() {
 		if (strategyProperties.active() != StrategyType.ELITE_V1) {
 			return 0;

@@ -93,6 +93,23 @@ public class BinanceMarketClient {
 						.map(body -> new KlineResponse(response.statusCode().value(), body)));
 	}
 
+
+	public Mono<KlineResponse> fetchFuturesKlinesRaw(String symbol, String interval, long startTimeMs, long endTimeMs, int limit) {
+		return binanceWebClient
+				.get()
+				.uri(uriBuilder -> uriBuilder
+						.path("/fapi/v1/klines")
+						.queryParam("symbol", symbol)
+						.queryParam("interval", interval)
+						.queryParam("startTime", startTimeMs)
+						.queryParam("endTime", endTimeMs)
+						.queryParam("limit", limit)
+						.build())
+				.exchangeToMono(response -> response.bodyToMono(String.class)
+						.defaultIfEmpty("")
+						.map(body -> new KlineResponse(response.statusCode().value(), body)));
+	}
+
 	public record KlineResponse(
 			int statusCode,
 			String body) {

@@ -29,8 +29,8 @@ public class HistoricalWarmupService {
 	private static final int DEFAULT_CANDLES_1M = 240;
 	private static final int DEFAULT_CANDLES_5M = 120;
 	private static final int DEFAULT_CONCURRENCY = 3;
-	private static final int WARMUP_FETCH_BUFFER_5M = 10;
-	private static final int WARMUP_FETCH_RETRY_5M = 2;
+	private static final int WARMUP_FETCH_BUFFER_5M = 5;
+	private static final int WARMUP_FETCH_RETRY_5M = 5;
 	private static final long FIVE_MIN_MS = 300_000L;
 	private static final int MIN_GLOBAL_SAMPLES = 120;
 	private static final double MIN_READY_RATIO = 0.70;
@@ -108,32 +108,36 @@ public class HistoricalWarmupService {
 		long start = System.currentTimeMillis();
 		strategyRouter.setWarmupMode(true);
 		if (strategyProperties.active() == StrategyType.ELITE_V1) {
-			return warmupEliteTimeMajor(symbols, start);
+			return warmupElite(symbols, start);
 		}
 		return warmupDefault(symbols, start);
 	}
 
-	private Mono<Void> warmupEliteTimeMajor(List<String> symbols, long startMs) {
+	private Mono<Void> warmupElite(List<String> symbols, long startMs) {
 		int required = resolveCandles5m();
 		long endMs = closedFiveMinuteEndMs(System.currentTimeMillis());
 		LOGGER.info("EVENT=WARMUP_START required5m={} symbols={} endMs={}", required, symbols.size(), endMs);
-		AtomicInteger failedSymbols = new AtomicInteger();
 		Map<String, String> notReadyReasons = new java.util.concurrent.ConcurrentHashMap<>();
+		AtomicInteger disabled = new AtomicInteger();
 
 		return Flux.fromIterable(symbols)
-				.flatMap(symbol -> fetchEliteWarmupCandles(symbol, required, endMs)
+				.flatMap(symbol -> fetchExactClosedFiveMinuteCandles(symbol, required, endMs)
 						.map(candles -> {
 							if (candles.size() < required) {
-								failedSymbols.incrementAndGet();
-								notReadyReasons.put(symbol, "INSUFFICIENT_CLOSED_5M_BARS " + candles.size() + "/" + required);
-								LOGGER.warn("EVENT=WARMUP_SYMBOL_FAILED symbol={} have={} required={} reason=INSUFFICIENT_CLOSED_5M_BARS", symbol, candles.size(), required);
+								disabled.incrementAndGet();
+								String reason = "INSUFFICIENT_HISTORY have=" + candles.size() + " required=" + required;
+								strategyRouter.disableEliteSymbol(symbol, reason);
+								notReadyReasons.put(symbol, reason);
+								LOGGER.warn("EVENT=WARMUP_SYMBOL_FAILED symbol={} have={} required={} reason=INSUFFICIENT_HISTORY", symbol, candles.size(), required);
 							}
 							return Map.entry(symbol, candles);
 						})
 						.onErrorResume(error -> {
-							failedSymbols.incrementAndGet();
-							notReadyReasons.put(symbol, "EXCEPTION " + error.getMessage());
-							LOGGER.warn("EVENT=WARMUP_SYMBOL_FAILED symbol={} have=0 required={} reason={} ", symbol, required, error.getMessage());
+							disabled.incrementAndGet();
+							String reason = "EXCEPTION " + error.getMessage();
+							strategyRouter.disableEliteSymbol(symbol, reason);
+							notReadyReasons.put(symbol, reason);
+							LOGGER.warn("EVENT=WARMUP_SYMBOL_FAILED symbol={} have=0 required={} reason={}", symbol, required, error.getMessage());
 							return Mono.just(Map.entry(symbol, List.<WarmupCandle>of()));
 						}), resolveConcurrency())
 				.collectMap(Map.Entry::getKey, Map.Entry::getValue)
@@ -153,25 +157,34 @@ public class HistoricalWarmupService {
 						}
 						strategyRouter.markWarmupFinished(symbol, System.currentTimeMillis());
 					}
+
 					int total = symbols.size();
-					double readyRatio = total == 0 ? 0.0 : ready / (double) total;
+					int effectiveTotal = Math.max(1, total - disabled.get());
+					double readyRatio = ready / (double) effectiveTotal;
 					int globalSamples = strategyRouter.eliteGlobalSamples();
 					boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
 					boolean warmupReady = readyRatio >= MIN_READY_RATIO && globalSamples >= MIN_GLOBAL_SAMPLES && filtersReady;
-					if (warmupReady) {
-						klineStreamWatcher.markWarmupComplete();
-						klineStreamWatcher.startStreams();
-						markPriceStreamWatcher.markWarmupComplete();
-						markPriceStreamWatcher.startStreams();
-						strategyRouter.setWarmupMode(false);
-						strategyRouter.enableOrdersAfterWarmup(true);
-					}
+
+					strategyRouter.setWarmupMode(false);
+					strategyRouter.enableOrdersAfterWarmup(true);
+					klineStreamWatcher.markWarmupComplete();
+					klineStreamWatcher.startStreams();
+					markPriceStreamWatcher.markWarmupComplete();
+					markPriceStreamWatcher.startStreams();
+
 					long durationMs = System.currentTimeMillis() - startMs;
 					LOGGER.info("EVENT=WARMUP_DONE readySymbols={} notReadySymbols={} failedSymbols={} totalDurationMs={}",
 							ready,
 							Math.max(0, total - ready),
-							failedSymbols.get(),
+							disabled.get(),
 							durationMs);
+					LOGGER.info("EVENT=WARMUP_DONE_SUMMARY readySymbols={} disabledSymbols={} totalSymbols={} readyRatio={} globalSamples={} warmupReady={}",
+							ready,
+							disabled.get(),
+							total,
+							readyRatio,
+							globalSamples,
+							warmupReady);
 					notReadyReasons.forEach((symbol, reason) -> LOGGER.info("EVENT=WARMUP_NOT_READY symbol={} reason={}", symbol, reason));
 					return Mono.empty();
 				});
@@ -202,36 +215,40 @@ public class HistoricalWarmupService {
 		}
 	}
 
-	private Mono<List<WarmupCandle>> fetchEliteWarmupCandles(String symbol, int required, long endMs) {
-		int fetchLimit = Math.max(required + WARMUP_FETCH_BUFFER_5M, required + 1);
-		return fetchEliteWarmupCandlesRecursive(symbol, required, fetchLimit, endMs, 0, new TreeMap<>());
+	private Mono<List<WarmupCandle>> fetchExactClosedFiveMinuteCandles(String symbol, int target, long baseEndMs) {
+		int requestLimit = target + WARMUP_FETCH_BUFFER_5M;
+		return fetchWithRetry(symbol, target, requestLimit, baseEndMs, 0, new TreeMap<>());
 	}
 
-	private Mono<List<WarmupCandle>> fetchEliteWarmupCandlesRecursive(String symbol,
-			int required,
-			int fetchLimit,
-			long endMs,
+	private Mono<List<WarmupCandle>> fetchWithRetry(String symbol,
+			int target,
+			int requestLimit,
+			long endTimeMs,
 			int attempt,
 			TreeMap<Long, WarmupCandle> acc) {
-		return marketClient.fetchFuturesKlinesRaw(symbol, "5m", fetchLimit, endMs)
+		long startTimeMs = endTimeMs - (requestLimit * FIVE_MIN_MS) + 1;
+		return marketClient.fetchFuturesKlinesRaw(symbol, "5m", startTimeMs, endTimeMs, requestLimit)
 				.map(response -> parseKlines(response.body(), symbol))
 				.flatMap(klines -> {
-					List<WarmupCandle> closed = klines.stream()
-							.sorted(Comparator.comparingLong(WarmupCandle::closeTime))
-							.filter(k -> k.closeTime() <= endMs)
-							.filter(k -> k.closeTime() % FIVE_MIN_MS == (FIVE_MIN_MS - 1))
+					List<WarmupCandle> filtered = klines.stream()
+							.filter(k -> k.openTime() > 0L && k.closeTime() > 0L)
+							.filter(k -> k.closeTime() <= endTimeMs)
+							.sorted(Comparator.comparingLong(WarmupCandle::openTime))
 							.toList();
-					for (WarmupCandle candle : closed) {
-						acc.put(candle.closeTime(), candle);
+					for (WarmupCandle candle : filtered) {
+						acc.put(candle.openTime(), candle);
 					}
-					while (acc.size() > required) {
-						acc.pollFirstEntry();
+					if (acc.size() >= target || attempt >= WARMUP_FETCH_RETRY_5M || filtered.isEmpty()) {
+						List<WarmupCandle> out = new ArrayList<>(acc.values());
+						out.sort(Comparator.comparingLong(WarmupCandle::openTime));
+						if (out.size() > target) {
+							out = out.subList(out.size() - target, out.size());
+						}
+						return Mono.just(out);
 					}
-					if (acc.size() >= required || attempt >= WARMUP_FETCH_RETRY_5M || closed.isEmpty()) {
-						return Mono.just(new ArrayList<>(acc.values()));
-					}
-					long nextEndMs = closed.stream().mapToLong(WarmupCandle::closeTime).min().orElse(endMs) - 1;
-					return fetchEliteWarmupCandlesRecursive(symbol, required, fetchLimit, nextEndMs, attempt + 1, acc);
+					long firstOpen = filtered.get(0).openTime();
+					long endTimeMs2 = firstOpen - 1;
+					return fetchWithRetry(symbol, target, requestLimit, endTimeMs2, attempt + 1, acc);
 				})
 				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " 5m", error));
 	}

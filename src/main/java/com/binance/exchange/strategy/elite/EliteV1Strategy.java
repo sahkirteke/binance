@@ -91,6 +91,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private final AtomicBoolean tradingReadyEventLogged = new AtomicBoolean(false);
 	private volatile List<String> tradingSymbols = List.of();
 	private volatile Set<String> tradingSymbolSet = Set.of();
+	private final Set<String> disabledSymbols = ConcurrentHashMap.newKeySet();
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -153,7 +154,25 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private boolean isTrackedSymbol(String symbol) {
 		String normalized = normalizeSymbol(symbol);
-		return normalized != null && tradingSymbolSet.contains(normalized);
+		return normalized != null && tradingSymbolSet.contains(normalized) && !disabledSymbols.contains(normalized);
+	}
+
+	private List<String> activeTradingSymbols() {
+		return tradingSymbols.stream().filter(symbol -> !disabledSymbols.contains(symbol)).toList();
+	}
+
+	private int activeSymbolCount() {
+		return Math.max(1, activeTradingSymbols().size());
+	}
+
+	public void disableSymbol(String symbol, String reason) {
+		String normalized = normalizeSymbol(symbol);
+		if (normalized == null) {
+			return;
+		}
+		if (disabledSymbols.add(normalized)) {
+			LOGGER.warn("EVENT=SYMBOL_DISABLED symbol={} reason={}", normalized, reason == null ? "UNKNOWN" : reason);
+		}
 	}
 
 	private void ensureInitialized() {
@@ -161,6 +180,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 		tradingSymbols = resolveTradingSymbols();
+		disabledSymbols.clear();
 		tradingSymbolSet = Set.copyOf(tradingSymbols);
 		validateConfig();
 		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
@@ -236,6 +256,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	public WarmupReadiness warmupReadiness(String symbol) {
+		String normalized = normalizeSymbol(symbol);
+		if (normalized != null && disabledSymbols.contains(normalized)) {
+			return WarmupReadiness.notReady(symbol, 0, 0, 0, requiredWarmup5m, "SYMBOL_DISABLED");
+		}
 		if (!isTrackedSymbol(symbol)) {
 			return WarmupReadiness.notReady(symbol, 0, 0, 0, requiredWarmup5m, "SYMBOL_NOT_TRACKED");
 		}
@@ -461,7 +485,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private int minSymbolsForGlobal() {
-		return (int) Math.ceil(Math.max(1, tradingSymbols.size()) * MIN_READY_RATIO);
+		return (int) Math.ceil(activeSymbolCount() * MIN_READY_RATIO);
 	}
 
 	private void updateGlobalSnapshotForCloseTime(long closeTimeMs) {
@@ -470,13 +494,16 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		int readyCount = 0;
 		List<Double> bwValues = new ArrayList<>();
 		int chopCount = 0;
-		for (String symbol : tradingSymbols) {
+		for (String symbol : activeTradingSymbols()) {
 			SymbolState symbolState = states.get(symbol);
 			if (symbolState == null || symbolState.lastEvaluatedCloseTimeMs != closeTimeMs) {
 				continue;
 			}
 			Metrics m = symbolState.lastMetrics;
-			if (m == null || !isBaselinesReady(symbolState, m)) {
+			if (m == null || !symbolState.indicators.baselineIndicatorsSeeded()) {
+				continue;
+			}
+			if (!isFiniteMetric(m.bwRatio5m) || m.activeRegimeTag == null) {
 				continue;
 			}
 			readyCount++;
@@ -532,10 +559,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (!isBaselinesReady(state, metrics)) {
 			return "NOT_READY_BASELINE_FILTERS";
 		}
-		long readySymbols = tradingSymbols.stream().map(states::get).filter(Objects::nonNull)
+		long readySymbols = activeTradingSymbols().stream().map(states::get).filter(Objects::nonNull)
 				.filter(s -> s.processed5mCloses >= requiredWarmup5m)
 				.filter(s -> s.lastMetrics != null && isBaselinesReady(s, s.lastMetrics)).count();
-		double symbolsReadyRatio = readySymbols / (double) Math.max(1, tradingSymbols.size());
+		double symbolsReadyRatio = readySymbols / (double) activeSymbolCount();
 		if (symbolsReadyRatio < MIN_READY_RATIO) {
 			return "NOT_READY_SYMBOLS_RATIO";
 		}
@@ -570,7 +597,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (!tradingReadyEventLogged.compareAndSet(false, true)) {
 			return;
 		}
-		long readySymbols = tradingSymbols.stream().map(states::get).filter(Objects::nonNull)
+		long readySymbols = activeTradingSymbols().stream().map(states::get).filter(Objects::nonNull)
 				.filter(s -> s.lastMetrics != null && isBaselinesReady(s, s.lastMetrics)).count();
 		LOGGER.info("EVENT=TRADING_READY symbolsReady={} globalSamples={} timeTr={}",
 				readySymbols,
