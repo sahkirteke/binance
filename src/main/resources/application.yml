@@ -284,6 +284,12 @@ elite-v1:
   chop-pb-max: 0.80
   global-pb-max: 1.15
   ema-signed-dist-max: 0.015
+  self-check:
+    enabled: false
+    trace: false
+    duration-sec: 90
+    exit-after-run: false
+    min-ready-ratio: 0.70
   long:
     enabled: true
     only-regime: CHOP

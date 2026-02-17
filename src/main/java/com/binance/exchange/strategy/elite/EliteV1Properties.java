@@ -30,6 +30,7 @@ public record EliteV1Properties(
 		@DefaultValue("0.80") double chopPbMax,
 		@DefaultValue("1.15") double globalPbMax,
 		@DefaultValue("0.015") double emaSignedDistMax,
+		@NotNull SelfCheckConfig selfCheck,
 		@Name("long") @NotNull LongConfig longConfig,
 		@Name("short") @NotNull ShortConfig shortConfig) {
 
@@ -58,6 +59,14 @@ public record EliteV1Properties(
 	public record WarmupConfig(
 			boolean enabled,
 			@Positive int candles5m) {
+	}
+
+	public record SelfCheckConfig(
+			@DefaultValue("false") boolean enabled,
+			@DefaultValue("false") boolean trace,
+			@Positive @DefaultValue("90") int durationSec,
+			@DefaultValue("false") boolean exitAfterRun,
+			@DefaultValue("0.70") double minReadyRatio) {
 	}
 
 	public record LongConfig(
