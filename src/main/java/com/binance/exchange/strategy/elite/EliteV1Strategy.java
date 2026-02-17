@@ -54,7 +54,6 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
-	private static final int WARMUP_5M_BARS = 300;
 	private static final int GLOBAL_HIST_WINDOW = 288;
 	private static final int SYMBOL_HIST_WINDOW = 288;
 	private static final int MIN_GLOBAL_SAMPLES = 120;
@@ -242,15 +241,19 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		SymbolState state = resolveState(symbol);
 		Metrics metrics = state.indicators.metrics();
 		boolean seeded = state.indicators.baselineIndicatorsSeeded();
-		if (state.seen5mCloses < requiredWarmup5m) {
-			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
-					"INSUFFICIENT_5M_BARS " + state.seen5mCloses + "/" + requiredWarmup5m);
+		if (state.processed5mCloses < requiredWarmup5m) {
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.processed5mCloses, requiredWarmup5m,
+					"NOT_READY_WARMUP_BARS_MISSING " + state.processed5mCloses + "/" + requiredWarmup5m);
 		}
 		if (!seeded || metrics == null) {
-			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m,
-					"BASELINE_NOT_SEEDED");
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.processed5mCloses, requiredWarmup5m,
+					"NOT_READY_METRICS_NULL");
 		}
-		return WarmupReadiness.ready(symbol, state.seen1mCloses, 0, state.seen5mCloses, requiredWarmup5m);
+		if (metrics.rawRegimeTag == null || metrics.activeRegimeTag == null) {
+			return WarmupReadiness.notReady(symbol, state.seen1mCloses, 0, state.processed5mCloses, requiredWarmup5m,
+					"NOT_READY_REGIME_UNKNOWN");
+		}
+		return WarmupReadiness.ready(symbol, state.seen1mCloses, 0, state.processed5mCloses, requiredWarmup5m);
 	}
 
 	private SymbolState resolveState(String symbol) {
@@ -297,6 +300,32 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		Metrics metrics = state.indicators.metrics();
 		state.lastMetrics = metrics;
 		state.lastEvaluatedCloseTimeMs = bar5m.closeTime();
+		RegimeTag rawRegime = null;
+		if (metrics != null && isFiniteMetric(metrics.bwRatio5m) && isFiniteMetric(metrics.macdRatio5m)) {
+			rawRegime = rawRegime(metrics.bwRatio5m, metrics.macdRatio5m,
+					props.regime().chopBwRatioMax(), props.regime().chopMacdRatioMax());
+			RegimeTag activeRegime = state.regimeState.update(rawRegime,
+					props.regime().debounceBars(), props.regime().cooldownBars());
+			state.indicators.setRegimes(rawRegime, activeRegime);
+			state.processed5mCloses++;
+		}
+		if (warmupModeEnabled.get()) {
+			LOGGER.info("EVENT=WARMUP_5M_APPLIED symbol={} closeTimeMs={} processed5mCloses={} metricsNull={} rawRegime={}",
+					state.symbol,
+					bar5m.closeTime(),
+					state.processed5mCloses,
+					metrics == null,
+					rawRegime == null ? "UNKNOWN" : rawRegime.name());
+			if (!state.warmup5mDoneLogged && state.processed5mCloses >= requiredWarmup5m) {
+				state.warmup5mDoneLogged = true;
+				LOGGER.info("EVENT=WARMUP_5M_DONE symbol={} processed5mCloses={} baselinesReady={} metricsNull={} rawRegime={}",
+						state.symbol,
+						state.processed5mCloses,
+						isBaselinesReady(state, metrics),
+						metrics == null,
+						rawRegime == null ? "UNKNOWN" : rawRegime.name());
+			}
+		}
 		OrderflowSnapshot orderflowSnapshot = OrderflowSnapshot.fromCandle(bar5m);
 		if (orderflowSnapshot.available() && bar5m.volume() > 0.0
 				&& orderflowSnapshot.takerBuyBaseVolume() != null
@@ -304,13 +333,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.orderflowReadyBars = Math.min(3, state.orderflowReadyBars + 1);
 		} else {
 			state.orderflowReadyBars = 0;
-		}
-		if (metrics != null) {
-			RegimeTag rawRegime = rawRegime(metrics.bwRatio5m, metrics.macdRatio5m,
-					props.regime().chopBwRatioMax(), props.regime().chopMacdRatioMax());
-			RegimeTag activeRegime = state.regimeState.update(rawRegime,
-					props.regime().debounceBars(), props.regime().cooldownBars());
-			state.indicators.setRegimes(rawRegime, activeRegime);
 		}
 		evaluateAt5m(state, bar5m);
 	}
@@ -323,7 +345,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={} seen5m={}/{} seeded={} baselinesReady={} nextLogAt1m={}",
 				state.symbol,
 				state.seen1mCloses,
-				state.seen5mCloses,
+				state.processed5mCloses,
 				requiredWarmup5m,
 				seeded,
 				state.baselinesReady,
@@ -344,7 +366,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} timeUtc={} timeTr={}",
 					state.symbol,
 					state.seen1mCloses,
-					state.seen5mCloses,
+					state.processed5mCloses,
 					requiredWarmup5m,
 					bar5m.closeTime(),
 					at.toString(),
@@ -352,7 +374,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			LOGGER.info("warm up bitti strategy=ELITE_V1 symbol={} seen1m={} seen5m={} atMs={}",
 					state.symbol,
 					state.seen1mCloses,
-					state.seen5mCloses,
+					state.processed5mCloses,
 					bar5m.closeTime());
 			LOGGER.info("EVENT=ATR_BASELINE_OK strategy=ELITE_V1 symbol={} atr14={} atrEma={} atrRatio={}",
 					state.symbol,
@@ -377,7 +399,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 		String readinessBlockReason = resolveTradingReadyBlockReason(state, metrics, globalGateEval);
 		if (readinessBlockReason != null) {
-			writeDecision(state, bar5m, "NO_ENTRY", null, readinessBlockReason, metrics, null, globalGateEval, null);
+			if (!warmupModeEnabled.get()) {
+				writeDecision(state, bar5m, "NO_ENTRY", null, readinessBlockReason, metrics, null, globalGateEval, null);
+			}
 			state.prevEma20_5m = metrics != null && Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 			updateSymbolHistory(state, metrics);
 			return;
@@ -489,16 +513,26 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private String resolveTradingReadyBlockReason(SymbolState state, Metrics metrics, GlobalGateEval gateEval) {
 		if (warmupModeEnabled.get() || !warmupCompleted) {
-			return "NOT_READY_WARMUP";
+			return "NOT_READY_WARMUP_MODE";
+		}
+		if (state.processed5mCloses < requiredWarmup5m) {
+			return "NOT_READY_WARMUP_BARS_MISSING";
+		}
+		if (metrics == null) {
+			return "NOT_READY_METRICS_NULL";
+		}
+		if (metrics.rawRegimeTag == null || metrics.activeRegimeTag == null) {
+			return "NOT_READY_REGIME_UNKNOWN";
 		}
 		if (!isBaselinesReady(state, metrics)) {
-			return "NOT_READY_WARMUP";
+			return "NOT_READY_BASELINE_FILTERS";
 		}
 		long readySymbols = tradingSymbols.stream().map(states::get).filter(Objects::nonNull)
+				.filter(s -> s.processed5mCloses >= requiredWarmup5m)
 				.filter(s -> s.lastMetrics != null && isBaselinesReady(s, s.lastMetrics)).count();
 		double symbolsReadyRatio = readySymbols / (double) Math.max(1, tradingSymbols.size());
 		if (symbolsReadyRatio < MIN_READY_RATIO) {
-			return "NOT_READY_WARMUP";
+			return "NOT_READY_SYMBOLS_RATIO";
 		}
 		if (gateEval == null || !gateEval.ready()) {
 			return gateEval == null || gateEval.notReadyReason() == null ? "GLOBAL_GATE_NOT_READY" : gateEval.notReadyReason();
@@ -568,7 +602,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private boolean isBaselinesReady(SymbolState state, Metrics metrics) {
-		return state.seen5mCloses >= Math.max(requiredWarmup5m, WARMUP_5M_BARS)
+		return state.processed5mCloses >= requiredWarmup5m
 				&& metrics != null
 				&& state.indicators.baselineIndicatorsSeeded()
 				&& isFiniteMetric(metrics.bwRatio5m)
@@ -992,7 +1026,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 				effectiveMatchedSetup = null;
 				effectiveBlockReason = "INPUTS_NOT_READY";
 			}
-			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
+			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.processed5mCloses);
 			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
 		} else {
 			node.put("rawRegimeTag", metrics.rawRegimeTag == null ? "UNKNOWN" : metrics.rawRegimeTag.name());
@@ -1504,9 +1538,11 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private final String symbol;
 		private long seen1mCloses;
 		private long seen5mCloses;
+		private long processed5mCloses;
 		private boolean baselinesReady;
 		private boolean warmupDoneLogged;
 		private long nextWarmupProgressLogAt1m = 10;
+		private boolean warmup5mDoneLogged;
 		private LocalDate dayKey;
 		private int entriesToday;
 		private Side positionSide = Side.NONE;
