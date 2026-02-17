@@ -55,9 +55,8 @@ public class EliteV1Strategy implements Strategy {
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
-	private static final int ROLLING_WINDOW_5M = 288;
-	private static final int GLOBAL_BOOTSTRAP_SAMPLES = 6;
-	private static final long TRADE_ENABLE_DELAY_MS = 35L * ONE_MIN_MS;
+	private static final int ROLLING_WINDOW_5M = 200;
+	private static final int GLOBAL_BOOTSTRAP_SAMPLES = 4;
 	private static final double GLOBAL_MIN_SYMBOL_SHARE = 0.70;
 	private static final double BW_PCTL = 0.80;
 	private static final double CHOP_PCTL = 0.60;
@@ -94,7 +93,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private final Deque<Double> globalMedBwHistory = new ArrayDeque<>();
 	private final Deque<Double> globalChopShareHistory = new ArrayDeque<>();
 	private GlobalSnapshot pendingGlobalSnapshot;
-	private long appStartMs;
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -141,7 +139,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 				warmupMode.name());
 		zoneId = ZoneId.of(props.zoneId());
 		writer.start();
-		appStartMs = System.currentTimeMillis();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
 		startBookTickerWatcher();
@@ -310,7 +307,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					metrics.atrEma_5m,
 					metrics.atrRatio5m);
 		}
-		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
+		if (warmupModeEnabled.get() || !warmupCompleted || metrics == null) {
 			String notReadyReason = (warmupModeEnabled.get() || !warmupCompleted) ? "WARMUP" : "INPUTS_NOT_READY";
 			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, notReadyReason, metrics, null, globalGateDecision, null);
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
@@ -339,16 +336,8 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 
-		boolean tradeEnabled = isTradeEnabled(nowMs);
-		if (!tradeEnabled) {
-			String reason = "BOOTSTRAP_TRADE_DELAY|globalSamples=" + globalGateDecision.globalSamples() + "|minStartMs=" + (appStartMs + TRADE_ENABLE_DELAY_MS);
-			writeDecision(state, bar5m, "NO_ENTRY", null, reason, metrics, null, globalGateDecision, null);
-			appendSymbolHistory(state, metrics);
-			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
-			return;
-		}
 
-		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
+		PreCheckAction preCheck = evaluatePreChecks(true, state.positionSide);
 		if (preCheck.action != DecisionAction.CONTINUE) {
 			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null, globalGateDecision, null);
 			appendSymbolHistory(state, metrics);
@@ -482,10 +471,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 
-	private boolean isTradeEnabled(long nowMs) {
-		return (nowMs - appStartMs) >= TRADE_ENABLE_DELAY_MS;
-	}
-
 	private GlobalGateDecision updateAndEvaluateGlobalGate(SymbolState state, long closeTimeMs) {
 		synchronized (globalGateLock) {
 			if (pendingGlobalSnapshot == null) {
@@ -538,9 +523,15 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			long chopCount = pendingGlobalSnapshot.symbolData().values().stream().filter(v -> v.regimeTag() == RegimeTag.CHOP).count();
 			globalChopShare = (double) chopCount / included;
 		}
-		Double bwThr = percentile(globalMedBwHistory, BW_PCTL);
-		Double chopThr = percentile(globalChopShareHistory, CHOP_PCTL);
-		long globalSamples = globalMedBwHistory.size();
+		Deque<Double> bwPool = new ArrayDeque<>(globalMedBwHistory);
+		Deque<Double> chopPool = new ArrayDeque<>(globalChopShareHistory);
+		if (included >= minSymbols && isFinite(globalMedBw) && isFinite(globalChopShare)) {
+			pushRolling(bwPool, globalMedBw, ROLLING_WINDOW_5M);
+			pushRolling(chopPool, globalChopShare, ROLLING_WINDOW_5M);
+		}
+		Double bwThr = percentile(bwPool, BW_PCTL);
+		Double chopThr = percentile(chopPool, CHOP_PCTL);
+		long globalSamples = bwPool.size();
 		if (included < minSymbols) {
 			LOGGER.warn("EVENT=GLOBAL_SNAPSHOT_INCOMPLETE closeTimeMs={} included={} need={} missingSymbolsSample={}",
 					pendingGlobalSnapshot == null ? -1L : pendingGlobalSnapshot.closeTimeMs(),
