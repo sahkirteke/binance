@@ -29,8 +29,8 @@ public class HistoricalWarmupService {
 	private static final int DEFAULT_CANDLES_1M = 240;
 	private static final int DEFAULT_CANDLES_5M = 120;
 	private static final int DEFAULT_CONCURRENCY = 3;
-	private static final int WARMUP_FETCH_BUFFER_5M = 5;
-	private static final int WARMUP_FETCH_RETRY_5M = 5;
+	private static final int WARMUP_FETCH_BUFFER_5M = 20;
+	private static final int WARMUP_FETCH_RETRY_5M = 2;
 	private static final long FIVE_MIN_MS = 300_000L;
 	private static final int MIN_GLOBAL_SAMPLES = 120;
 	private static final double MIN_READY_RATIO = 0.70;
@@ -148,6 +148,7 @@ public class HistoricalWarmupService {
 						var readiness = strategyRouter.eliteWarmupReadiness(symbol);
 						if (readiness != null && readiness.ready()) {
 							ready++;
+							LOGGER.info("EVENT=WARMUP_READY symbol={} have={}/{}", symbol, readiness.have5m(), readiness.required5m());
 						} else {
 							String reason = readiness == null ? "STATUS_NULL" : readiness.reason();
 							notReadyReasons.put(symbol, reason);
@@ -165,12 +166,14 @@ public class HistoricalWarmupService {
 					boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
 					boolean warmupReady = readyRatio >= MIN_READY_RATIO && globalSamples >= MIN_GLOBAL_SAMPLES && filtersReady;
 
-					strategyRouter.setWarmupMode(false);
-					strategyRouter.enableOrdersAfterWarmup(true);
-					klineStreamWatcher.markWarmupComplete();
-					klineStreamWatcher.startStreams();
-					markPriceStreamWatcher.markWarmupComplete();
-					markPriceStreamWatcher.startStreams();
+					if (warmupReady) {
+						strategyRouter.setWarmupMode(false);
+						strategyRouter.enableOrdersAfterWarmup(true);
+						klineStreamWatcher.markWarmupComplete();
+						klineStreamWatcher.startStreams();
+						markPriceStreamWatcher.markWarmupComplete();
+						markPriceStreamWatcher.startStreams();
+					}
 
 					long durationMs = System.currentTimeMillis() - startMs;
 					LOGGER.info("EVENT=WARMUP_DONE readySymbols={} notReadySymbols={} failedSymbols={} totalDurationMs={}",
@@ -222,36 +225,48 @@ public class HistoricalWarmupService {
 
 	private Mono<List<WarmupCandle>> fetchWithRetry(String symbol,
 			int target,
-			int requestLimit,
+			int fetchLimit,
 			long endTimeMs,
 			int attempt,
 			TreeMap<Long, WarmupCandle> acc) {
-		long startTimeMs = endTimeMs - (requestLimit * FIVE_MIN_MS) + 1;
-		return marketClient.fetchFuturesKlinesRaw(symbol, "5m", startTimeMs, endTimeMs, requestLimit)
+		long startTimeMs = endTimeMs - (fetchLimit * FIVE_MIN_MS) + 1;
+		return marketClient.fetchFuturesKlinesRaw(symbol, "5m", startTimeMs, endTimeMs, fetchLimit)
 				.map(response -> parseKlines(response.body(), symbol))
 				.flatMap(klines -> {
+					int got = klines.size();
 					List<WarmupCandle> filtered = klines.stream()
 							.filter(k -> k.openTime() > 0L && k.closeTime() > 0L)
 							.filter(k -> k.closeTime() <= endTimeMs)
-							.sorted(Comparator.comparingLong(WarmupCandle::openTime))
+							sorted(Comparator.comparingLong(WarmupCandle::openTime))
 							.toList();
 					for (WarmupCandle candle : filtered) {
 						acc.put(candle.openTime(), candle);
 					}
-					if (acc.size() >= target || attempt >= WARMUP_FETCH_RETRY_5M || filtered.isEmpty()) {
-						List<WarmupCandle> out = new ArrayList<>(acc.values());
-						out.sort(Comparator.comparingLong(WarmupCandle::openTime));
-						if (out.size() > target) {
-							out = out.subList(out.size() - target, out.size());
-						}
-						return Mono.just(out);
+					List<WarmupCandle> out = new ArrayList<>(acc.values());
+					out.sort(Comparator.comparingLong(WarmupCandle::openTime));
+					int afterDedup = out.size();
+					if (out.size() > target) {
+						out = out.subList(out.size() - target, out.size());
 					}
-					long firstOpen = filtered.get(0).openTime();
-					long endTimeMs2 = firstOpen - 1;
-					return fetchWithRetry(symbol, target, requestLimit, endTimeMs2, attempt + 1, acc);
+					int afterTrim = out.size();
+					LOGGER.info("EVENT=WARMUP_FETCH symbol={} requestedLimit={} endTime={} got={} afterDedup={} afterTrim={}",
+							symbol,
+							fetchLimit,
+							endTimeMs,
+							got,
+							afterDedup,
+							afterTrim);
+
+					if (afterTrim >= target || attempt >= WARMUP_FETCH_RETRY_5M || filtered.isEmpty()) {
+						return Mono.just(new ArrayList<>(out));
+					}
+					long nextEndTimeMs = endTimeMs - FIVE_MIN_MS;
+					int nextFetchLimit = fetchLimit + 50;
+					return fetchWithRetry(symbol, target, nextFetchLimit, nextEndTimeMs, attempt + 1, acc);
 				})
 				.onErrorMap(error -> new IllegalStateException("Warmup fetch failed for " + symbol + " 5m", error));
 	}
+
 
 	private Mono<Void> warmupDefault(List<String> symbols, long startMs) {
 		int concurrency = resolveConcurrency();
