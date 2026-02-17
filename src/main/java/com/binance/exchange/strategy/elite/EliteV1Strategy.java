@@ -90,6 +90,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private final Map<Long, GlobalBucket> globalBuckets = new ConcurrentHashMap<>();
 	private final AtomicBoolean tradingReadyEventLogged = new AtomicBoolean(false);
 	private volatile List<String> tradingSymbols = List.of();
+	private volatile Set<String> tradingSymbolSet = Set.of();
 	private ZoneId zoneId;
 	private int requiredWarmup5m;
 	private WarmupMode warmupMode = WarmupMode.DERIVE_5M_FROM_1M;
@@ -142,11 +143,25 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		return sanitized;
 	}
 
+	private String normalizeSymbol(String symbol) {
+		if (symbol == null) {
+			return null;
+		}
+		String normalized = symbol.trim().toUpperCase();
+		return normalized.isBlank() ? null : normalized;
+	}
+
+	private boolean isTrackedSymbol(String symbol) {
+		String normalized = normalizeSymbol(symbol);
+		return normalized != null && tradingSymbolSet.contains(normalized);
+	}
+
 	private void ensureInitialized() {
 		if (!started.compareAndSet(false, true)) {
 			return;
 		}
 		tradingSymbols = resolveTradingSymbols();
+		tradingSymbolSet = Set.copyOf(tradingSymbols);
 		validateConfig();
 		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
 		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
@@ -176,12 +191,18 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	public void onExternalClosedOneMinuteCandle(String symbol, Candle candle) {
 		ensureInitialized();
+		if (!isTrackedSymbol(symbol) || candle == null) {
+			return;
+		}
 		SymbolState state = resolveState(symbol);
 		onClosed1m(state, candle);
 	}
 
 	public void flushWarmup(String symbol) {
 		ensureInitialized();
+		if (!isTrackedSymbol(symbol)) {
+			return;
+		}
 		SymbolState state = resolveState(symbol);
 		BucketTransition transition = state.aggregator.flush();
 		applyCompletedFiveMinute(state, transition);
@@ -189,6 +210,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	public void warmupFiveMinuteCandle(String symbol, Candle bar5m) {
 		ensureInitialized();
+		if (!isTrackedSymbol(symbol) || bar5m == null) {
+			return;
+		}
 		SymbolState state = resolveState(symbol);
 		applyCompletedFiveMinute(state, new BucketTransition(bar5m, null, 0));
 	}
@@ -204,11 +228,17 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	public boolean isWarmupReady(String symbol) {
+		if (!isTrackedSymbol(symbol)) {
+			return false;
+		}
 		SymbolState state = resolveState(symbol);
 		return isBaselinesReady(state, state.indicators.metrics());
 	}
 
 	public WarmupReadiness warmupReadiness(String symbol) {
+		if (!isTrackedSymbol(symbol)) {
+			return WarmupReadiness.notReady(symbol, 0, 0, 0, requiredWarmup5m, "SYMBOL_NOT_TRACKED");
+		}
 		SymbolState state = resolveState(symbol);
 		Metrics metrics = state.indicators.metrics();
 		boolean seeded = state.indicators.baselineIndicatorsSeeded();
@@ -224,7 +254,11 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private SymbolState resolveState(String symbol) {
-		return states.computeIfAbsent(symbol, SymbolState::new);
+		String normalized = normalizeSymbol(symbol);
+		if (normalized == null) {
+			throw new IllegalArgumentException("symbol is blank");
+		}
+		return states.computeIfAbsent(normalized, SymbolState::new);
 	}
 
 
