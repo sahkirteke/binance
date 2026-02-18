@@ -262,19 +262,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private void logWarmupProgressIfDue(SymbolState state) {
-		if (state.warmupDoneLogged || state.seen1mCloses < state.nextWarmupProgressLogAt1m) {
-			return;
-		}
-		boolean seeded = state.indicators.baselineIndicatorsSeeded();
-		LOGGER.info("EVENT=WARMUP_PROGRESS strategy=ELITE_V1 symbol={} seen1m={} seen5m={}/{} seeded={} baselinesReady={} nextLogAt1m={}",
-				state.symbol,
-				state.seen1mCloses,
-				state.seen5mCloses,
-				requiredWarmup5m,
-				seeded,
-				state.baselinesReady,
-				state.nextWarmupProgressLogAt1m);
-		state.nextWarmupProgressLogAt1m += state.nextWarmupProgressLogAt1m < 60 ? 10 : 60;
+		// warmup progress logs intentionally suppressed
 	}
 
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
@@ -286,30 +274,8 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		GlobalGateDecision globalGateDecision = updateAndEvaluateGlobalGate(state, bar5m.closeTime());
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
-			var at = Instant.ofEpochMilli(bar5m.closeTime());
-			var atTr = at.atZone(zoneId);
-			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} timeUtc={} timeTr={}",
-					state.symbol,
-					state.seen1mCloses,
-					state.seen5mCloses,
-					requiredWarmup5m,
-					bar5m.closeTime(),
-					at.toString(),
-					ISO_OFFSET_FMT.format(atTr));
-			LOGGER.info("warm up bitti strategy=ELITE_V1 symbol={} seen1m={} seen5m={} atMs={}",
-					state.symbol,
-					state.seen1mCloses,
-					state.seen5mCloses,
-					bar5m.closeTime());
-			LOGGER.info("EVENT=ATR_BASELINE_OK strategy=ELITE_V1 symbol={} atr14={} atrEma={} atrRatio={}",
-					state.symbol,
-					metrics.atr14,
-					metrics.atrEma_5m,
-					metrics.atrRatio5m);
 		}
-		if (warmupModeEnabled.get() || !warmupCompleted || metrics == null) {
-			String notReadyReason = (warmupModeEnabled.get() || !warmupCompleted) ? "WARMUP" : "INPUTS_NOT_READY";
-			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, notReadyReason, metrics, null, globalGateDecision, null);
+		if (warmupModeEnabled.get() || metrics == null) {
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
 				state.prevEma20_5m = metrics.ema20_5m;
 			}
