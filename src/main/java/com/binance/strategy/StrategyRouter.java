@@ -135,13 +135,15 @@ public class StrategyRouter {
 	}
 
 	public void enableOrdersAfterWarmup(boolean enable) {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			eliteV1Strategy.enableOrdersAfterWarmup();
+			return;
+		}
 		if (!enable) {
 			return;
 		}
 		if (strategyProperties.active() == StrategyType.CTI_LB) {
 			ctiLbStrategy.enableOrdersAfterWarmup();
-		} else if (strategyProperties.active() == StrategyType.ELITE_V1) {
-			eliteV1Strategy.enableOrdersAfterWarmup();
 		}
 	}
 
