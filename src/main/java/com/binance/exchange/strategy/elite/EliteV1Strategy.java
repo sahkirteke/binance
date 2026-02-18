@@ -463,8 +463,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		int minSymbols = minSymbolsForGlobal(activeSymbols);
 		int included = snapshot.symbolData().size();
 		if (included < minSymbols) {
-			LOGGER.warn("EVENT=GLOBAL_SNAPSHOT_INCOMPLETE closeTimeMs={} included={} need={} missingSymbolsSample={}",
-					snapshot.closeTimeMs(), included, minSymbols, firstMissingReasons(snapshot.missingReasons()));
 			return;
 		}
 		double medBw = median(snapshot.symbolData().values().stream().mapToDouble(GlobalSymbolMetrics::bwRatio).toArray());
@@ -499,19 +497,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		Double chopThr = percentile(chopPool, CHOP_PCTL);
 		long globalSamples = bwPool.size();
 		if (included < minSymbols) {
-			LOGGER.warn("EVENT=GLOBAL_SNAPSHOT_INCOMPLETE closeTimeMs={} included={} need={} missingSymbolsSample={}",
-					pendingGlobalSnapshot == null ? -1L : pendingGlobalSnapshot.closeTimeMs(),
-					included,
-					minSymbols,
-					pendingGlobalSnapshot == null ? List.of() : firstMissingReasons(pendingGlobalSnapshot.missingReasons()));
 			return new GlobalGateDecision(globalMedBw, bwThr, globalChopShare, chopThr, null, included, minSymbols, globalSamples,
 					false, "GLOBAL_BUCKET_INCOMPLETE|included=" + included + "|need=" + minSymbols, null);
 		}
 		if (globalSamples >= GLOBAL_BOOTSTRAP_SAMPLES && (!isFinite(bwThr) || !isFinite(chopThr))) {
-			LOGGER.warn("EVENT=GLOBAL_THRESH_NOT_READY closeTimeMs={} globalMedBwHistSize={} globalChopHistSize={}",
-					pendingGlobalSnapshot == null ? -1L : pendingGlobalSnapshot.closeTimeMs(),
-					globalMedBwHistory.size(),
-					globalChopShareHistory.size());
 			return new GlobalGateDecision(globalMedBw, bwThr, globalChopShare, chopThr, null, included, minSymbols, globalSamples,
 					false, "GATE_A_NOT_READY|samples=" + globalSamples, null);
 		}
@@ -547,7 +536,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		Double rsiThr = percentile(state.rsi9History, RSI_PCTL);
 		Double pbThr = percentile(state.bbPercentBHistory, PB_PCTL);
 		if (!isFinite(emaThr) || !isFinite(rsiThr) || !isFinite(pbThr)) {
-			LOGGER.warn("EVENT=SYMBOL_THRESH_NOT_READY symbol={} symbolSamples={} field={} ", state.symbol, samples, "ema/rsi/pb");
 			return new Stage2VetoDecision(m.ema20DistPct, emaThr, m.rsi9_5m, rsiThr, m.bbPercentB_5m, pbThr, samples,
 					false, "SYMBOL_THRESH_NOT_READY|symbolSamples=" + samples);
 		}
@@ -978,12 +966,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 		putGlobalGateFields(node, globalGateDecision);
 		putStage2Fields(node, stage2VetoDecision, state, globalGateDecision);
-		if (globalGateDecision != null && globalGateDecision.globalSamples() >= GLOBAL_BOOTSTRAP_SAMPLES) {
-			if (globalGateDecision.globalMedBw() == null || globalGateDecision.bwThr() == null
-					|| globalGateDecision.globalChopShare() == null || globalGateDecision.chopThr() == null) {
-				LOGGER.warn("EVENT=GLOBAL_FIELDS_UNEXPECTED_NULL closeTimeMs={} globalSamples={}", timeMs, globalGateDecision.globalSamples());
-			}
-		}
 
 		node.put("action", effectiveAction);
 		node.put("matchedSetup", effectiveMatchedSetup);
