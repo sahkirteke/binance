@@ -68,6 +68,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
+	private static final Path TRADE_V1_DIR = Paths.get("signals", "tradeV1");
 
 	private final BinanceProperties binanceProperties;
 	private final EliteV1Properties props;
@@ -313,7 +314,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
 		if (longEval.signal()) {
-			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
+			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag, longEval.tradeV1Eligible());
 			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval);
 			return;
 		}
@@ -409,9 +410,31 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			failReasons.add("FAIL_DOWN_TREND");
 		}
 
+   // ── Hybrid Volatility + Momentum Filter (TradeV1 eligibility only; does NOT affect main signal) ──
+   boolean isChop = (m.activeRegimeTag == RegimeTag.CHOP);
+
+   double minBwRatio  = isChop ? 1.05 : 0.90;
+   double minRsi      = isChop ? 50.0 : 48.0;
+   double maxRsi      = isChop ? 62.0 : 65.0;
+   double maxVolRatio = isChop ? 1.50 : 2.00;
+
+   List<String> tradeV1FailReasons = new ArrayList<>();
+
+   if (!Double.isFinite(m.bwRatio5m) || m.bwRatio5m < minBwRatio) {
+       tradeV1FailReasons.add("FAIL_BW_RATIO_LOW");
+   }
+   if (!Double.isFinite(m.rsi9_5m) || (m.rsi9_5m < minRsi || m.rsi9_5m > maxRsi)) {
+       tradeV1FailReasons.add("FAIL_RSI_OUT_OF_BAND");
+   }
+   if (!Double.isFinite(m.volRatio) || m.volRatio > maxVolRatio) {
+       tradeV1FailReasons.add("FAIL_VOL_RATIO_HIGH");
+   }
+
+   boolean tradeV1Eligible = tradeV1FailReasons.isEmpty();
+
 
 		boolean signal = failReasons.isEmpty();
-		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
+		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend, tradeV1Eligible);
 	}
 
 
@@ -419,7 +442,8 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			Candle bar5m,
 			Side side,
 			String matchedSetup,
-			RegimeTag activeRegimeTag) {
+			RegimeTag activeRegimeTag,
+			boolean tradeV1Eligible) {
 		double tickSize = resolveTickSize(state.symbol);
 		String bracketId = UUID.randomUUID().toString();
 		double estimatedEntryPrice = bar5m.close();
@@ -513,6 +537,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.slClientOrderId = slClientOrderId;
 		state.tpOrderId = tpOrderId;
 		state.tpClientOrderId = tpClientOrderId;
+		state.tradeV1Eligible = tradeV1Eligible;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
 
@@ -543,6 +568,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			node.put("tpOrderId", tpOrderId);
 		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+		if (state.tradeV1Eligible) {
+			writer.write(tradeV1Path(state.symbol, state.dayKey), node.toString(), true);
+		}
 	}
 
 	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
@@ -673,6 +701,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			putHitBar(node, "slHitBar1m", state.slHitBar1m);
 		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+		if (state.tradeV1Eligible) {
+			writer.write(tradeV1Path(state.symbol, state.dayKey), node.toString(), true);
+		}
 
 		state.positionSide = Side.NONE;
 		state.bracketId = null;
@@ -686,6 +717,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.slClientOrderId = null;
 		state.tpOrderId = null;
 		state.tpClientOrderId = null;
+		state.tradeV1Eligible = false;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 	}
 
@@ -981,6 +1013,10 @@ private Path decisionPath(String symbol, LocalDate day) {
 		return TRADE_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
 	}
 
+	private Path tradeV1Path(String symbol, LocalDate day) {
+		return TRADE_V1_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
+	}
+
 	private double resolveTickSize(String symbol) {
 		var filters = symbolFilterService.getFilters(symbol);
 		if (filters == null || filters.tickSize() == null) {
@@ -1185,9 +1221,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 	}
 
-	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend) {
+	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend, boolean tradeV1Eligible) {
 		private static LongSetupEval empty() {
-			return new LongSetupEval(false, null, null, null, false);
+			return new LongSetupEval(false, null, null, null, false, false);
 		}
 	}
 
@@ -1218,6 +1254,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private String slClientOrderId;
 		private Long tpOrderId;
 		private String tpClientOrderId;
+		private boolean tradeV1Eligible;
 		private Double prevEma20_5m;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
