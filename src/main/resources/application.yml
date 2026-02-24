@@ -46,6 +46,15 @@ strategy:
     - OPUSDT
     - SANDUSDT
     - APEUSDT
+    - LINKUSDT
+    - UNIUSDT
+    - FILUSDT
+    - ETCUSDT
+    - EOSUSDT
+    - ICPUSDT
+    - CRVUSDT
+    - INJUSDT
+    - SEIUSDT
 
   depth-limit: 50
   market-quantity: 0.01
@@ -265,6 +274,15 @@ elite-v1:
     - OPUSDT
     - SANDUSDT
     - APEUSDT
+    - LINKUSDT
+    - UNIUSDT
+    - FILUSDT
+    - ETCUSDT
+    - EOSUSDT
+    - ICPUSDT
+    - CRVUSDT
+    - INJUSDT
+    - SEIUSDT
   paper-notional-usd: 50.0
   max-open-positions-global: 1
   max-entries-per-symbol-per-day: 1
