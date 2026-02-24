@@ -48,12 +48,17 @@ public class EliteV1Strategy implements Strategy {
 	private static final DateTimeFormatter ISO_OFFSET_FMT = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 	private static final long ONE_MIN_MS = 60_000L;
 	private static final long FIVE_MIN_MS = 300_000L;
-	private static final double TP_PCT = 0.0075;
-	private static final double SL_PCT = 0.0050;
+	private static final double TP_PCT = 0.0120;
+	private static final double SL_PCT = 0.0080;
 	private static final int LOOKAHEAD_BARS = 24;
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
+	private static final double BTC_GATE_MIN_RSI9 = 45.0;
+	private static final double BTC_GATE_MIN_BB_PERCENT_B = 0.40;
+	private static final double MACD_DEADZONE_MAX = 0.0001;
+	private static final double DAILY_CB_NET_LIMIT_USDT = -2.0;
+	private static final double DAILY_CB_FEE_ROUND_TRIP_PCT = 0.0008;
 
 
 // Global cap to avoid spraying too many concurrent positions/brackets.
@@ -96,6 +101,11 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private static final long CB_WINDOW_MS   = 20L * 60 * 1000;   // 20 dakika
 	private static final long CB_COOLDOWN_MS = 4L  * 60 * 60 * 1000; // 4 saat
 	// ────────────────────────────────────────────────────────────────────────────
+	private final Object dailyCbLock = new Object();
+	private LocalDate dailyCbDay = null;
+	private double dailyCbNetPnl = 0.0;
+	private boolean dailyCbActive = false;
+	private Long dailyCbTriggeredAtMs = null;
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
                            EliteV1Properties props,
@@ -327,6 +337,12 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 
+		if (isDailyCbActiveAt(bar5m.closeTime())) {
+			writeDecision(state, bar5m, "NO_ENTRY", null, "DAILY_CB_NET_LIMIT_ACTIVE", metrics, null);
+			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+			return;
+		}
+
 		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
 		if (longEval.signal()) {
 			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
@@ -371,6 +387,12 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
 		List<String> failReasons = new ArrayList<>();
+		Candle last1m = state.last1m.peekLast();
+		if (last1m == null) {
+			failReasons.add("FAIL_1M_LAST_BAR_MISSING");
+		} else if (last1m.close() < last1m.open()) {
+			failReasons.add("FAIL_1M_LAST_BAR_RED");
+		}
 
 		Double takerBuyRatio = null;
 		OrderflowSnapshot orderflow = OrderflowSnapshot.fromCandle(bar5m);
@@ -438,9 +460,31 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (!Double.isFinite(m.macdDelta) || m.macdDelta < 0.0) {
 			failReasons.add("FAIL_MACD_DELTA_NEGATIVE");
 		}
+		if (Double.isFinite(m.macdDelta) && m.macdDelta >= 0.0 && m.macdDelta < MACD_DEADZONE_MAX) {
+			failReasons.add("FAIL_MACD_DEADZONE");
+		}
 		// Üst Bollinger bandına çok yakın değil
 		if (!Double.isFinite(m.bbPercentB_5m) || m.bbPercentB_5m > 0.8) {
 			failReasons.add("FAIL_BB_UPPER_ZONE");
+		}
+
+		SymbolState btcState = states.get("BTCUSDT");
+		Metrics btcMetrics = btcState == null ? null : btcState.indicators.metrics();
+		Candle btcLast5m = btcState == null ? null : btcState.last5m.peekLast();
+		boolean btcDataValid = btcState != null
+				&& btcMetrics != null
+				&& isBaselinesReady(btcState, btcMetrics)
+				&& btcLast5m != null
+				&& btcLast5m.closeTime() == bar5m.closeTime();
+		if (!btcDataValid) {
+			failReasons.add("FAIL_BTC_GATE_DATA_MISSING");
+		} else {
+			if (btcMetrics.rsi9_5m <= BTC_GATE_MIN_RSI9) {
+				failReasons.add("FAIL_BTC_GATE_RSI_WEAK");
+			}
+			if (btcMetrics.bbPercentB_5m <= BTC_GATE_MIN_BB_PERCENT_B) {
+				failReasons.add("FAIL_BTC_GATE_BB_WEAK");
+			}
 		}
 
 		boolean signal = failReasons.isEmpty();
@@ -667,6 +711,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		double pnl = state.positionSide == Side.LONG
 				? (exitPrice - state.entryPrice) * state.qty
 				: (state.entryPrice - exitPrice) * state.qty;
+		DailyCbExitAccounting dailyCbAccounting = recordDailyCbRealizedExit(exitTimeMs, pnl, state.entryPrice, state.qty, state.symbol, reason.name());
 
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "EXIT");
@@ -677,6 +722,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("exitPrice", exitPrice);
 		node.put("qty", state.qty);
 		node.put("realizedPnl", pnl);
+		node.put("realizedFeeEstimate", dailyCbAccounting.feeEstimate());
+		node.put("realizedNetPnlForDailyCb", dailyCbAccounting.netPnlForDailyCb());
+		node.put("dailyCbNetPnlAfterExit", dailyCbAccounting.dayNetAfterExit());
+		node.put("dailyCbActiveAfterExit", dailyCbAccounting.activeAfterExit());
 		node.put("exitReason", reason.name());
 		if (state.entryOrderId != null) { node.put("entryOrderId", state.entryOrderId); }
 		if (state.slOrderId != null) { node.put("slOrderId", state.slOrderId); }
@@ -848,6 +897,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("elit.tpPct", TP_PCT);
 		node.put("elit.slPct", SL_PCT);
 		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+		node.put("dailyCbNetLimit", DAILY_CB_NET_LIMIT_USDT);
+		node.put("dailyCbFeeRoundTripPct", DAILY_CB_FEE_ROUND_TRIP_PCT);
+		node.put("dailyCbActive", isDailyCbActiveAt(timeMs));
+		node.put("dailyCbNetPnl", getDailyCbNetPnlAt(timeMs));
 		if (eval.takerBuyRatio != null && Double.isFinite(eval.takerBuyRatio)) {
 			node.put("elit.takerBuyRatio", eval.takerBuyRatio);
 		} else {
@@ -860,6 +913,60 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 		node.put("elit.isDownTrend", eval.isDownTrend);
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+	}
+
+	private void resetDailyCbIfNewDay(long timeMs) {
+		LocalDate currentDay = Instant.ofEpochMilli(timeMs).atZone(zoneId).toLocalDate();
+		synchronized (dailyCbLock) {
+			if (dailyCbDay == null || !dailyCbDay.equals(currentDay)) {
+				dailyCbDay = currentDay;
+				dailyCbNetPnl = 0.0;
+				dailyCbActive = false;
+				dailyCbTriggeredAtMs = null;
+			}
+		}
+	}
+
+	private boolean isDailyCbActiveAt(long timeMs) {
+		resetDailyCbIfNewDay(timeMs);
+		synchronized (dailyCbLock) {
+			return dailyCbActive;
+		}
+	}
+
+	private double getDailyCbNetPnlAt(long timeMs) {
+		resetDailyCbIfNewDay(timeMs);
+		synchronized (dailyCbLock) {
+			return dailyCbNetPnl;
+		}
+	}
+
+	private DailyCbExitAccounting recordDailyCbRealizedExit(long exitTimeMs,
+			double grossPnl,
+			double entryPrice,
+			double qty,
+			String symbol,
+			String exitReason) {
+		resetDailyCbIfNewDay(exitTimeMs);
+		double notional = Math.abs(entryPrice * qty);
+		double feeEstimate = notional * DAILY_CB_FEE_ROUND_TRIP_PCT;
+		double netPnlForDailyCb = grossPnl - feeEstimate;
+		synchronized (dailyCbLock) {
+			dailyCbNetPnl += netPnlForDailyCb;
+			boolean triggeredNow = false;
+			if (!dailyCbActive && dailyCbNetPnl <= DAILY_CB_NET_LIMIT_USDT) {
+				dailyCbActive = true;
+				dailyCbTriggeredAtMs = exitTimeMs;
+				triggeredNow = true;
+				LOGGER.warn("EVENT=DAILY_CB_TRIGGERED day={} symbol={} exitReason={} dailyCbNetPnl={} threshold={}",
+						dailyCbDay,
+						symbol,
+						exitReason,
+						dailyCbNetPnl,
+						DAILY_CB_NET_LIMIT_USDT);
+			}
+			return new DailyCbExitAccounting(feeEstimate, netPnlForDailyCb, dailyCbNetPnl, triggeredNow, dailyCbActive);
+		}
 	}
 
 
@@ -1245,6 +1352,13 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private static LongSetupEval empty() {
 			return new LongSetupEval(false, null, null, null, false);
 		}
+	}
+
+	private record DailyCbExitAccounting(double feeEstimate,
+			double netPnlForDailyCb,
+			double dayNetAfterExit,
+			boolean triggeredNow,
+			boolean activeAfterExit) {
 	}
 
 

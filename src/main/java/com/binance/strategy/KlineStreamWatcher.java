@@ -214,7 +214,9 @@ public class KlineStreamWatcher {
 				.doOnNext(payload -> handleKlineMessage(payload, null))
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
-				.subscribe(null, error -> LOGGER.warn("EVENT=KLINE_STREAM_ERROR reason={}", error.getMessage()));
+				.subscribe(null, error -> LOGGER.warn("EVENT=KLINE_STREAM_ERROR mode=combined symbols={} reason={}",
+						strategyProperties.resolvedTradeSymbols(),
+						error.getMessage()));
 		subscriptionRef.set(subscription);
 		LOGGER.info("Kline combined stream started for {} interval {}", streams,
 				List.of(KLINE_INTERVAL_1M, KLINE_INTERVAL_5M));
@@ -238,7 +240,10 @@ public class KlineStreamWatcher {
 				.doOnNext(payload -> handleKlineMessage(payload, interval))
 				.then())
 				.retryWhen(Retry.backoff(Long.MAX_VALUE, java.time.Duration.ofSeconds(1)))
-				.subscribe(null, error -> LOGGER.warn("EVENT=KLINE_STREAM_ERROR reason={}", error.getMessage()));
+				.subscribe(null, error -> LOGGER.warn("EVENT=KLINE_STREAM_ERROR mode=testnet symbol={} interval={} reason={}",
+						symbol.toUpperCase(),
+						interval,
+						error.getMessage()));
 		LOGGER.info("Kline stream started for {} interval {}", symbol, interval);
 		return subscription;
 	}
