@@ -68,7 +68,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
-	private static final Path TRADE_V1_DIR = Paths.get("signals", "tradeV1");
 
 	private final BinanceProperties binanceProperties;
 	private final EliteV1Properties props;
@@ -87,6 +86,16 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private final AtomicBoolean warmupModeEnabled = new AtomicBoolean(false);
 	private volatile boolean warmupCompleted;
 	private final BookTickerStreamWatcher bookTickerStreamWatcher;
+
+	// ── Global Devre Kesici ─────────────────────────────────────────────────────
+	// 20 dakika içinde 4 SL → tüm semboller 4 saat yeni trade almaz
+	// Mevcut açık pozisyonlar etkilenmez, sadece yeni giriş engellenir
+	private final java.util.Deque<Long> recentSlTimesMs = new java.util.ArrayDeque<>();
+	private volatile long circuitBreakerUntilMs = 0L;
+	private static final int  CB_SL_COUNT    = 4;
+	private static final long CB_WINDOW_MS   = 20L * 60 * 1000;   // 20 dakika
+	private static final long CB_COOLDOWN_MS = 4L  * 60 * 60 * 1000; // 4 saat
+	// ────────────────────────────────────────────────────────────────────────────
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
                            EliteV1Properties props,
@@ -289,7 +298,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					metrics.atrRatio5m);
 		}
 		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
-			writeDecision(state, bar5m, DecisionAction.INPUTS_NOT_READY.name(), null, "INPUTS_NOT_READY", metrics, null);
 			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
 				state.prevEma20_5m = metrics.ema20_5m;
 			}
@@ -312,9 +320,16 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 
+		// Devre kesici aktif mi? → yeni giriş engelle
+		if (bar5m.closeTime() < circuitBreakerUntilMs) {
+			writeDecision(state, bar5m, "NO_ENTRY", null, "CIRCUIT_BREAKER_ACTIVE", metrics, null);
+			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+			return;
+		}
+
 		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
 		if (longEval.signal()) {
-			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag, longEval.tradeV1Eligible());
+			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
 			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval);
 			return;
 		}
@@ -363,7 +378,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			failReasons.add("FAIL_ORDERFLOW_MISSING");
 		} else {
 			takerBuyRatio = orderflow.takerBuyBaseVolume() / bar5m.volume();
-			if (!Double.isFinite(takerBuyRatio) || takerBuyRatio <= 0.60) {
+			if (!Double.isFinite(takerBuyRatio) || takerBuyRatio <= 0.58) {
 				failReasons.add("FAIL_TAKER_BUY_RATIO");
 			}
 		}
@@ -395,46 +410,41 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			}
 		}
 
-		boolean ema20SlopeDown = m.ema20SlopeDown;
-		if (state != null
-				&& state.prevEma20_5m != null
-				&& Double.isFinite(m.ema20_5m)
-				&& Double.isFinite(state.prevEma20_5m)) {
-			ema20SlopeDown = m.ema20_5m < state.prevEma20_5m;
-		}
+		// FIX: ema20SlopeDown koşulu kaldırıldı — üçlü koşulun birlikte gerçekleşmesi çok nadir olduğundan
+		// filtre pratikte hiç tetiklenmiyordu (0 trade engellendi). İkili koşul daha etkin filtreleme sağlar.
 		boolean isDownTrend = m.activeRegimeTag == RegimeTag.TREND
 				&& m.close5m < m.ema20_5m
-				&& m.macdDelta < 0.0
-				&& ema20SlopeDown;
+				&& m.macdDelta < 0.0;
 		if (isDownTrend) {
 			failReasons.add("FAIL_DOWN_TREND");
 		}
 
-   // ── Hybrid Volatility + Momentum Filter (TradeV1 eligibility only; does NOT affect main signal) ──
-   boolean isChop = (m.activeRegimeTag == RegimeTag.CHOP);
+		boolean isChop = (m.activeRegimeTag == RegimeTag.CHOP);
+		double minBwRatio  = isChop ? 1.00 : 0.90;
+		double minRsi      = isChop ? 50.0 : 48.0;
+		double maxRsi      = isChop ? 60.0 : 65.0;
+		double maxVolRatio = isChop ? 1.50 : 2.00;
 
-   double minBwRatio  = isChop ? 1.05 : 0.90;
-   double minRsi      = isChop ? 50.0 : 48.0;
-   double maxRsi      = isChop ? 62.0 : 65.0;
-   double maxVolRatio = isChop ? 1.50 : 2.00;
-
-   List<String> tradeV1FailReasons = new ArrayList<>();
-
-   if (!Double.isFinite(m.bwRatio5m) || m.bwRatio5m < minBwRatio) {
-       tradeV1FailReasons.add("FAIL_BW_RATIO_LOW");
-   }
-   if (!Double.isFinite(m.rsi9_5m) || (m.rsi9_5m < minRsi || m.rsi9_5m > maxRsi)) {
-       tradeV1FailReasons.add("FAIL_RSI_OUT_OF_BAND");
-   }
-   if (!Double.isFinite(m.volRatio) || m.volRatio > maxVolRatio) {
-       tradeV1FailReasons.add("FAIL_VOL_RATIO_HIGH");
-   }
-
-   boolean tradeV1Eligible = tradeV1FailReasons.isEmpty();
-
+		if (!Double.isFinite(m.bwRatio5m) || m.bwRatio5m < minBwRatio) {
+			failReasons.add("FAIL_BW_RATIO_LOW");
+		}
+		if (!Double.isFinite(m.rsi9_5m) || m.rsi9_5m < minRsi || m.rsi9_5m > maxRsi) {
+			failReasons.add("FAIL_RSI_OUT_OF_BAND");
+		}
+		if (!Double.isFinite(m.volRatio) || m.volRatio > maxVolRatio) {
+			failReasons.add("FAIL_VOL_RATIO_HIGH");
+		}
+		// Momentum yönü yukarı (negatif değilse geç; tolerans: 0.0)
+		if (!Double.isFinite(m.macdDelta) || m.macdDelta < 0.0) {
+			failReasons.add("FAIL_MACD_DELTA_NEGATIVE");
+		}
+		// Üst Bollinger bandına çok yakın değil
+		if (!Double.isFinite(m.bbPercentB_5m) || m.bbPercentB_5m > 0.8) {
+			failReasons.add("FAIL_BB_UPPER_ZONE");
+		}
 
 		boolean signal = failReasons.isEmpty();
-		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend, tradeV1Eligible);
+		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
 	}
 
 
@@ -442,8 +452,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			Candle bar5m,
 			Side side,
 			String matchedSetup,
-			RegimeTag activeRegimeTag,
-			boolean tradeV1Eligible) {
+			RegimeTag activeRegimeTag) {
 		double tickSize = resolveTickSize(state.symbol);
 		String bracketId = UUID.randomUUID().toString();
 		double estimatedEntryPrice = bar5m.close();
@@ -537,7 +546,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.slClientOrderId = slClientOrderId;
 		state.tpOrderId = tpOrderId;
 		state.tpClientOrderId = tpClientOrderId;
-		state.tradeV1Eligible = tradeV1Eligible;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
 
@@ -568,9 +576,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			node.put("tpOrderId", tpOrderId);
 		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
-		if (state.tradeV1Eligible) {
-			writer.write(tradeV1Path(state.symbol, state.dayKey), node.toString(), true);
-		}
 	}
 
 	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
@@ -701,9 +706,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			putHitBar(node, "slHitBar1m", state.slHitBar1m);
 		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
-		if (state.tradeV1Eligible) {
-			writer.write(tradeV1Path(state.symbol, state.dayKey), node.toString(), true);
-		}
 
 		state.positionSide = Side.NONE;
 		state.bracketId = null;
@@ -717,8 +719,24 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.slClientOrderId = null;
 		state.tpOrderId = null;
 		state.tpClientOrderId = null;
-		state.tradeV1Eligible = false;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
+
+		// Devre kesici: SL kapanışı sayacını güncelle
+		if (reason == ExitReason.STOP_LOSS || reason == ExitReason.SL_ORDER_FILLED) {
+			long now = exitTimeMs;
+			recentSlTimesMs.addLast(now);
+			// 20 dakika dışına çıkanları temizle
+			while (!recentSlTimesMs.isEmpty() && now - recentSlTimesMs.peekFirst() > CB_WINDOW_MS) {
+				recentSlTimesMs.pollFirst();
+			}
+			// 4 SL → 4 saat cooldown
+			if (recentSlTimesMs.size() >= CB_SL_COUNT) {
+				circuitBreakerUntilMs = now + CB_COOLDOWN_MS;
+				recentSlTimesMs.clear();
+				LOGGER.warn("CIRCUIT_BREAKER_TRIGGERED: 20dk icinde 4 SL. Tum semboller {} UTC'ye kadar kapali.",
+						java.time.Instant.ofEpochMilli(circuitBreakerUntilMs));
+			}
+		}
 	}
 
 
@@ -841,9 +859,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			node.putNull("elit.imbalance");
 		}
 		node.put("elit.isDownTrend", eval.isDownTrend);
-		node.put("shortEliteMatched", false);
-		node.putNull("shortEliteMatchedSetup");
-		node.putArray("shortEliteFailReasons");
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
 	}
 
@@ -1013,9 +1028,6 @@ private Path decisionPath(String symbol, LocalDate day) {
 		return TRADE_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
 	}
 
-	private Path tradeV1Path(String symbol, LocalDate day) {
-		return TRADE_V1_DIR.resolve(symbol + "-" + DAY_FMT.format(day) + ".jsonl");
-	}
 
 	private double resolveTickSize(String symbol) {
 		var filters = symbolFilterService.getFilters(symbol);
@@ -1069,10 +1081,18 @@ private Path decisionPath(String symbol, LocalDate day) {
 	}
 
 	static RegimeTag rawRegime(double bwRatio, double macdRatio, double chopBwRatioMax, double chopMacdRatioMax) {
+		// CHOP: her iki koşul düşük olmalı (orijinal mantık korundu)
 		if (bwRatio < chopBwRatioMax && macdRatio < chopMacdRatioMax) {
 			return RegimeTag.CHOP;
 		}
-		return RegimeTag.TREND;
+		// TREND: her iki koşul da güçlü olmalı (FIX: eskiden OR mantığıydı → tek yüksek değer TREND sayılıyordu)
+		// bwRatio >= chopBwRatioMax → BB genişliyor (volatilite artışı)
+		// macdRatio >= chopMacdRatioMax → momentum güçlü
+		// Her ikisi birden güçlü değilse CHOP'a dön (belirsiz/yarı-trend = CHOP gibi davran)
+		if (bwRatio >= chopBwRatioMax && macdRatio >= chopMacdRatioMax) {
+			return RegimeTag.TREND;
+		}
+		return RegimeTag.CHOP;
 	}
 
 	private void validateConfig() {
@@ -1221,9 +1241,9 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 	}
 
-	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend, boolean tradeV1Eligible) {
+	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend) {
 		private static LongSetupEval empty() {
-			return new LongSetupEval(false, null, null, null, false, false);
+			return new LongSetupEval(false, null, null, null, false);
 		}
 	}
 
@@ -1254,7 +1274,6 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private String slClientOrderId;
 		private Long tpOrderId;
 		private String tpClientOrderId;
-		private boolean tradeV1Eligible;
 		private Double prevEma20_5m;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
@@ -1381,15 +1400,12 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private RegimeTag rawRegimeTag = RegimeTag.CHOP;
 		private RegimeTag activeRegimeTag = RegimeTag.CHOP;
 		private int debounceCounter;
-		private int cooldownCounter;
 		private RegimeTag pendingRegime;
 
+		// FIX: cooldownCounter kaldırıldı — TREND→CHOP geçişini geciktirerek stale TREND etiketiyle
+		// kötü giriş yapılmasına neden oluyordu. Debounce zaten gereksiz titreşimi engelliyor.
 		private RegimeTag update(RegimeTag raw, int debounceBars, int cooldownBars) {
 			rawRegimeTag = raw;
-			if (cooldownCounter > 0) {
-				cooldownCounter--;
-				return activeRegimeTag;
-			}
 			if (pendingRegime != raw) {
 				pendingRegime = raw;
 				debounceCounter = 1;
@@ -1398,7 +1414,6 @@ private Path decisionPath(String symbol, LocalDate day) {
 			debounceCounter++;
 			if (debounceCounter >= debounceBars && activeRegimeTag != raw) {
 				activeRegimeTag = raw;
-				cooldownCounter = cooldownBars;
 				debounceCounter = 0;
 			}
 			return activeRegimeTag;
