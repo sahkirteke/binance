@@ -273,6 +273,21 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
 		rollDay(state, bar5m.closeTime());
 		Metrics metrics = state.indicators.metrics();
+		boolean baselinesReady = isBaselinesReady(state, metrics);
+		state.baselinesReady = baselinesReady;
+		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
+			state.warmupDoneLogged = true;
+			var at = Instant.ofEpochMilli(bar5m.closeTime());
+			var atTr = at.atZone(zoneId);
+			LOGGER.info("EVENT=WARMUP_DONE strategy=ELITE_V1 symbol={} seen1m={} seen5m={} required5m={} atMs={} timeUtc={} timeTr={}",
+					state.symbol,
+					state.seen1mCloses,
+					state.seen5mCloses,
+					requiredWarmup5m,
+					bar5m.closeTime(),
+					at.toString(),
+					ISO_OFFSET_FMT.format(atTr));
+		}
 		if (state.positionSide != Side.NONE) {
 			boolean exited = props.mode() == EliteV1Properties.Mode.PAPER
 					? checkPaperExitOnFiveMinute(state, bar5m)
