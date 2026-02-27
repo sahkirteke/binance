@@ -716,6 +716,37 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.tpClientOrderId = tpClientOrderId;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
+		if (state.dayKey == null) {
+			state.dayKey = Instant.ofEpochMilli(entryOpenTimeMs).atZone(zoneId).toLocalDate();
+		}
+
+		ObjectNode node = objectMapper.createObjectNode();
+		node.put("type", "ENTRY");
+		node.put("symbol", state.symbol);
+		node.put("time", Instant.ofEpochMilli(entryOpenTimeMs).toString());
+		node.put("side", side.name());
+		node.put("entryPrice", entryPrice);
+		node.put("qty", qty);
+		node.put("tpPrice", tpPrice);
+		node.put("slPrice", slPrice);
+		node.put("tpRaw", tpRaw);
+		node.put("slRaw", slRaw);
+		node.put("tickSize", tickSize);
+		node.put("matchedSetup", matchedSetup);
+		node.put("activeRegimeTag", activeRegimeTag.name());
+		node.put("elit.tpPct", TP_PCT);
+		node.put("elit.slPct", SL_PCT);
+		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+		if (entryOrderId != null) {
+			node.put("entryOrderId", entryOrderId);
+		}
+		if (slOrderId != null) {
+			node.put("slOrderId", slOrderId);
+		}
+		if (tpOrderId != null) {
+			node.put("tpOrderId", tpOrderId);
+		}
+		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 	}
 
 	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
