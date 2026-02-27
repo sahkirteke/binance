@@ -376,9 +376,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private LongSetupEval evaluateBaselineImpulseReclaim(SymbolState state, Metrics m, Candle c5) {
 		List<String> failReasons = new ArrayList<>();
-		Candle c1 = state.last1m.peekLast();
+		long decisionCloseTimeMs = c5 == null ? 0L : c5.closeTime();
+		Candle c1 = resolveDecisionAlignedLast1m(state, decisionCloseTimeMs);
 		SymbolState btcState = states.get(BTC_SYMBOL);
-		Candle b1 = btcState == null ? null : btcState.last1m.peekLast();
+		Candle b1 = btcState == null ? null : resolveDecisionAlignedLast1m(btcState, decisionCloseTimeMs);
 		double ret1m = Double.NaN;
 		double range1m = Double.NaN;
 		double closePos1m = Double.NaN;
@@ -463,9 +464,10 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private ShortSetupEval evaluateShortDumpBtcSetup(SymbolState state, Candle bar5m) {
 		List<String> failReasons = new ArrayList<>();
-		Candle coinBar1mLast = state.last1m.peekLast();
+		long decisionCloseTimeMs = bar5m == null ? 0L : bar5m.closeTime();
+		Candle coinBar1mLast = resolveDecisionAlignedLast1m(state, decisionCloseTimeMs);
 		SymbolState btcState = states.get(BTC_SYMBOL);
-		Candle btcBar1mLast = btcState == null ? null : btcState.last1m.peekLast();
+		Candle btcBar1mLast = btcState == null ? null : resolveDecisionAlignedLast1m(btcState, decisionCloseTimeMs);
 		double coinRet1 = Double.NaN;
 		double btcRet1 = Double.NaN;
 		double btcClosePos1 = Double.NaN;
@@ -539,6 +541,11 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		Candle last1m = resolveDecisionAlignedLast1m(state, timeMs);
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
+		}
+		SymbolState btcState = states.get(BTC_SYMBOL);
+		Candle btc1m = btcState == null ? null : resolveDecisionAlignedLast1m(btcState, timeMs);
+		if (btc1m != null) {
+			putBar(node, "btcBar1mLast", btc1m, ONE_MIN_MS);
 		}
 		List<String> invalidReasons = new ArrayList<>();
 		if (!baselinesReady || metrics == null) {
@@ -1017,11 +1024,13 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 		for (var it = state.last1m.descendingIterator(); it.hasNext(); ) {
 			Candle candle = it.next();
-			if (candle != null && candle.closeTime() <= decisionCloseTimeMs) {
+			if (candle != null
+					&& candle.closeTime() <= decisionCloseTimeMs
+					&& (decisionCloseTimeMs - candle.closeTime()) < ONE_MIN_MS) {
 				return candle;
 			}
 		}
-		return state.last1m.peekLast();
+		return null;
 	}
 
 
