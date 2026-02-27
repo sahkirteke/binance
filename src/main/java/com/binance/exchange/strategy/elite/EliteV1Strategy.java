@@ -577,7 +577,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
 		}
 		node.put("action", eval.pass() ? "ENTER_SHORT" : "NO_ENTRY");
-		node.put("matchedSetup", eval.pass() ? "SHORT_DUMP_BTC" : null);
+		node.put("matchedSetup", "SHORT_DUMP_BTC");
 		node.put("blockReason", eval.pass() ? "NONE" : String.join("|", eval.failReasons()));
 		node.put("inputsValid", eval.pass());
 		var invalid = node.putArray("inputsInvalidReasons");
