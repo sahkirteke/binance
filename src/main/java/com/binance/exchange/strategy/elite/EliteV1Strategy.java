@@ -765,25 +765,38 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (state == null || oneMinuteBar == null) {
 			return;
 		}
-		if (state.positionSide == Side.NONE || state.bracketId == null || state.positionSide != Side.LONG) {
+		if (state.positionSide == Side.NONE || state.bracketId == null) {
 			return;
 		}
 		// no-op: paper exits are evaluated on final 5m bars via checkPaperExitOnFiveMinute
 	}
 
 	private boolean checkPaperExitOnFiveMinute(SymbolState state, Candle bar5m) {
-		if (state == null || bar5m == null || state.positionSide != Side.LONG || state.bracketId == null) {
+		if (state == null || bar5m == null || state.positionSide == Side.NONE || state.bracketId == null) {
 			return false;
 		}
-		if (bar5m.low() <= state.slPrice) {
-			exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
-					new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
-			return true;
-		}
-		if (bar5m.high() >= state.tpPrice) {
-			exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
-					new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
-			return true;
+		if (state.positionSide == Side.LONG) {
+			if (bar5m.low() <= state.slPrice) {
+				exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
+						new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
+				return true;
+			}
+			if (bar5m.high() >= state.tpPrice) {
+				exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
+						new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
+				return true;
+			}
+		} else if (state.positionSide == Side.SHORT) {
+			if (bar5m.high() >= state.slPrice) {
+				exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
+						new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
+				return true;
+			}
+			if (bar5m.low() <= state.tpPrice) {
+				exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
+						new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
+				return true;
+			}
 		}
 		if ((bar5m.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
 			exitPosition(state, ExitReason.TIMEOUT_36B, bar5m.close(), bar5m.closeTime(),
