@@ -296,6 +296,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 				return;
 			}
 		}
+		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
+			return;
+		}
 
 		LongSetupEval longEval = evaluateBaselineImpulseReclaim(state, metrics, bar5m);
 		if (longEval.signal() && !state.pendingEntry) {

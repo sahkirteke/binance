@@ -125,6 +125,19 @@ public class HistoricalWarmupService {
 					notReady,
 					failed,
 					durationMs);
+			if (strategyProperties.active() == StrategyType.ELITE_V1 && ready == total) {
+				for (String symbol : symbols) {
+					var readiness = strategyRouter.eliteWarmupReadiness(symbol);
+					if (readiness == null || !readiness.ready()) {
+						LOGGER.error("EVENT=WARMUP_5M_VALIDATION_FAIL symbol={} reason={} readySymbols={} notReadySymbols={} failedSymbols={}",
+								symbol,
+								readiness == null ? "STATUS_NULL" : readiness.reason(),
+								ready,
+								notReady,
+								failed);
+					}
+				}
+			}
 			notReadyReasons.forEach((symbol, reason) -> LOGGER.info("EVENT=WARMUP_NOT_READY symbol={} reason={}", symbol, reason));
 		});
 	}
