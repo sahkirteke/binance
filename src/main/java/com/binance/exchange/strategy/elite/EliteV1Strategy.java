@@ -312,7 +312,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
 				longEval.blockReason(), metrics, longEval);
-		writeShortDecision(state, bar5m, shortEval);
+		writeShortDecision(state, bar5m, metrics, shortEval);
 	}
 
 	private void rollDay(SymbolState state, long closeTimeMs) {
@@ -508,21 +508,85 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		return candle.open() > 0.0;
 	}
 
-	private void writeShortDecision(SymbolState state, Candle bar5m, ShortSetupEval eval) {
+	private void writeShortDecision(SymbolState state, Candle bar5m, Metrics metrics, ShortSetupEval eval) {
 		ObjectNode node = objectMapper.createObjectNode();
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
 		LocalDate dayFromTimeMs = timeTr.toLocalDate();
+		boolean baselinesReady = isBaselinesReady(state, metrics);
 		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
 		node.put("strategy", "ELITE_V1");
 		node.put("tfDecision", "5m");
 		node.put("tfExecution", "1m");
+		node.put("version", "20260207-elitev1-logv2");
 		node.put("closeTimeMs", timeMs);
+		node.put("closeTime", ISO_OFFSET_FMT.format(timeTr));
+		node.put("timeMs", timeMs);
+		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
 		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
-		node.put("setup", "SHORT_DUMP_BTC");
+		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
+		node.put("entriesToday", state.entriesToday);
+		node.put("baselinesReady", baselinesReady);
+		node.put("globalOpenPositions", globalOpenPositions.get());
+		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
+		putOrderflow(node, bar5m);
+		putLiquidity(node, state.symbol, timeMs);
+		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
+		Candle last1m = state.last1m.peekLast();
+		if (last1m != null) {
+			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
+		}
+		List<String> invalidReasons = new ArrayList<>();
+		if (!baselinesReady || metrics == null) {
+			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
+			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
+		} else {
+			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
+			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
+			ObjectNode metricNode = node.putObject("metrics");
+			putMetric(metricNode, "bbWidth_5m", metrics.bbWidth_5m, invalidReasons, "bbWidth_5m");
+			putMetric(metricNode, "bwEma_5m", metrics.bwEma_5m, invalidReasons, "bwEma_5m");
+			putMetric(metricNode, "bwRatio_5m", metrics.bwRatio5m, invalidReasons, "bwRatio_5m");
+			putMetric(metricNode, "volRatio", metrics.volRatio, invalidReasons, "volRatio");
+			putMetric(metricNode, "volEma_5m", metrics.volEma_5m, invalidReasons, "volEma_5m");
+			putMetric(metricNode, "volRatioOfEma", metrics.volRatioOfEma, invalidReasons, "volRatioOfEma");
+			putMetric(metricNode, "ema20", metrics.ema20_5m, invalidReasons, "ema20");
+			putMetric(metricNode, "ema20DistPct", metrics.ema20DistPct, invalidReasons, "ema20DistPct");
+			putMetric(metricNode, "rsi9", metrics.rsi9_5m, invalidReasons, "rsi9");
+			putMetric(metricNode, "bbLower", metrics.bbLower, invalidReasons, "bbLower");
+			putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
+			putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
+			putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
+			putMetric(metricNode, "ema20_5m", metrics.ema20_5m, invalidReasons, "ema20_5m");
+			putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
+			putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
+			putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
+			putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
+			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
+			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
+		}
 		node.put("action", eval.pass() ? "ENTER_SHORT" : "NO_ENTRY");
+		node.put("matchedSetup", eval.pass() ? "SHORT_DUMP_BTC" : null);
 		node.put("blockReason", eval.pass() ? "NONE" : String.join("|", eval.failReasons()));
+		node.put("inputsValid", eval.pass());
+		var invalid = node.putArray("inputsInvalidReasons");
+		for (String reason : eval.failReasons()) {
+			invalid.add(reason);
+		}
+		node.put("elit.tpPct", TP_PCT);
+		node.put("elit.slPct", SL_PCT);
+		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+		node.putNull("elit.takerBuyRatio");
+		node.putNull("elit.imbalance");
+		node.put("elit.isDownTrend", false);
+		node.put("shortEliteMatched", eval.pass());
+		node.put("shortEliteMatchedSetup", eval.pass() ? "SHORT_DUMP_BTC" : "NA");
+		var shortFail = node.putArray("shortEliteFailReasons");
+		for (String reason : eval.failReasons()) {
+			shortFail.add(reason);
+		}
+		node.put("setup", "SHORT_DUMP_BTC");
 		node.put("pass", eval.pass());
 		var failReasons = node.putArray("failReasons");
 		for (String reason : eval.failReasons()) {
@@ -828,17 +892,78 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
 		LocalDate dayFromTimeMs = timeTr.toLocalDate();
+		boolean baselinesReady = isBaselinesReady(state, metrics);
 		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
 		node.put("strategy", "ELITE_V1");
 		node.put("tfDecision", "5m");
 		node.put("tfExecution", "1m");
+		node.put("version", "20260207-elitev1-logv2");
 		node.put("closeTimeMs", timeMs);
+		node.put("closeTime", ISO_OFFSET_FMT.format(timeTr));
+		node.put("timeMs", timeMs);
+		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
 		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
-		node.put("setup", "BASELINE_IMPULSE_RECLAIM");
+		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
+		node.put("entriesToday", state.entriesToday);
+		node.put("baselinesReady", baselinesReady);
+		node.put("globalOpenPositions", globalOpenPositions.get());
+		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
+		putOrderflow(node, bar5m);
+		putLiquidity(node, state.symbol, timeMs);
+		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
+		Candle last1m = state.last1m.peekLast();
+		if (last1m != null) {
+			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
+		}
+		List<String> invalidReasons = new ArrayList<>();
+		if (!baselinesReady || metrics == null) {
+			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
+			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
+		} else {
+			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
+			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
+			ObjectNode metricNode = node.putObject("metrics");
+			putMetric(metricNode, "bbWidth_5m", metrics.bbWidth_5m, invalidReasons, "bbWidth_5m");
+			putMetric(metricNode, "bwEma_5m", metrics.bwEma_5m, invalidReasons, "bwEma_5m");
+			putMetric(metricNode, "bwRatio_5m", metrics.bwRatio5m, invalidReasons, "bwRatio_5m");
+			putMetric(metricNode, "volRatio", metrics.volRatio, invalidReasons, "volRatio");
+			putMetric(metricNode, "volEma_5m", metrics.volEma_5m, invalidReasons, "volEma_5m");
+			putMetric(metricNode, "volRatioOfEma", metrics.volRatioOfEma, invalidReasons, "volRatioOfEma");
+			putMetric(metricNode, "ema20", metrics.ema20_5m, invalidReasons, "ema20");
+			putMetric(metricNode, "ema20DistPct", metrics.ema20DistPct, invalidReasons, "ema20DistPct");
+			putMetric(metricNode, "rsi9", metrics.rsi9_5m, invalidReasons, "rsi9");
+			putMetric(metricNode, "bbLower", metrics.bbLower, invalidReasons, "bbLower");
+			putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
+			putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
+			putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
+			putMetric(metricNode, "ema20_5m", metrics.ema20_5m, invalidReasons, "ema20_5m");
+			putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
+			putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
+			putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
+			putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
+			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
+			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
+		}
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
-		node.put("action", eval.signal() ? "ENTER_LONG" : "NO_ENTRY");
-		node.put("blockReason", eval.signal() ? "NONE" : (eval.blockReason() == null ? "NO_ENTRY" : eval.blockReason()));
+		node.put("action", eval.signal() ? "ENTER_LONG" : action);
+		node.put("matchedSetup", eval.signal() ? "BASELINE_IMPULSE_RECLAIM" : matchedSetup);
+		node.put("blockReason", eval.signal() ? "NONE" : resolveDecisionBlockReason(action, eval.blockReason() == null ? blockReason : eval.blockReason()));
+		node.put("inputsValid", eval.signal());
+		var invalid = node.putArray("inputsInvalidReasons");
+		for (String reason : eval.failReasons()) {
+			invalid.add(reason);
+		}
+		node.put("elit.tpPct", TP_PCT);
+		node.put("elit.slPct", SL_PCT);
+		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+		node.putNull("elit.takerBuyRatio");
+		node.putNull("elit.imbalance");
+		node.put("elit.isDownTrend", false);
+		node.put("shortEliteMatched", false);
+		node.putNull("shortEliteMatchedSetup");
+		node.putArray("shortEliteFailReasons");
+		node.put("setup", "BASELINE_IMPULSE_RECLAIM");
 		node.put("pass", eval.signal());
 		var failReasons = node.putArray("failReasons");
 		for (String reason : eval.failReasons()) {
