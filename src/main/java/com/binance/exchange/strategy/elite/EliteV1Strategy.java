@@ -536,7 +536,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		putOrderflow(node, bar5m);
 		putLiquidity(node, state.symbol, timeMs);
 		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
-		Candle last1m = state.last1m.peekLast();
+		Candle last1m = resolveDecisionAlignedLast1m(state, timeMs);
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
 		}
@@ -928,7 +928,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		putOrderflow(node, bar5m);
 		putLiquidity(node, state.symbol, timeMs);
 		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
-		Candle last1m = state.last1m.peekLast();
+		Candle last1m = resolveDecisionAlignedLast1m(state, timeMs);
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
 		}
@@ -1009,6 +1009,19 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		} else {
 			node.putNull(key);
 		}
+	}
+
+	private Candle resolveDecisionAlignedLast1m(SymbolState state, long decisionCloseTimeMs) {
+		if (state == null || state.last1m.isEmpty()) {
+			return null;
+		}
+		for (var it = state.last1m.descendingIterator(); it.hasNext(); ) {
+			Candle candle = it.next();
+			if (candle != null && candle.closeTime() <= decisionCloseTimeMs) {
+				return candle;
+			}
+		}
+		return state.last1m.peekLast();
 	}
 
 
