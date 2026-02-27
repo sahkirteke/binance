@@ -310,6 +310,8 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.pendingEntrySide = Side.SHORT;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
 		}
+		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
+				longEval.blockReason(), metrics, longEval);
 		writeShortDecision(state, bar5m, shortEval);
 	}
 
@@ -511,9 +513,16 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
 		LocalDate dayFromTimeMs = timeTr.toLocalDate();
-		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
+		node.put("strategy", "ELITE_V1");
+		node.put("tfDecision", "5m");
+		node.put("tfExecution", "1m");
+		node.put("closeTimeMs", timeMs);
+		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
 		node.put("setup", "SHORT_DUMP_BTC");
+		node.put("action", eval.pass() ? "ENTER_SHORT" : "NO_ENTRY");
+		node.put("blockReason", eval.pass() ? "NONE" : String.join("|", eval.failReasons()));
 		node.put("pass", eval.pass());
 		var failReasons = node.putArray("failReasons");
 		for (String reason : eval.failReasons()) {
@@ -529,6 +538,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
 	}
+
 
 	private void openPosition(SymbolState state,
 			double entryPrice,
@@ -818,9 +828,17 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
 		LocalDate dayFromTimeMs = timeTr.toLocalDate();
-		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+		node.put("type", "DECISION");
 		node.put("symbol", state.symbol);
+		node.put("strategy", "ELITE_V1");
+		node.put("tfDecision", "5m");
+		node.put("tfExecution", "1m");
+		node.put("closeTimeMs", timeMs);
+		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+		node.put("setup", "BASELINE_IMPULSE_RECLAIM");
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
+		node.put("action", eval.signal() ? "ENTER_LONG" : "NO_ENTRY");
+		node.put("blockReason", eval.signal() ? "NONE" : (eval.blockReason() == null ? "NO_ENTRY" : eval.blockReason()));
 		node.put("pass", eval.signal());
 		var failReasons = node.putArray("failReasons");
 		for (String reason : eval.failReasons()) {
