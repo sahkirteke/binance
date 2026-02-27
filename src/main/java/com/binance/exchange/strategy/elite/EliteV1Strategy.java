@@ -273,7 +273,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
 		rollDay(state, bar5m.closeTime());
 		Metrics metrics = state.indicators.metrics();
-		if (state.positionSide == Side.LONG) {
+		if (state.positionSide != Side.NONE) {
 			boolean exited = props.mode() == EliteV1Properties.Mode.PAPER
 					? checkPaperExitOnFiveMinute(state, bar5m)
 					: checkLiveBracketExit(state, bar5m);
@@ -283,12 +283,19 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 
 		LongSetupEval longEval = evaluateBaselineImpulseReclaim(state, metrics, bar5m);
-		if (longEval.signal()) {
+		if (longEval.signal() && !state.pendingEntry) {
 			state.pendingEntry = true;
+			state.pendingEntrySide = Side.LONG;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
 		}
-		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", null,
-				longEval.blockReason(), metrics, longEval);
+
+		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
+		if (shortEval.pass() && !state.pendingEntry) {
+			state.pendingEntry = true;
+			state.pendingEntrySide = Side.SHORT;
+			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
+		}
+		writeShortDecision(state, bar5m, shortEval);
 	}
 
 	private void rollDay(SymbolState state, long closeTimeMs) {
@@ -332,11 +339,15 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 		state.pendingEntry = false;
+		Side pendingSide = state.pendingEntrySide == null ? Side.LONG : state.pendingEntrySide;
+		state.pendingEntrySide = null;
 		state.pendingEntryOpenTimeMs = null;
 		if (state.positionSide != Side.NONE) {
 			return;
 		}
-		openPosition(state, closed1m.open(), openTimeMs, Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
+		String setup = pendingSide == Side.SHORT ? "SHORT_DUMP_BTC" : "BASELINE_IMPULSE_RECLAIM";
+		RegimeTag regimeTag = pendingSide == Side.SHORT ? RegimeTag.CHOP : RegimeTag.TREND;
+		openPosition(state, closed1m.open(), openTimeMs, pendingSide, setup, regimeTag);
 	}
 
 	private long next5mOpenTimeMs(long closeTimeMs) {
@@ -430,7 +441,79 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		return LongSetupEval.empty();
 	}
 
+	private ShortSetupEval evaluateShortDumpBtcSetup(SymbolState state, Candle bar5m) {
+		List<String> failReasons = new ArrayList<>();
+		Candle coinBar1mLast = state.last1m.peekLast();
+		SymbolState btcState = states.get(BTC_SYMBOL);
+		Candle btcBar1mLast = btcState == null ? null : btcState.last1m.peekLast();
+		double coinRet1 = Double.NaN;
+		double btcRet1 = Double.NaN;
+		double btcClosePos1 = Double.NaN;
 
+		if (!isValidFinalCandle(coinBar1mLast) || !isValidFinalCandle(btcBar1mLast)) {
+			failReasons.add("INPUTS_NOT_READY");
+			return new ShortSetupEval(false, failReasons, coinRet1, btcRet1, btcClosePos1, Double.NaN, Double.NaN, Double.NaN);
+		}
+		if (state.positionSide != Side.NONE) {
+			failReasons.add("IN_POSITION");
+			return new ShortSetupEval(false, failReasons, coinRet1, btcRet1, btcClosePos1, Double.NaN, Double.NaN, Double.NaN);
+		}
+
+		coinRet1 = (coinBar1mLast.close() / coinBar1mLast.open()) - 1.0;
+		btcRet1 = (btcBar1mLast.close() / btcBar1mLast.open()) - 1.0;
+		double btcRange = btcBar1mLast.high() - btcBar1mLast.low();
+		btcClosePos1 = btcRange == 0.0 ? 0.50 : (btcBar1mLast.close() - btcBar1mLast.low()) / btcRange;
+
+		if (coinRet1 > -0.0050) {
+			failReasons.add("FAIL_COIN_RET1");
+		}
+		if (btcRet1 > -0.0008) {
+			failReasons.add("FAIL_BTC_RET1");
+		}
+		if (btcClosePos1 > 0.45) {
+			failReasons.add("FAIL_BTC_CLOSEPOS1");
+		}
+
+		double next5mOpen = bar5m.close();
+		double tickSize = resolveTickSize(state.symbol);
+		double tpPrice = roundUp(next5mOpen * (1.0 - TP_PCT), tickSize);
+		double slPrice = roundUp(next5mOpen * (1.0 + SL_PCT), tickSize);
+		return new ShortSetupEval(failReasons.isEmpty(), failReasons, coinRet1, btcRet1, btcClosePos1, next5mOpen, tpPrice, slPrice);
+	}
+
+	private boolean isValidFinalCandle(Candle candle) {
+		if (candle == null) {
+			return false;
+		}
+		if (!Double.isFinite(candle.open()) || !Double.isFinite(candle.high()) || !Double.isFinite(candle.low()) || !Double.isFinite(candle.close())) {
+			return false;
+		}
+		return candle.open() > 0.0;
+	}
+
+	private void writeShortDecision(SymbolState state, Candle bar5m, ShortSetupEval eval) {
+		ObjectNode node = objectMapper.createObjectNode();
+		long timeMs = bar5m.closeTime();
+		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
+		LocalDate dayFromTimeMs = timeTr.toLocalDate();
+		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+		node.put("symbol", state.symbol);
+		node.put("setup", "SHORT_DUMP_BTC");
+		node.put("pass", eval.pass());
+		var failReasons = node.putArray("failReasons");
+		for (String reason : eval.failReasons()) {
+			failReasons.add(reason);
+		}
+		putFiniteOrNull(node, "coinRet1", eval.coinRet1());
+		putFiniteOrNull(node, "btcRet1", eval.btcRet1());
+		putFiniteOrNull(node, "btcClosePos1", eval.btcClosePos1());
+		if (eval.pass()) {
+			node.put("entryPrice", eval.entryPrice());
+			node.put("tpPrice", eval.tpPrice());
+			node.put("slPrice", eval.slPrice());
+		}
+		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+	}
 
 	private void openPosition(SymbolState state,
 			double entryPrice,
@@ -454,11 +537,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		Long entryOrderId = null;
 
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			if (side != Side.LONG) {
-				LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-				return;
-			}
-			String entrySide = "BUY";
+			String entrySide = side == Side.SHORT ? "SELL" : "BUY";
 			OrderResponse entryResponse = orderClient.placeMarketOrder(
 					state.symbol,
 					entrySide,
@@ -479,21 +558,24 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		double slRaw;
 		double tpPrice;
 		double slPrice;
-		if (side != Side.LONG) {
-			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-			return;
+		if (side == Side.SHORT) {
+			tpRaw = entryPrice * (1.0 - TP_PCT);
+			slRaw = entryPrice * (1.0 + SL_PCT);
+			tpPrice = roundUp(tpRaw, tickSize);
+			slPrice = roundUp(slRaw, tickSize);
+		} else {
+			tpRaw = entryPrice * (1.0 + TP_PCT);
+			slRaw = entryPrice * (1.0 - SL_PCT);
+			tpPrice = roundDown(tpRaw, tickSize);
+			slPrice = roundDown(slRaw, tickSize);
 		}
-		tpRaw = entryPrice * (1.0 + TP_PCT);
-		slRaw = entryPrice * (1.0 - SL_PCT);
-		tpPrice = roundDown(tpRaw, tickSize);
-		slPrice = roundDown(slRaw, tickSize);
 
 		Long slOrderId = null;
 		Long tpOrderId = null;
 		String slClientOrderId = "ELITE_SL_" + state.symbol + "_" + bracketId;
 		String tpClientOrderId = "ELITE_TP_" + state.symbol + "_" + bracketId;
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			String exitSide = "SELL";
+			String exitSide = side == Side.SHORT ? "BUY" : "SELL";
 			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
 					state.symbol,
 					exitSide,
@@ -1166,6 +1248,15 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 	}
 
+	private record ShortSetupEval(boolean pass,
+			List<String> failReasons,
+			double coinRet1,
+			double btcRet1,
+			double btcClosePos1,
+			double entryPrice,
+			double tpPrice,
+			double slPrice) {
+	}
 
 	private static final class SymbolState {
 		private final String symbol;
@@ -1195,6 +1286,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private String tpClientOrderId;
 		private Double prevEma20_5m;
 		private boolean pendingEntry;
+		private Side pendingEntrySide;
 		private Long pendingEntryOpenTimeMs;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
