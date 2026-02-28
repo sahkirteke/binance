@@ -225,8 +225,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.last1m.removeFirst();
 		}
 		logWarmupProgressIfDue(state);
-		processPendingEntryIfDue(state, bar1m);
-
 		BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
 		applyCompletedFiveMinute(state, transition);
 	}
@@ -354,19 +352,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return new PreCheckAction(DecisionAction.IN_POSITION_NO_ENTRY, null);
 		}
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
-	}
-
-	private void processPendingEntryIfDue(SymbolState state, Candle closed1m) {
-		if (!state.pendingEntry) {
-			return;
-		}
-		state.pendingEntry = false;
-		state.pendingEntrySide = null;
-		state.pendingEntryOpenTimeMs = null;
-	}
-
-	private long next5mOpenTimeMs(long closeTimeMs) {
-		return closeTimeMs + 1L;
 	}
 
 	private LongSetupEval evaluateBaselineImpulseReclaim(SymbolState state, Metrics m, Candle c5) {
@@ -1536,9 +1521,6 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private Long tpOrderId;
 		private String tpClientOrderId;
 		private Double prevEma20_5m;
-		private boolean pendingEntry;
-		private Side pendingEntrySide;
-		private Long pendingEntryOpenTimeMs;
 		private final Deque<Candle> last1m = new ArrayDeque<>();
 		private final Deque<Candle> last5m = new ArrayDeque<>();
 		private final BucketedFiveMinuteAggregator aggregator = new BucketedFiveMinuteAggregator();
