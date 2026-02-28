@@ -130,17 +130,25 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 		validateConfig();
+		warmupCompleted = !isHistoricalWarmupEnabled();
 		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
 		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
 				props.symbols().size(),
 				requiredWarmup5m,
 				warmupMode.name());
+		LOGGER.info("EVENT=WARMUP_GATE strategy=ELITE_V1 historicalWarmupEnabled={} warmupCompletedInitially={}",
+				isHistoricalWarmupEnabled(),
+				warmupCompleted);
 		zoneId = ZoneId.of(props.zoneId());
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
 		startBookTickerWatcher();
 		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
+	}
+
+	private boolean isHistoricalWarmupEnabled() {
+		return props.warmup() != null && props.warmup().enabled();
 	}
 
 	@Override
