@@ -309,19 +309,15 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 
 		LongSetupEval longEval = evaluateBaselineImpulseReclaim(state, metrics, bar5m);
-		if (longEval.signal() && !state.pendingEntry) {
-			state.pendingEntry = true;
-			state.pendingEntrySide = Side.LONG;
-			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
+		if (longEval.signal() && state.positionSide == Side.NONE) {
 			writeTradeSignal(state, bar5m.closeTime(), "ENTER_LONG");
+			openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
 		}
 
 		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
-		if (shortEval.pass() && !state.pendingEntry) {
-			state.pendingEntry = true;
-			state.pendingEntrySide = Side.SHORT;
-			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
+		if (shortEval.pass() && state.positionSide == Side.NONE) {
 			writeTradeSignal(state, bar5m.closeTime(), "ENTER_SHORT");
+			openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", RegimeTag.CHOP);
 		}
 		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
 				longEval.blockReason(), metrics, longEval);
@@ -361,32 +357,12 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private void processPendingEntryIfDue(SymbolState state, Candle closed1m) {
-		if (!state.pendingEntry || state.pendingEntryOpenTimeMs == null) {
-			return;
-		}
-		long openTimeMs = inferOpenTimeMsFromClose(closed1m.closeTime());
-		if (openTimeMs != state.pendingEntryOpenTimeMs) {
-			if (openTimeMs > state.pendingEntryOpenTimeMs) {
-				LOGGER.warn("EVENT=PENDING_ENTRY_MISSED symbol={} scheduledOpenTimeMs={} actualOpenTimeMs={}",
-						state.symbol,
-						state.pendingEntryOpenTimeMs,
-						openTimeMs);
-				state.pendingEntry = false;
-				state.pendingEntrySide = null;
-				state.pendingEntryOpenTimeMs = null;
-			}
+		if (!state.pendingEntry) {
 			return;
 		}
 		state.pendingEntry = false;
-		Side pendingSide = state.pendingEntrySide == null ? Side.LONG : state.pendingEntrySide;
 		state.pendingEntrySide = null;
 		state.pendingEntryOpenTimeMs = null;
-		String setup = pendingSide == Side.SHORT ? "SHORT_DUMP_BTC" : "BASELINE_IMPULSE_RECLAIM";
-		RegimeTag regimeTag = pendingSide == Side.SHORT ? RegimeTag.CHOP : RegimeTag.TREND;
-		if (state.positionSide != Side.NONE) {
-			return;
-		}
-		openPosition(state, closed1m.open(), openTimeMs, pendingSide, setup, regimeTag);
 	}
 
 	private long next5mOpenTimeMs(long closeTimeMs) {
