@@ -308,13 +308,11 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 		LongSetupEval longEval = evaluateBaselineImpulseReclaim(state, metrics, bar5m);
 		if (longEval.signal() && state.positionSide == Side.NONE) {
-			writeTradeSignal(state, bar5m.closeTime(), "ENTER_LONG");
 			openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
 		}
 
 		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
 		if (shortEval.pass() && state.positionSide == Side.NONE) {
-			writeTradeSignal(state, bar5m.closeTime(), "ENTER_SHORT");
 			openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", RegimeTag.CHOP);
 		}
 		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
@@ -594,17 +592,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 
-	private void writeTradeSignal(SymbolState state, long timeMs, String action) {
-		LocalDate day = state.dayKey == null
-				? Instant.ofEpochMilli(timeMs).atZone(zoneId).toLocalDate()
-				: state.dayKey;
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", action);
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(timeMs).toString());
-		writer.write(tradePath(state.symbol, day), node.toString(), true);
-	}
-
 
 	private void openPosition(SymbolState state,
 			double entryPrice,
@@ -680,6 +667,30 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		Long tpOrderId = null;
 		String slClientOrderId = "ELITE_SL_" + state.symbol + "_" + bracketId;
 		String tpClientOrderId = "ELITE_TP_" + state.symbol + "_" + bracketId;
+
+		state.positionSide = side;
+		state.entryPrice = entryPrice;
+		state.qty = qty;
+		state.entryTimeMs = entryOpenTimeMs;
+		state.tpPrice = tpPrice;
+		state.slPrice = slPrice;
+		state.tpHitTimeMs = null;
+		state.slHitTimeMs = null;
+		state.tpHitBar1m = null;
+		state.slHitBar1m = null;
+		state.bracketId = bracketId;
+		state.entryOrderId = entryOrderId;
+		state.entryClientOrderId = entryOrderClientId;
+		state.slOrderId = null;
+		state.slClientOrderId = slClientOrderId;
+		state.tpOrderId = null;
+		state.tpClientOrderId = tpClientOrderId;
+		state.entriesToday++;
+		globalOpenPositions.incrementAndGet();
+		if (state.dayKey == null) {
+			state.dayKey = Instant.ofEpochMilli(entryOpenTimeMs).atZone(zoneId).toLocalDate();
+		}
+
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
 			String exitSide = side == Side.SHORT ? "BUY" : "SELL";
 			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
@@ -697,34 +708,21 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					"GTC",
 					tpClientOrderId).block();
 			if (slResponse == null || slResponse.orderId() == null || tpResponse == null || tpResponse.orderId() == null) {
-				LOGGER.warn("EVENT=BRACKET_PLACE_FAIL symbol={} bracketId={}", state.symbol, bracketId);
-				return;
+				LOGGER.error("EVENT=BRACKET_PLACE_FAIL_UNPROTECTED symbol={} bracketId={} entryOrderId={} side={} qty={} entryPrice={} tpPrice={} slPrice={}",
+						state.symbol,
+						bracketId,
+						entryOrderId,
+						side,
+						qty,
+						entryPrice,
+						tpPrice,
+						slPrice);
+			} else {
+				slOrderId = slResponse.orderId();
+				tpOrderId = tpResponse.orderId();
+				state.slOrderId = slOrderId;
+				state.tpOrderId = tpOrderId;
 			}
-			slOrderId = slResponse.orderId();
-			tpOrderId = tpResponse.orderId();
-		}
-
-		state.positionSide = side;
-		state.entryPrice = entryPrice;
-		state.qty = qty;
-		state.entryTimeMs = entryOpenTimeMs;
-		state.tpPrice = tpPrice;
-		state.slPrice = slPrice;
-		state.tpHitTimeMs = null;
-		state.slHitTimeMs = null;
-		state.tpHitBar1m = null;
-		state.slHitBar1m = null;
-		state.bracketId = bracketId;
-		state.entryOrderId = entryOrderId;
-		state.entryClientOrderId = entryOrderClientId;
-		state.slOrderId = slOrderId;
-		state.slClientOrderId = slClientOrderId;
-		state.tpOrderId = tpOrderId;
-		state.tpClientOrderId = tpClientOrderId;
-		state.entriesToday++;
-		globalOpenPositions.incrementAndGet();
-		if (state.dayKey == null) {
-			state.dayKey = Instant.ofEpochMilli(entryOpenTimeMs).atZone(zoneId).toLocalDate();
 		}
 
 		ObjectNode node = objectMapper.createObjectNode();
@@ -753,14 +751,60 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (tpOrderId != null) {
 			node.put("tpOrderId", tpOrderId);
 		}
+		node.put("bracketProtected", props.mode() != EliteV1Properties.Mode.LIVE || (slOrderId != null && tpOrderId != null));
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 	}
 
 
 
+	private void tryPlaceMissingLiveBrackets(SymbolState state) {
+		if (props.mode() != EliteV1Properties.Mode.LIVE || state.positionSide == Side.NONE || state.bracketId == null) {
+			return;
+		}
+		String exitSide = state.positionSide == Side.SHORT ? "BUY" : "SELL";
+		if (state.slOrderId == null) {
+			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(state.slPrice),
+					"MARK_PRICE",
+					state.slClientOrderId).block();
+			if (slResponse != null && slResponse.orderId() != null) {
+				state.slOrderId = slResponse.orderId();
+			}
+		}
+		if (state.tpOrderId == null) {
+			OrderResponse tpResponse = orderClient.placeReduceOnlyLimitOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(state.qty),
+					BigDecimal.valueOf(state.tpPrice),
+					null,
+					"GTC",
+					state.tpClientOrderId).block();
+			if (tpResponse != null && tpResponse.orderId() != null) {
+				state.tpOrderId = tpResponse.orderId();
+			}
+		}
+		if (state.slOrderId == null || state.tpOrderId == null) {
+			LOGGER.error("EVENT=BRACKET_RECOVERY_FAIL symbol={} bracketId={} hasSl={} hasTp={}",
+					state.symbol,
+					state.bracketId,
+					state.slOrderId != null,
+					state.tpOrderId != null);
+		}
+	}
+
+
 	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
-		if (state.positionSide == Side.NONE || state.bracketId == null || state.slOrderId == null || state.tpOrderId == null) {
+		if (state.positionSide == Side.NONE || state.bracketId == null) {
 			return false;
+		}
+		if (state.slOrderId == null || state.tpOrderId == null) {
+			tryPlaceMissingLiveBrackets(state);
+			if (state.slOrderId == null || state.tpOrderId == null) {
+				return false;
+			}
 		}
 		Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(state.symbol).block();
 		if (openOrders == null) {
