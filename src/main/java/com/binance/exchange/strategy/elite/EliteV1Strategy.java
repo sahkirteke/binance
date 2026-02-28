@@ -313,6 +313,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.pendingEntry = true;
 			state.pendingEntrySide = Side.LONG;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
+			writePendingEntryTrade(state, state.pendingEntryOpenTimeMs, Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
 		}
 
 		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
@@ -320,6 +321,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.pendingEntry = true;
 			state.pendingEntrySide = Side.SHORT;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
+			writePendingEntryTrade(state, state.pendingEntryOpenTimeMs, Side.SHORT, "SHORT_DUMP_BTC", RegimeTag.CHOP);
 		}
 		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
 				longEval.blockReason(), metrics, longEval);
@@ -376,11 +378,13 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		Side pendingSide = state.pendingEntrySide == null ? Side.LONG : state.pendingEntrySide;
 		state.pendingEntrySide = null;
 		state.pendingEntryOpenTimeMs = null;
-		if (state.positionSide != Side.NONE) {
-			return;
-		}
 		String setup = pendingSide == Side.SHORT ? "SHORT_DUMP_BTC" : "BASELINE_IMPULSE_RECLAIM";
 		RegimeTag regimeTag = pendingSide == Side.SHORT ? RegimeTag.CHOP : RegimeTag.TREND;
+		if (state.positionSide != Side.NONE) {
+			writeEntrySkippedTrade(state, openTimeMs, pendingSide, setup, regimeTag,
+					"IN_POSITION", closed1m.open(), 0.0, Double.NaN, Double.NaN, Double.NaN, Double.NaN, resolveTickSize(state.symbol));
+			return;
+		}
 		openPosition(state, closed1m.open(), openTimeMs, pendingSide, setup, regimeTag);
 	}
 
@@ -780,6 +784,25 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			node.put("tpOrderId", tpOrderId);
 		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+	}
+
+	private void writePendingEntryTrade(SymbolState state,
+			long scheduledOpenTimeMs,
+			Side side,
+			String matchedSetup,
+			RegimeTag activeRegimeTag) {
+		LocalDate day = state.dayKey == null
+				? Instant.ofEpochMilli(scheduledOpenTimeMs).atZone(zoneId).toLocalDate()
+				: state.dayKey;
+		ObjectNode node = objectMapper.createObjectNode();
+		node.put("type", "ENTRY_PENDING");
+		node.put("symbol", state.symbol);
+		node.put("time", Instant.ofEpochMilli(scheduledOpenTimeMs).toString());
+		node.put("side", side.name());
+		node.put("scheduledOpenTimeMs", scheduledOpenTimeMs);
+		node.put("matchedSetup", matchedSetup);
+		node.put("activeRegimeTag", activeRegimeTag.name());
+		writer.write(tradePath(state.symbol, day), node.toString(), true);
 	}
 
 	private void writeEntrySkippedTrade(SymbolState state,
