@@ -127,7 +127,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private void ensureInitialized() {
 		if (!started.compareAndSet(false, true)) {
-			return false;
+			return;
 		}
 		validateConfig();
 		warmupCompleted = !isHistoricalWarmupEnabled();
@@ -154,7 +154,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	@Override
 	public void stop() {
 		if (!started.compareAndSet(true, false)) {
-			return false;
+			return;
 		}
 		writer.stop();
 	}
