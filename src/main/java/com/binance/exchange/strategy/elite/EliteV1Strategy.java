@@ -127,7 +127,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 	private void ensureInitialized() {
 		if (!started.compareAndSet(false, true)) {
-			return;
+			return false;
 		}
 		validateConfig();
 		warmupCompleted = !isHistoricalWarmupEnabled();
@@ -154,7 +154,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	@Override
 	public void stop() {
 		if (!started.compareAndSet(true, false)) {
-			return;
+			return false;
 		}
 		writer.stop();
 	}
@@ -307,17 +307,21 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 
 		LongSetupEval longEval = evaluateBaselineImpulseReclaim(state, metrics, bar5m);
+		boolean longOpened = false;
 		if (longEval.signal() && state.positionSide == Side.NONE) {
-			openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
+			longOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
 		}
 
 		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
+		boolean shortOpened = false;
 		if (shortEval.pass() && state.positionSide == Side.NONE) {
-			openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", RegimeTag.CHOP);
+			shortOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", RegimeTag.CHOP);
 		}
-		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
-				longEval.blockReason(), metrics, longEval);
-		writeShortDecision(state, bar5m, metrics, shortEval);
+		String longAction = longOpened ? "ENTER_LONG" : "NO_ENTRY";
+		String longBlockReason = longEval.signal() && !longOpened ? "ORDER_NOT_OPENED" : longEval.blockReason();
+		writeDecision(state, bar5m, longAction, "BASELINE_IMPULSE_RECLAIM",
+				longBlockReason, metrics, longEval);
+		writeShortDecision(state, bar5m, metrics, shortEval, shortOpened);
 	}
 
 	private void rollDay(SymbolState state, long closeTimeMs) {
@@ -491,7 +495,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		return candle.open() > 0.0;
 	}
 
-	private void writeShortDecision(SymbolState state, Candle bar5m, Metrics metrics, ShortSetupEval eval) {
+	private void writeShortDecision(SymbolState state, Candle bar5m, Metrics metrics, ShortSetupEval eval, boolean shortOpened) {
 		ObjectNode node = objectMapper.createObjectNode();
 		long timeMs = bar5m.closeTime();
 		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
@@ -554,9 +558,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
 			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
 		}
-		node.put("action", eval.pass() ? "ENTER_SHORT" : "NO_ENTRY");
+		node.put("action", shortOpened ? "ENTER_SHORT" : "NO_ENTRY");
 		node.put("matchedSetup", "SHORT_DUMP_BTC");
-		node.put("blockReason", eval.pass() ? "NONE" : String.join("|", eval.failReasons()));
+		node.put("blockReason", eval.pass() && !shortOpened ? "ORDER_NOT_OPENED" : (eval.pass() ? "NONE" : String.join("|", eval.failReasons())));
 		node.put("inputsValid", eval.pass());
 		var invalid = node.putArray("inputsInvalidReasons");
 		for (String reason : eval.failReasons()) {
@@ -593,7 +597,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 
 
 
-	private void openPosition(SymbolState state,
+	private boolean openPosition(SymbolState state,
 			double entryPrice,
 			long entryOpenTimeMs,
 			Side side,
@@ -609,7 +613,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (qty < minQty || (qty * entryPrice) < minNotional || qty <= 0.0) {
 			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=INPUTS_NOT_READY qty={} minQty={} notional={} minNotional={}",
 					state.symbol, qty, minQty, qty * entryPrice, minNotional);
-			return;
+			return false;
 		}
 		String entryOrderClientId = "ELITE_ENTRY_" + state.symbol + "_" + bracketId;
 		Long entryOrderId = null;
@@ -624,7 +628,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					entryOrderClientId).block();
 			if (entryResponse == null || entryResponse.orderId() == null) {
 				LOGGER.warn("EVENT=ENTRY_FAILED symbol={} side={} reason=NULL_RESPONSE", state.symbol, side);
-				return;
+				return false;
 			}
 			entryOrderId = entryResponse.orderId();
 			if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
@@ -743,6 +747,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("elit.slPct", SL_PCT);
 		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+		return true;
 	}
 
 
