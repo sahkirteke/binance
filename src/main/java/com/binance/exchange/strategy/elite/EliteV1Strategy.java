@@ -365,14 +365,17 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 		long openTimeMs = inferOpenTimeMsFromClose(closed1m.closeTime());
-		if (openTimeMs < state.pendingEntryOpenTimeMs) {
+		if (openTimeMs != state.pendingEntryOpenTimeMs) {
+			if (openTimeMs > state.pendingEntryOpenTimeMs) {
+				LOGGER.warn("EVENT=PENDING_ENTRY_MISSED symbol={} scheduledOpenTimeMs={} actualOpenTimeMs={}",
+						state.symbol,
+						state.pendingEntryOpenTimeMs,
+						openTimeMs);
+				state.pendingEntry = false;
+				state.pendingEntrySide = null;
+				state.pendingEntryOpenTimeMs = null;
+			}
 			return;
-		}
-		if (openTimeMs > state.pendingEntryOpenTimeMs) {
-			LOGGER.warn("EVENT=PENDING_ENTRY_LATE_EXECUTION symbol={} scheduledOpenTimeMs={} actualOpenTimeMs={}",
-					state.symbol,
-					state.pendingEntryOpenTimeMs,
-					openTimeMs);
 		}
 		state.pendingEntry = false;
 		Side pendingSide = state.pendingEntrySide == null ? Side.LONG : state.pendingEntrySide;
