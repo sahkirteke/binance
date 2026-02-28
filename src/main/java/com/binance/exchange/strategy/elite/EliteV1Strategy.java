@@ -313,7 +313,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.pendingEntry = true;
 			state.pendingEntrySide = Side.LONG;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
-			writePendingEntryTrade(state, state.pendingEntryOpenTimeMs, Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
 		}
 
 		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
@@ -321,7 +320,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.pendingEntry = true;
 			state.pendingEntrySide = Side.SHORT;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
-			writePendingEntryTrade(state, state.pendingEntryOpenTimeMs, Side.SHORT, "SHORT_DUMP_BTC", RegimeTag.CHOP);
 		}
 		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
 				longEval.blockReason(), metrics, longEval);
@@ -381,8 +379,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		String setup = pendingSide == Side.SHORT ? "SHORT_DUMP_BTC" : "BASELINE_IMPULSE_RECLAIM";
 		RegimeTag regimeTag = pendingSide == Side.SHORT ? RegimeTag.CHOP : RegimeTag.TREND;
 		if (state.positionSide != Side.NONE) {
-			writeEntrySkippedTrade(state, openTimeMs, pendingSide, setup, regimeTag,
-					"IN_POSITION", closed1m.open(), 0.0, Double.NaN, Double.NaN, Double.NaN, Double.NaN, resolveTickSize(state.symbol));
 			return;
 		}
 		openPosition(state, closed1m.open(), openTimeMs, pendingSide, setup, regimeTag);
@@ -648,8 +644,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (qty < minQty || (qty * entryPrice) < minNotional || qty <= 0.0) {
 			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=INPUTS_NOT_READY qty={} minQty={} notional={} minNotional={}",
 					state.symbol, qty, minQty, qty * entryPrice, minNotional);
-			writeEntrySkippedTrade(state, entryOpenTimeMs, side, matchedSetup, activeRegimeTag,
-					"INPUTS_NOT_READY", entryPrice, qty, Double.NaN, Double.NaN, Double.NaN, Double.NaN, tickSize);
 			return;
 		}
 		String entryOrderClientId = "ELITE_ENTRY_" + state.symbol + "_" + bracketId;
@@ -688,22 +682,20 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			tpPrice = roundDown(tpRaw, tickSize);
 			slPrice = roundDown(slRaw, tickSize);
 		}
-		boolean invalidBracket = side == Side.SHORT
-				? !(tpPrice < entryPrice && slPrice > entryPrice)
-				: !(tpPrice > entryPrice && slPrice < entryPrice);
-		if (invalidBracket) {
-			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=INVALID_BRACKET side={} entryPrice={} tpPrice={} slPrice={} tpRaw={} slRaw={} tickSize={}",
-					state.symbol,
-					side,
-					entryPrice,
-					tpPrice,
-					slPrice,
-					tpRaw,
-					slRaw,
-					tickSize);
-			writeEntrySkippedTrade(state, entryOpenTimeMs, side, matchedSetup, activeRegimeTag,
-					"INVALID_BRACKET", entryPrice, qty, tpRaw, slRaw, tpPrice, slPrice, tickSize);
-			return;
+		if (side == Side.SHORT) {
+			if (!(tpPrice < entryPrice)) {
+				tpPrice = roundDown(Math.max(entryPrice - tickSize, tickSize), tickSize);
+			}
+			if (!(slPrice > entryPrice)) {
+				slPrice = roundUp(entryPrice + tickSize, tickSize);
+			}
+		} else {
+			if (!(tpPrice > entryPrice)) {
+				tpPrice = roundUp(entryPrice + tickSize, tickSize);
+			}
+			if (!(slPrice < entryPrice)) {
+				slPrice = roundDown(Math.max(entryPrice - tickSize, tickSize), tickSize);
+			}
 		}
 
 		Long slOrderId = null;
@@ -786,58 +778,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 	}
 
-	private void writePendingEntryTrade(SymbolState state,
-			long scheduledOpenTimeMs,
-			Side side,
-			String matchedSetup,
-			RegimeTag activeRegimeTag) {
-		LocalDate day = state.dayKey == null
-				? Instant.ofEpochMilli(scheduledOpenTimeMs).atZone(zoneId).toLocalDate()
-				: state.dayKey;
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", "ENTRY_PENDING");
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(scheduledOpenTimeMs).toString());
-		node.put("side", side.name());
-		node.put("scheduledOpenTimeMs", scheduledOpenTimeMs);
-		node.put("matchedSetup", matchedSetup);
-		node.put("activeRegimeTag", activeRegimeTag.name());
-		writer.write(tradePath(state.symbol, day), node.toString(), true);
-	}
 
-	private void writeEntrySkippedTrade(SymbolState state,
-			long timeMs,
-			Side side,
-			String matchedSetup,
-			RegimeTag activeRegimeTag,
-			String reason,
-			double entryPrice,
-			double qty,
-			double tpRaw,
-			double slRaw,
-			double tpPrice,
-			double slPrice,
-			double tickSize) {
-		LocalDate day = state.dayKey == null
-				? Instant.ofEpochMilli(timeMs).atZone(zoneId).toLocalDate()
-				: state.dayKey;
-		ObjectNode node = objectMapper.createObjectNode();
-		node.put("type", "ENTRY_SKIPPED");
-		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(timeMs).toString());
-		node.put("side", side.name());
-		node.put("reason", reason);
-		putFiniteOrNull(node, "entryPrice", entryPrice);
-		putFiniteOrNull(node, "qty", qty);
-		putFiniteOrNull(node, "tpRaw", tpRaw);
-		putFiniteOrNull(node, "slRaw", slRaw);
-		putFiniteOrNull(node, "tpPrice", tpPrice);
-		putFiniteOrNull(node, "slPrice", slPrice);
-		putFiniteOrNull(node, "tickSize", tickSize);
-		node.put("matchedSetup", matchedSetup);
-		node.put("activeRegimeTag", activeRegimeTag.name());
-		writer.write(tradePath(state.symbol, day), node.toString(), true);
-	}
 
 	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
 		if (state.positionSide == Side.NONE || state.bracketId == null || state.slOrderId == null || state.tpOrderId == null) {
