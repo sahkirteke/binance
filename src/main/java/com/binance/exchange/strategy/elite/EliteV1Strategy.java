@@ -313,6 +313,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.pendingEntry = true;
 			state.pendingEntrySide = Side.LONG;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
+			writeTradeSignal(state, bar5m.closeTime(), "ENTER_LONG");
 		}
 
 		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
@@ -320,6 +321,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.pendingEntry = true;
 			state.pendingEntrySide = Side.SHORT;
 			state.pendingEntryOpenTimeMs = next5mOpenTimeMs(bar5m.closeTime());
+			writeTradeSignal(state, bar5m.closeTime(), "ENTER_SHORT");
 		}
 		writeDecision(state, bar5m, longEval.signal() ? "ENTER_LONG" : "NO_ENTRY", "BASELINE_IMPULSE_RECLAIM",
 				longEval.blockReason(), metrics, longEval);
@@ -625,6 +627,18 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			node.put("slPrice", eval.slPrice());
 		}
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+	}
+
+
+	private void writeTradeSignal(SymbolState state, long timeMs, String action) {
+		LocalDate day = state.dayKey == null
+				? Instant.ofEpochMilli(timeMs).atZone(zoneId).toLocalDate()
+				: state.dayKey;
+		ObjectNode node = objectMapper.createObjectNode();
+		node.put("type", action);
+		node.put("symbol", state.symbol);
+		node.put("time", Instant.ofEpochMilli(timeMs).toString());
+		writer.write(tradePath(state.symbol, day), node.toString(), true);
 	}
 
 
