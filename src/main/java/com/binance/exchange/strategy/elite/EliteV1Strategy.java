@@ -796,9 +796,55 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 
+	private boolean forceLiveTimeoutExit(SymbolState state, Candle bar) {
+		if (props.mode() != EliteV1Properties.Mode.LIVE || state.positionSide == Side.NONE) {
+			return false;
+		}
+		try {
+			String exitSide = state.positionSide == Side.SHORT ? "BUY" : "SELL";
+			String timeoutClientId = "ELITE_TO_" + state.symbol + "_" + state.bracketId;
+			OrderResponse closeResponse = orderClient.placeReduceOnlyMarketOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(state.qty),
+					null,
+					timeoutClientId).block();
+			if (closeResponse == null || closeResponse.orderId() == null) {
+				LOGGER.error("EVENT=LIVE_TIMEOUT_CLOSE_FAIL symbol={} bracketId={} side={} qty={}",
+						state.symbol,
+						state.bracketId,
+						state.positionSide,
+						state.qty);
+				return false;
+			}
+			if (state.slOrderId != null) {
+				try { orderClient.cancelOrder(state.symbol, state.slOrderId).block(); } catch (Exception ignored) {}
+			}
+			if (state.tpOrderId != null) {
+				try { orderClient.cancelOrder(state.symbol, state.tpOrderId).block(); } catch (Exception ignored) {}
+			}
+			double exitPrice = closeResponse.avgPrice() != null && closeResponse.avgPrice().doubleValue() > 0.0
+					? closeResponse.avgPrice().doubleValue()
+					: bar.close();
+			exitPosition(state, ExitReason.TIMEOUT_36B, exitPrice, bar.closeTime(),
+					new ExitEvaluation(ExitReason.TIMEOUT_36B, "NONE", "TIMEOUT_36B_LIVE", null, true));
+			return true;
+		} catch (Exception ex) {
+			LOGGER.error("EVENT=LIVE_TIMEOUT_CLOSE_EXCEPTION symbol={} bracketId={} message={}",
+					state.symbol,
+					state.bracketId,
+					ex.getMessage());
+			return false;
+		}
+	}
+
+
 	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
 		if (state.positionSide == Side.NONE || state.bracketId == null) {
 			return false;
+		}
+		if ((oneMinuteBar.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
+			return forceLiveTimeoutExit(state, oneMinuteBar);
 		}
 		if (state.slOrderId == null || state.tpOrderId == null) {
 			tryPlaceMissingLiveBrackets(state);
