@@ -742,16 +742,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("elit.tpPct", TP_PCT);
 		node.put("elit.slPct", SL_PCT);
 		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
-		if (entryOrderId != null) {
-			node.put("entryOrderId", entryOrderId);
-		}
-		if (slOrderId != null) {
-			node.put("slOrderId", slOrderId);
-		}
-		if (tpOrderId != null) {
-			node.put("tpOrderId", tpOrderId);
-		}
-		node.put("bracketProtected", props.mode() != EliteV1Properties.Mode.LIVE || (slOrderId != null && tpOrderId != null));
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 	}
 
@@ -961,9 +951,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("qty", state.qty);
 		node.put("realizedPnl", pnl);
 		node.put("exitReason", reason.name());
-		if (state.entryOrderId != null) { node.put("entryOrderId", state.entryOrderId); }
-		if (state.slOrderId != null) { node.put("slOrderId", state.slOrderId); }
-		if (state.tpOrderId != null) { node.put("tpOrderId", state.tpOrderId); }
 		node.put("tpPrice", state.tpPrice);
 		node.put("slPrice", state.slPrice);
 		if (state.tpHitTimeMs != null) {
@@ -979,15 +966,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("firstHit", evaluation == null ? "NONE" : evaluation.firstHit);
 		node.put("exitTrigger", evaluation == null ? "TIMEOUT_36B" : evaluation.exitTrigger);
 		node.put("elit.timeoutLoss", evaluation != null && evaluation.timeoutLoss);
-		if (evaluation != null && evaluation.ambiguityRule != null) {
-			node.put("ambiguityRule", evaluation.ambiguityRule);
-		}
-		if (state.tpHitBar1m != null) {
-			putHitBar(node, "tpHitBar1m", state.tpHitBar1m);
-		}
-		if (state.slHitBar1m != null) {
-			putHitBar(node, "slHitBar1m", state.slHitBar1m);
-		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 
 		state.positionSide = Side.NONE;
@@ -1022,16 +1000,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 	}
 
-
-	private static void putHitBar(ObjectNode parent, String field, HitSnapshot c) {
-		ObjectNode b = parent.putObject(field);
-		b.put("open", c.open());
-		b.put("high", c.high());
-		b.put("low", c.low());
-		b.put("close", c.close());
-		b.put("volume", c.volume());
-		b.put("closeTimeMs", c.closeTimeMs());
-	}
 
 
 	private void writeDecision(SymbolState state,
