@@ -546,6 +546,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
 		}
+		putBars1mIn5m(node, state, timeMs);
 		SymbolState btcState = states.get(BTC_SYMBOL);
 		Candle btc1m = btcState == null ? null : resolveDecisionAlignedLast1m(btcState, timeMs);
 		if (btc1m != null) {
@@ -1048,6 +1049,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
 		}
+		putBars1mIn5m(node, state, timeMs);
 		List<String> invalidReasons = new ArrayList<>();
 		if (!baselinesReady || metrics == null) {
 			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
@@ -1116,6 +1118,25 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			node.put("slPrice", eval.slPrice());
 		}
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+	}
+
+
+	private void putBars1mIn5m(ObjectNode node, SymbolState state, long closeTimeMs) {
+		long fromCloseMs = closeTimeMs - (4L * ONE_MIN_MS);
+		var bars = node.putArray("bars1mIn5m");
+		for (Candle c : state.last1m) {
+			if (c.closeTime() < fromCloseMs || c.closeTime() > closeTimeMs) {
+				continue;
+			}
+			ObjectNode b = bars.addObject();
+			b.put("open", c.open());
+			b.put("high", c.high());
+			b.put("low", c.low());
+			b.put("close", c.close());
+			b.put("volume", c.volume());
+			b.put("closeTimeMs", c.closeTime());
+			b.put("openTimeMs", c.closeTime() - (ONE_MIN_MS - 1));
+		}
 	}
 
 
