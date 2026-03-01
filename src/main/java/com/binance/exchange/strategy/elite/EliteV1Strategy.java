@@ -297,16 +297,17 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 
+		RegimeTag decisionRegimeTag = metrics.activeRegimeTag != null ? metrics.activeRegimeTag : RegimeTag.CHOP;
 		LongSetupEval longEval = evaluateBaselineImpulseReclaim(state, metrics, bar5m);
 		boolean longOpened = false;
 		if (longEval.signal() && state.positionSide == Side.NONE) {
-			longOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", RegimeTag.TREND);
+			longOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", decisionRegimeTag);
 		}
 
 		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
 		boolean shortOpened = false;
 		if (shortEval.pass() && state.positionSide == Side.NONE) {
-			shortOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", RegimeTag.CHOP);
+			shortOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", decisionRegimeTag);
 		}
 		String longAction = longOpened ? "ENTER_LONG" : "NO_ENTRY";
 		String longBlockReason = longEval.signal() && !longOpened ? "ORDER_NOT_OPENED" : longEval.blockReason();
