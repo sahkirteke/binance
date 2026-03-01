@@ -69,6 +69,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private static final double SHORT_BW_RATIO_MAX = 1.1;
 	private static final double SHORT_MACD_RATIO_MAX = 1.4;
 	private static final double SHORT_ATR_RATIO_MAX = 1.1;
+	private static final double SPREAD_PCT_MAX = 0.0012;
 	private static final double LONG_FROM_HIGH_1H_MAX = -0.02261;
 	private static final double LONG_EMA20_DIST_MAX = 0.00234;
 
@@ -427,6 +428,11 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			failReasons.add("FAIL_BTC_1M_RET");
 		}
 
+		double spreadPct = resolveSpreadPct(state.symbol);
+		if (Double.isFinite(spreadPct) && spreadPct >= SPREAD_PCT_MAX) {
+			failReasons.add("FAIL_SPREAD_PCT_GE_0_0012");
+		}
+
 		boolean fromHighVeto = Double.isFinite(fromHigh1h) && fromHigh1h <= LONG_FROM_HIGH_1H_MAX;
 		boolean emaDistVeto = m != null && Double.isFinite(m.ema20DistPct) && m.ema20DistPct <= LONG_EMA20_DIST_MAX;
 		if (fromHighVeto || emaDistVeto) {
@@ -490,6 +496,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		double bwRatio5m = m == null ? Double.NaN : m.bwRatio5m;
 		double macdRatio5m = m == null ? Double.NaN : m.macdRatio5m;
 		double atrRatio5m = m == null ? Double.NaN : m.atrRatio5m;
+		double spreadPct = resolveSpreadPct(state.symbol);
 		boolean shortVeto = Double.isFinite(bwRatio5m)
 				&& Double.isFinite(macdRatio5m)
 				&& Double.isFinite(atrRatio5m)
@@ -498,6 +505,9 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 				&& atrRatio5m < SHORT_ATR_RATIO_MAX;
 		if (shortVeto) {
 			failReasons.add("VETO_SHORT_WEAK_TREND_TRIO");
+		}
+		if (Double.isFinite(spreadPct) && spreadPct >= SPREAD_PCT_MAX) {
+			failReasons.add("FAIL_SPREAD_PCT_GE_0_0012");
 		}
 
 		double next5mOpen = bar5m.close();
@@ -1137,6 +1147,20 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			b.put("closeTimeMs", c.closeTime());
 			b.put("openTimeMs", c.closeTime() - (ONE_MIN_MS - 1));
 		}
+	}
+
+	private double resolveSpreadPct(String symbol) {
+		var snap = bookTickerStreamWatcher.getSnapshot(symbol);
+		if (snap == null) {
+			return Double.NaN;
+		}
+		double bid = snap.bestBidPrice();
+		double ask = snap.bestAskPrice();
+		double mid = (bid + ask) / 2.0;
+		if (mid <= 0.0) {
+			return Double.NaN;
+		}
+		return (ask - bid) / mid;
 	}
 
 
