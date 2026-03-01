@@ -88,15 +88,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private volatile boolean warmupCompleted;
 	private final BookTickerStreamWatcher bookTickerStreamWatcher;
 
-	// ── Global Devre Kesici ─────────────────────────────────────────────────────
-	// 20 dakika içinde 4 SL → tüm semboller 4 saat yeni trade almaz
-	// Mevcut açık pozisyonlar etkilenmez, sadece yeni giriş engellenir
-	private final java.util.Deque<Long> recentSlTimesMs = new java.util.ArrayDeque<>();
-	private volatile long circuitBreakerUntilMs = 0L;
-	private static final int  CB_SL_COUNT    = 4;
-	private static final long CB_WINDOW_MS   = 20L * 60 * 1000;   // 20 dakika
-	private static final long CB_COOLDOWN_MS = 4L  * 60 * 60 * 1000; // 4 saat
-	// ────────────────────────────────────────────────────────────────────────────
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
                            EliteV1Properties props,
@@ -987,22 +978,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.tpClientOrderId = null;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 
-		// Devre kesici: SL kapanışı sayacını güncelle
-		if (reason == ExitReason.STOP_LOSS || reason == ExitReason.SL_ORDER_FILLED) {
-			long now = exitTimeMs;
-			recentSlTimesMs.addLast(now);
-			// 20 dakika dışına çıkanları temizle
-			while (!recentSlTimesMs.isEmpty() && now - recentSlTimesMs.peekFirst() > CB_WINDOW_MS) {
-				recentSlTimesMs.pollFirst();
-			}
-			// 4 SL → 4 saat cooldown
-			if (recentSlTimesMs.size() >= CB_SL_COUNT) {
-				circuitBreakerUntilMs = now + CB_COOLDOWN_MS;
-				recentSlTimesMs.clear();
-				LOGGER.warn("CIRCUIT_BREAKER_TRIGGERED: 20dk icinde 4 SL. Tum semboller {} UTC'ye kadar kapali.",
-						java.time.Instant.ofEpochMilli(circuitBreakerUntilMs));
-			}
-		}
 	}
 
 
