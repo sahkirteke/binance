@@ -66,6 +66,11 @@ private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
 // - Avoid volume spikes (panic entries)
 // - Avoid EMA chase (too far above EMA20)
 private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
+	private static final double SHORT_BW_RATIO_MAX = 1.1;
+	private static final double SHORT_MACD_RATIO_MAX = 1.4;
+	private static final double SHORT_ATR_RATIO_MAX = 1.1;
+	private static final double LONG_FROM_HIGH_1H_MAX = -0.02261;
+	private static final double LONG_EMA20_DIST_MAX = 0.00234;
 
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
@@ -304,7 +309,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			longOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", decisionRegimeTag);
 		}
 
-		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m);
+		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m, metrics);
 		boolean shortOpened = false;
 		if (shortEval.pass() && state.positionSide == Side.NONE) {
 			shortOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", decisionRegimeTag);
@@ -422,6 +427,18 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			failReasons.add("FAIL_BTC_1M_RET");
 		}
 
+		boolean fromHighVeto = Double.isFinite(fromHigh1h) && fromHigh1h <= LONG_FROM_HIGH_1H_MAX;
+		boolean emaDistVeto = m != null && Double.isFinite(m.ema20DistPct) && m.ema20DistPct <= LONG_EMA20_DIST_MAX;
+		if (fromHighVeto || emaDistVeto) {
+			failReasons.add("VETO_LONG_DEEP_OR_NO_LAUNCH");
+			if (fromHighVeto) {
+				failReasons.add("fromHigh1h<=-0.02261");
+			}
+			if (emaDistVeto) {
+				failReasons.add("ema20DistPct<=0.00234");
+			}
+		}
+
 		double entryPrice = c5.close();
 		double tickSize = resolveTickSize(state.symbol);
 		double tpPrice = roundDown(entryPrice * (1.0 + TP_PCT), tickSize);
@@ -436,7 +453,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		return LongSetupEval.empty();
 	}
 
-	private ShortSetupEval evaluateShortDumpBtcSetup(SymbolState state, Candle bar5m) {
+	private ShortSetupEval evaluateShortDumpBtcSetup(SymbolState state, Candle bar5m, Metrics m) {
 		List<String> failReasons = new ArrayList<>();
 		long decisionCloseTimeMs = bar5m == null ? 0L : bar5m.closeTime();
 		Candle coinBar1mLast = resolveDecisionAlignedLast1m(state, decisionCloseTimeMs);
@@ -468,6 +485,19 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		}
 		if (btcClosePos1 > 0.45) {
 			failReasons.add("FAIL_BTC_CLOSEPOS1");
+		}
+
+		double bwRatio5m = m == null ? Double.NaN : m.bwRatio5m;
+		double macdRatio5m = m == null ? Double.NaN : m.macdRatio5m;
+		double atrRatio5m = m == null ? Double.NaN : m.atrRatio5m;
+		boolean shortVeto = Double.isFinite(bwRatio5m)
+				&& Double.isFinite(macdRatio5m)
+				&& Double.isFinite(atrRatio5m)
+				&& bwRatio5m < SHORT_BW_RATIO_MAX
+				&& macdRatio5m < SHORT_MACD_RATIO_MAX
+				&& atrRatio5m < SHORT_ATR_RATIO_MAX;
+		if (shortVeto) {
+			failReasons.add("VETO_SHORT_WEAK_TREND_TRIO");
 		}
 
 		double next5mOpen = bar5m.close();
