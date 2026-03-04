@@ -274,7 +274,13 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
-		rollDay(state, bar5m.closeTime());
+		long closeTimeMs = bar5m.closeTime();
+		if (state.lastEvaluated5mCloseTimeMs == closeTimeMs) {
+			LOGGER.debug("EVENT=DUPLICATE_5M_IGNORED strategy=ELITE_V1 symbol={} closeTimeMs={}", state.symbol, closeTimeMs);
+			return;
+		}
+		state.lastEvaluated5mCloseTimeMs = closeTimeMs;
+		rollDay(state, closeTimeMs);
 		Metrics metrics = state.indicators.metrics();
 		boolean baselinesReady = isBaselinesReady(state, metrics);
 		state.baselinesReady = baselinesReady;
@@ -1612,6 +1618,7 @@ private Path decisionPath(String symbol, LocalDate day) {
 		private final String symbol;
 		private long seen1mCloses;
 		private long seen5mCloses;
+		private long lastEvaluated5mCloseTimeMs = -1L;
 		private boolean baselinesReady;
 		private boolean warmupDoneLogged;
 		private long nextWarmupProgressLogAt1m = 10;
