@@ -3,6 +3,7 @@ package com.binance.strategy;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -62,10 +63,18 @@ public class HistoricalWarmupService {
 		if (!isWarmupEnabled() || !strategyRouter.needsKlines()) {
 			return;
 		}
-		List<String> symbols = strategyProperties.resolvedTradeSymbols();
+		List<String> symbols = resolveWarmupSymbols();
 		symbolFilterService.preloadFilters(symbols)
 				.then(warmupAllSymbols(symbols))
 				.subscribe();
+	}
+
+
+	private List<String> resolveWarmupSymbols() {
+		if (strategyProperties.active() == StrategyType.ELITE_V1) {
+			return new java.util.ArrayList<>(new LinkedHashSet<>(eliteV1Properties.symbols()));
+		}
+		return strategyProperties.resolvedTradeSymbols();
 	}
 
 	private boolean isWarmupEnabled() {
@@ -111,20 +120,50 @@ public class HistoricalWarmupService {
 			int failed = failedSymbols.get();
 			int notReady = Math.max(0, total - ready);
 			long durationMs = System.currentTimeMillis() - start;
-			if (ready == total) {
-				boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
-				klineStreamWatcher.markWarmupComplete();
-				klineStreamWatcher.startStreams();
-				markPriceStreamWatcher.markWarmupComplete();
-				markPriceStreamWatcher.startStreams();
-				strategyRouter.setWarmupMode(false);
-				strategyRouter.enableOrdersAfterWarmup(filtersReady);
+
+			boolean filtersReady = symbolFilterService.areFiltersReady(symbols);
+			klineStreamWatcher.markWarmupComplete();
+			klineStreamWatcher.startStreams();
+			markPriceStreamWatcher.markWarmupComplete();
+			markPriceStreamWatcher.startStreams();
+			strategyRouter.setWarmupMode(false);
+			if (ready == 0) {
+				LOGGER.error("EVENT=WARMUP_GATE_BLOCKED reason=NO_READY_SYMBOL readySymbols={} totalSymbols={} failedSymbols={}",
+						ready,
+						total,
+						failed);
+				strategyRouter.enableOrdersAfterWarmup(false);
+			} else {
+				boolean enableOrders = filtersReady && ready == total;
+				if (!enableOrders) {
+					LOGGER.warn("EVENT=WARMUP_PARTIAL_READY readySymbols={} totalSymbols={} failedSymbols={} filtersReady={} ordersEnabled={}",
+							ready,
+							total,
+							failed,
+							filtersReady,
+							enableOrders);
+				}
+				strategyRouter.enableOrdersAfterWarmup(enableOrders);
 			}
+
 			LOGGER.info("EVENT=WARMUP_DONE readySymbols={} notReadySymbols={} failedSymbols={} totalDurationMs={}",
 					ready,
 					notReady,
 					failed,
 					durationMs);
+			if (strategyProperties.active() == StrategyType.ELITE_V1 && ready == total) {
+				for (String symbol : symbols) {
+					var readiness = strategyRouter.eliteWarmupReadiness(symbol);
+					if (readiness == null || !readiness.ready()) {
+						LOGGER.error("EVENT=WARMUP_5M_VALIDATION_FAIL symbol={} reason={} readySymbols={} notReadySymbols={} failedSymbols={}",
+								symbol,
+								readiness == null ? "STATUS_NULL" : readiness.reason(),
+								ready,
+								notReady,
+								failed);
+					}
+				}
+			}
 			notReadyReasons.forEach((symbol, reason) -> LOGGER.info("EVENT=WARMUP_NOT_READY symbol={} reason={}", symbol, reason));
 		});
 	}

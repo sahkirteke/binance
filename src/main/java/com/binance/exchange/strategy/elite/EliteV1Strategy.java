@@ -48,12 +48,13 @@ public class EliteV1Strategy implements Strategy {
 	private static final DateTimeFormatter ISO_OFFSET_FMT = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 	private static final long ONE_MIN_MS = 60_000L;
 	private static final long FIVE_MIN_MS = 300_000L;
-	private static final double TP_PCT = 0.0075;
-	private static final double SL_PCT = 0.0050;
+	private static final double TP_PCT = 0.0080;
+	private static final double SL_PCT = 0.0030;
 	private static final int LOOKAHEAD_BARS = 24;
 	private static final long LOOKAHEAD_MS = LOOKAHEAD_BARS * FIVE_MIN_MS;
 	private static final double DEFAULT_TICK_SIZE = 0.01;
 	private static final long LIQUIDITY_MAX_AGE_MS = 30_000L;
+	private static final String BTC_SYMBOL = "BTCUSDT";
 
 
 // Global cap to avoid spraying too many concurrent positions/brackets.
@@ -65,6 +66,12 @@ private static final int MAX_CONCURRENT_OPEN_POSITIONS = 10;
 // - Avoid volume spikes (panic entries)
 // - Avoid EMA chase (too far above EMA20)
 private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
+	private static final double SHORT_BW_RATIO_MAX = 1.1;
+	private static final double SHORT_MACD_RATIO_MAX = 1.4;
+	private static final double SHORT_ATR_RATIO_MAX = 1.1;
+	private static final double SPREAD_PCT_MAX = 0.0012;
+	private static final double LONG_FROM_HIGH_1H_MAX = -0.02261;
+	private static final double LONG_EMA20_DIST_MAX = 0.00234;
 
 	private static final Path DECISION_DIR = Paths.get("signals", "decisions");
 	private static final Path TRADE_DIR = Paths.get("signals", "trades");
@@ -87,15 +94,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	private volatile boolean warmupCompleted;
 	private final BookTickerStreamWatcher bookTickerStreamWatcher;
 
-	// ── Global Devre Kesici ─────────────────────────────────────────────────────
-	// 20 dakika içinde 4 SL → tüm semboller 4 saat yeni trade almaz
-	// Mevcut açık pozisyonlar etkilenmez, sadece yeni giriş engellenir
-	private final java.util.Deque<Long> recentSlTimesMs = new java.util.ArrayDeque<>();
-	private volatile long circuitBreakerUntilMs = 0L;
-	private static final int  CB_SL_COUNT    = 4;
-	private static final long CB_WINDOW_MS   = 20L * 60 * 1000;   // 20 dakika
-	private static final long CB_COOLDOWN_MS = 4L  * 60 * 60 * 1000; // 4 saat
-	// ────────────────────────────────────────────────────────────────────────────
 
 	public EliteV1Strategy(BinanceProperties binanceProperties,
                            EliteV1Properties props,
@@ -129,17 +127,25 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			return;
 		}
 		validateConfig();
+		warmupCompleted = !isHistoricalWarmupEnabled();
 		requiredWarmup5m = resolveRequiredWarmup5m(props, warmupProperties);
 		LOGGER.info("EVENT=WARMUP_PLAN strategy=ELITE_V1 symbols={} warmup5m={} mode={}",
 				props.symbols().size(),
 				requiredWarmup5m,
 				warmupMode.name());
+		LOGGER.info("EVENT=WARMUP_GATE strategy=ELITE_V1 historicalWarmupEnabled={} warmupCompletedInitially={}",
+				isHistoricalWarmupEnabled(),
+				warmupCompleted);
 		zoneId = ZoneId.of(props.zoneId());
 		writer.start();
 		props.symbols().forEach(symbol -> states.put(symbol, new SymbolState(symbol)));
 		symbolFilterService.preloadFilters(props.symbols()).subscribe();
 		startBookTickerWatcher();
 		LOGGER.info("ELITE_V1 started mode={} symbols={} zone={} feed=EXTERNAL_KLINE_WATCHER", props.mode(), props.symbols().size(), props.zoneId());
+	}
+
+	private boolean isHistoricalWarmupEnabled() {
+		return props.warmup() != null && props.warmup().enabled();
 	}
 
 	@Override
@@ -216,7 +222,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			state.last1m.removeFirst();
 		}
 		logWarmupProgressIfDue(state);
-
 		BucketTransition transition = state.aggregator.addFinalOneMinute(bar1m);
 		applyCompletedFiveMinute(state, transition);
 	}
@@ -269,10 +274,15 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 	}
 
 	private void evaluateAt5m(SymbolState state, Candle bar5m) {
-		rollDay(state, bar5m.closeTime());
+		long closeTimeMs = bar5m.closeTime();
+		if (state.lastEvaluated5mCloseTimeMs == closeTimeMs) {
+			LOGGER.debug("EVENT=DUPLICATE_5M_IGNORED strategy=ELITE_V1 symbol={} closeTimeMs={}", state.symbol, closeTimeMs);
+			return;
+		}
+		state.lastEvaluated5mCloseTimeMs = closeTimeMs;
+		rollDay(state, closeTimeMs);
 		Metrics metrics = state.indicators.metrics();
 		boolean baselinesReady = isBaselinesReady(state, metrics);
-		checkLiquidityHealth();
 		state.baselinesReady = baselinesReady;
 		if (baselinesReady && !state.warmupDoneLogged && metrics != null) {
 			state.warmupDoneLogged = true;
@@ -286,55 +296,36 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					bar5m.closeTime(),
 					at.toString(),
 					ISO_OFFSET_FMT.format(atTr));
-			LOGGER.info("warm up bitti strategy=ELITE_V1 symbol={} seen1m={} seen5m={} atMs={}",
-					state.symbol,
-					state.seen1mCloses,
-					state.seen5mCloses,
-					bar5m.closeTime());
-			LOGGER.info("EVENT=ATR_BASELINE_OK strategy=ELITE_V1 symbol={} atr14={} atrEma={} atrRatio={}",
-					state.symbol,
-					metrics.atr14,
-					metrics.atrEma_5m,
-					metrics.atrRatio5m);
 		}
-		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
-			if (metrics != null && Double.isFinite(metrics.ema20_5m)) {
-				state.prevEma20_5m = metrics.ema20_5m;
-			}
-			return;
-		}
-
-		if (state.positionSide == Side.LONG) {
+		if (state.positionSide != Side.NONE) {
 			boolean exited = props.mode() == EliteV1Properties.Mode.PAPER
 					? checkPaperExitOnFiveMinute(state, bar5m)
 					: checkLiveBracketExit(state, bar5m);
 			if (exited) {
-				state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
 				return;
 			}
 		}
-
-		PreCheckAction preCheck = evaluatePreChecks(baselinesReady, state.positionSide);
-		if (preCheck.action != DecisionAction.CONTINUE) {
-			writeDecision(state, bar5m, preCheck.action.name(), null, preCheck.blockReason, metrics, null);
+		if (warmupModeEnabled.get() || !warmupCompleted || !baselinesReady || metrics == null) {
 			return;
 		}
 
-		// Devre kesici aktif mi? → yeni giriş engelle
-		if (bar5m.closeTime() < circuitBreakerUntilMs) {
-			writeDecision(state, bar5m, "NO_ENTRY", null, "CIRCUIT_BREAKER_ACTIVE", metrics, null);
-			state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
-			return;
+		RegimeTag decisionRegimeTag = metrics.activeRegimeTag != null ? metrics.activeRegimeTag : RegimeTag.CHOP;
+		LongSetupEval longEval = evaluateBaselineImpulseReclaim(state, metrics, bar5m);
+		boolean longOpened = false;
+		if (longEval.signal() && state.positionSide == Side.NONE) {
+			longOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.LONG, "BASELINE_IMPULSE_RECLAIM", decisionRegimeTag);
 		}
 
-		LongSetupEval longEval = evaluateElitV1LongSetup(state, metrics, bar5m, state.symbol, bar5m.closeTime());
-		if (longEval.signal()) {
-			openPosition(state, bar5m, Side.LONG, "ELIT_V1_LONG", metrics.activeRegimeTag);
-			writeDecision(state, bar5m, "ENTER_LONG", "ELIT_V1_LONG", null, metrics, longEval);
-			return;
+		ShortSetupEval shortEval = evaluateShortDumpBtcSetup(state, bar5m, metrics);
+		boolean shortOpened = false;
+		if (shortEval.pass() && state.positionSide == Side.NONE) {
+			shortOpened = openPosition(state, bar5m.close(), bar5m.closeTime(), Side.SHORT, "SHORT_DUMP_BTC", decisionRegimeTag);
 		}
-		writeDecision(state, bar5m, "NO_ENTRY", null, longEval.blockReason(), metrics, longEval);
-		state.prevEma20_5m = Double.isFinite(metrics.ema20_5m) ? metrics.ema20_5m : state.prevEma20_5m;
+		String longAction = longOpened ? "ENTER_LONG" : "NO_ENTRY";
+		String longBlockReason = longEval.signal() && !longOpened ? "ORDER_NOT_OPENED" : longEval.blockReason();
+		writeDecision(state, bar5m, longAction, "BASELINE_IMPULSE_RECLAIM",
+				longBlockReason, metrics, longEval);
+		writeShortDecision(state, bar5m, metrics, shortEval, shortOpened);
 	}
 
 	private void rollDay(SymbolState state, long closeTimeMs) {
@@ -369,104 +360,305 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		return new PreCheckAction(DecisionAction.CONTINUE, null);
 	}
 
-	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
+	private LongSetupEval evaluateBaselineImpulseReclaim(SymbolState state, Metrics m, Candle c5) {
 		List<String> failReasons = new ArrayList<>();
+		long decisionCloseTimeMs = c5 == null ? 0L : c5.closeTime();
+		Candle c1 = resolveDecisionAlignedLast1m(state, decisionCloseTimeMs);
+		SymbolState btcState = states.get(BTC_SYMBOL);
+		Candle b1 = btcState == null ? null : resolveDecisionAlignedLast1m(btcState, decisionCloseTimeMs);
+		double ret1m = Double.NaN;
+		double range1m = Double.NaN;
+		double closePos1m = Double.NaN;
+		double lowerWickRatio = Double.NaN;
+		double bbWidth5m = m == null ? Double.NaN : m.bbWidth_5m;
+		double range5m = Double.NaN;
+		double high1h = Double.NaN;
+		double fromHigh1h = Double.NaN;
+		double btcRet1m = Double.NaN;
 
-		Double takerBuyRatio = null;
-		OrderflowSnapshot orderflow = OrderflowSnapshot.fromCandle(bar5m);
-		if (orderflow == null || bar5m.volume() <= 0.0 || orderflow.takerBuyBaseVolume() == null || !Double.isFinite(orderflow.takerBuyBaseVolume())) {
-			failReasons.add("FAIL_ORDERFLOW_MISSING");
+		if (state.positionSide != Side.NONE) {
+			failReasons.add("IN_POSITION");
+		}
+		if (c1 == null || c5 == null || b1 == null || !Double.isFinite(bbWidth5m) || state.last5m.size() < 12) {
+			failReasons.add("INPUTS_NOT_READY");
+			return new LongSetupEval(false, "INPUTS_NOT_READY", failReasons, ret1m, range1m, closePos1m, lowerWickRatio,
+					bbWidth5m, range5m, high1h, fromHigh1h, btcRet1m, Double.NaN, Double.NaN, Double.NaN);
+		}
+
+		ret1m = (c1.close() - c1.open()) / c1.open();
+		range1m = (c1.high() - c1.low()) / c1.open();
+		double candleRange1m = c1.high() - c1.low();
+		if (candleRange1m <= 0.0) {
+			failReasons.add("FAIL_1M_CLOSEPOS");
+			failReasons.add("FAIL_1M_LOWERWICK");
 		} else {
-			takerBuyRatio = orderflow.takerBuyBaseVolume() / bar5m.volume();
-			if (!Double.isFinite(takerBuyRatio) || takerBuyRatio <= 0.58) {
-				failReasons.add("FAIL_TAKER_BUY_RATIO");
+			closePos1m = (c1.close() - c1.low()) / candleRange1m;
+			double lowerWick = Math.min(c1.open(), c1.close()) - c1.low();
+			lowerWickRatio = lowerWick / candleRange1m;
+		}
+		if (ret1m < 0.0010) {
+			failReasons.add("FAIL_1M_RET");
+		}
+		if (range1m < 0.0025) {
+			failReasons.add("FAIL_1M_RANGE");
+		}
+		if (!Double.isFinite(closePos1m) || closePos1m < 0.90) {
+			failReasons.add("FAIL_1M_CLOSEPOS");
+		}
+		if (!Double.isFinite(lowerWickRatio) || lowerWickRatio > 0.10) {
+			failReasons.add("FAIL_1M_LOWERWICK");
+		}
+
+		range5m = (c5.high() - c5.low()) / c5.open();
+		if (bbWidth5m < 0.018) {
+			failReasons.add("FAIL_5M_BBWIDTH");
+		}
+		if (range5m < 0.0030) {
+			failReasons.add("FAIL_5M_RANGE");
+		}
+
+		int i = 0;
+		for (Candle candle : state.last5m) {
+			if (state.last5m.size() - i <= 12) {
+				high1h = Double.isFinite(high1h) ? Math.max(high1h, candle.high()) : candle.high();
+			}
+			i++;
+		}
+		fromHigh1h = (c5.close() - high1h) / high1h;
+		if (fromHigh1h > -0.0080) {
+			failReasons.add("FAIL_FROMHIGH_1H");
+		}
+
+		btcRet1m = (b1.close() - b1.open()) / b1.open();
+		if (btcRet1m < 0.0008) {
+			failReasons.add("FAIL_BTC_1M_RET");
+		}
+
+		double spreadPct = resolveSpreadPct(state.symbol);
+		if (Double.isFinite(spreadPct) && spreadPct >= SPREAD_PCT_MAX) {
+			failReasons.add("FAIL_SPREAD_PCT_GE_0_0012");
+		}
+
+		boolean fromHighVeto = Double.isFinite(fromHigh1h) && fromHigh1h <= LONG_FROM_HIGH_1H_MAX;
+		boolean emaDistVeto = m != null && Double.isFinite(m.ema20DistPct) && m.ema20DistPct <= LONG_EMA20_DIST_MAX;
+		if (fromHighVeto || emaDistVeto) {
+			failReasons.add("VETO_LONG_DEEP_OR_NO_LAUNCH");
+			if (fromHighVeto) {
+				failReasons.add("fromHigh1h<=-0.02261");
+			}
+			if (emaDistVeto) {
+				failReasons.add("ema20DistPct<=0.00234");
 			}
 		}
 
-		Double imbalance = null;
-		LiquiditySnapshot snapshot = LiquiditySnapshot.fromContext(applicationContext, symbol);
-		if (snapshot == null) {
-			failReasons.add("FAIL_LIQUIDITY_MISSING");
-		} else {
-			long ageMs = Math.max(0L, nowMs - snapshot.eventTimeMs());
-			if (ageMs > LIQUIDITY_MAX_AGE_MS) {
-				failReasons.add("FAIL_LIQUIDITY_MISSING");
-			} else {
-				double bidQty = snapshot.bestBidQty();
-				double askQty = snapshot.bestAskQty();
-				if (!Double.isFinite(bidQty) || !Double.isFinite(askQty) || bidQty < 0.0 || askQty < 0.0) {
-					failReasons.add("FAIL_LIQUIDITY_MISSING");
-				} else {
-					double denom = bidQty + askQty;
-					if (denom <= 0.0) {
-						failReasons.add("FAIL_LIQUIDITY_MISSING");
-					} else {
-						imbalance = (bidQty - askQty) / denom;
-						if (!Double.isFinite(imbalance) || imbalance <= 0.15) {
-							failReasons.add("FAIL_IMBALANCE");
-						}
-					}
-				}
-			}
-		}
-
-		// FIX: ema20SlopeDown koşulu kaldırıldı — üçlü koşulun birlikte gerçekleşmesi çok nadir olduğundan
-		// filtre pratikte hiç tetiklenmiyordu (0 trade engellendi). İkili koşul daha etkin filtreleme sağlar.
-		boolean isDownTrend = m.activeRegimeTag == RegimeTag.TREND
-				&& m.close5m < m.ema20_5m
-				&& m.macdDelta < 0.0;
-		if (isDownTrend) {
-			failReasons.add("FAIL_DOWN_TREND");
-		}
-
-		boolean isChop = (m.activeRegimeTag == RegimeTag.CHOP);
-		double minBwRatio  = isChop ? 1.00 : 0.90;
-		double minRsi      = isChop ? 50.0 : 48.0;
-		double maxRsi      = isChop ? 60.0 : 65.0;
-		double maxVolRatio = isChop ? 1.50 : 2.00;
-
-		if (!Double.isFinite(m.bwRatio5m) || m.bwRatio5m < minBwRatio) {
-			failReasons.add("FAIL_BW_RATIO_LOW");
-		}
-		if (!Double.isFinite(m.rsi9_5m) || m.rsi9_5m < minRsi || m.rsi9_5m > maxRsi) {
-			failReasons.add("FAIL_RSI_OUT_OF_BAND");
-		}
-		if (!Double.isFinite(m.volRatio) || m.volRatio > maxVolRatio) {
-			failReasons.add("FAIL_VOL_RATIO_HIGH");
-		}
-		// Momentum yönü yukarı (negatif değilse geç; tolerans: 0.0)
-		if (!Double.isFinite(m.macdDelta) || m.macdDelta < 0.0) {
-			failReasons.add("FAIL_MACD_DELTA_NEGATIVE");
-		}
-		// Üst Bollinger bandına çok yakın değil
-		if (!Double.isFinite(m.bbPercentB_5m) || m.bbPercentB_5m > 0.8) {
-			failReasons.add("FAIL_BB_UPPER_ZONE");
-		}
-
+		double entryPrice = c5.close();
+		double tickSize = resolveTickSize(state.symbol);
+		double tpPrice = roundDown(entryPrice * (1.0 + TP_PCT), tickSize);
+		double slPrice = roundDown(entryPrice * (1.0 - SL_PCT), tickSize);
 		boolean signal = failReasons.isEmpty();
-		return new LongSetupEval(signal, signal ? "ELIT_V1_LONG_MATCH" : String.join("|", failReasons), takerBuyRatio, imbalance, isDownTrend);
+		String reason = signal ? "NONE" : String.join("|", failReasons);
+		return new LongSetupEval(signal, reason, failReasons, ret1m, range1m, closePos1m, lowerWickRatio,
+				bbWidth5m, range5m, high1h, fromHigh1h, btcRet1m, entryPrice, tpPrice, slPrice);
+	}
+
+	private LongSetupEval evaluateElitV1LongSetup(SymbolState state, Metrics m, Candle bar5m, String symbol, long nowMs) {
+		return LongSetupEval.empty();
+	}
+
+	private ShortSetupEval evaluateShortDumpBtcSetup(SymbolState state, Candle bar5m, Metrics m) {
+		List<String> failReasons = new ArrayList<>();
+		long decisionCloseTimeMs = bar5m == null ? 0L : bar5m.closeTime();
+		Candle coinBar1mLast = resolveDecisionAlignedLast1m(state, decisionCloseTimeMs);
+		SymbolState btcState = states.get(BTC_SYMBOL);
+		Candle btcBar1mLast = btcState == null ? null : resolveDecisionAlignedLast1m(btcState, decisionCloseTimeMs);
+		double coinRet1 = Double.NaN;
+		double btcRet1 = Double.NaN;
+		double btcClosePos1 = Double.NaN;
+
+		if (!isValidFinalCandle(coinBar1mLast) || !isValidFinalCandle(btcBar1mLast)) {
+			failReasons.add("INPUTS_NOT_READY");
+			return new ShortSetupEval(false, failReasons, coinRet1, btcRet1, btcClosePos1, Double.NaN, Double.NaN, Double.NaN);
+		}
+		if (state.positionSide != Side.NONE) {
+			failReasons.add("IN_POSITION");
+			return new ShortSetupEval(false, failReasons, coinRet1, btcRet1, btcClosePos1, Double.NaN, Double.NaN, Double.NaN);
+		}
+
+		coinRet1 = (coinBar1mLast.close() / coinBar1mLast.open()) - 1.0;
+		btcRet1 = (btcBar1mLast.close() / btcBar1mLast.open()) - 1.0;
+		double btcRange = btcBar1mLast.high() - btcBar1mLast.low();
+		btcClosePos1 = btcRange == 0.0 ? 0.50 : (btcBar1mLast.close() - btcBar1mLast.low()) / btcRange;
+
+		if (coinRet1 > -0.0050) {
+			failReasons.add("FAIL_COIN_RET1");
+		}
+		if (btcRet1 > -0.0008) {
+			failReasons.add("FAIL_BTC_RET1");
+		}
+		if (btcClosePos1 > 0.45) {
+			failReasons.add("FAIL_BTC_CLOSEPOS1");
+		}
+
+		double bwRatio5m = m == null ? Double.NaN : m.bwRatio5m;
+		double macdRatio5m = m == null ? Double.NaN : m.macdRatio5m;
+		double atrRatio5m = m == null ? Double.NaN : m.atrRatio5m;
+		double spreadPct = resolveSpreadPct(state.symbol);
+		boolean shortVeto = Double.isFinite(bwRatio5m)
+				&& Double.isFinite(macdRatio5m)
+				&& Double.isFinite(atrRatio5m)
+				&& bwRatio5m < SHORT_BW_RATIO_MAX
+				&& macdRatio5m < SHORT_MACD_RATIO_MAX
+				&& atrRatio5m < SHORT_ATR_RATIO_MAX;
+		if (shortVeto) {
+			failReasons.add("VETO_SHORT_WEAK_TREND_TRIO");
+		}
+		if (Double.isFinite(spreadPct) && spreadPct >= SPREAD_PCT_MAX) {
+			failReasons.add("FAIL_SPREAD_PCT_GE_0_0012");
+		}
+
+		double next5mOpen = bar5m.close();
+		double tickSize = resolveTickSize(state.symbol);
+		double tpPrice = roundUp(next5mOpen * (1.0 - TP_PCT), tickSize);
+		double slPrice = roundUp(next5mOpen * (1.0 + SL_PCT), tickSize);
+		return new ShortSetupEval(failReasons.isEmpty(), failReasons, coinRet1, btcRet1, btcClosePos1, next5mOpen, tpPrice, slPrice);
+	}
+
+	private boolean isValidFinalCandle(Candle candle) {
+		if (candle == null) {
+			return false;
+		}
+		if (!Double.isFinite(candle.open()) || !Double.isFinite(candle.high()) || !Double.isFinite(candle.low()) || !Double.isFinite(candle.close())) {
+			return false;
+		}
+		return candle.open() > 0.0;
+	}
+
+	private void writeShortDecision(SymbolState state, Candle bar5m, Metrics metrics, ShortSetupEval eval, boolean shortOpened) {
+		ObjectNode node = objectMapper.createObjectNode();
+		long timeMs = bar5m.closeTime();
+		var timeTr = Instant.ofEpochMilli(timeMs).atZone(zoneId);
+		LocalDate dayFromTimeMs = timeTr.toLocalDate();
+		boolean baselinesReady = isBaselinesReady(state, metrics);
+		node.put("type", "DECISION");
+		node.put("symbol", state.symbol);
+		node.put("strategy", "ELITE_V1");
+		node.put("tfDecision", "5m");
+		node.put("tfExecution", "1m");
+		node.put("version", "20260207-elitev1-logv2");
+		node.put("closeTimeMs", timeMs);
+		node.put("closeTime", ISO_OFFSET_FMT.format(timeTr));
+		node.put("timeMs", timeMs);
+		node.put("timeUtc", Instant.ofEpochMilli(timeMs).toString());
+		node.put("timeTr", ISO_OFFSET_FMT.format(timeTr));
+		node.put("dayKey", DAY_FMT.format(dayFromTimeMs));
+		node.put("entriesToday", state.entriesToday);
+		node.put("baselinesReady", baselinesReady);
+		node.put("globalOpenPositions", globalOpenPositions.get());
+		putBar(node, "bar5m", bar5m, FIVE_MIN_MS);
+		putOrderflow(node, bar5m);
+		putLiquidity(node, state.symbol, timeMs);
+		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
+		Candle last1m = resolveDecisionAlignedLast1m(state, timeMs);
+		if (last1m != null) {
+			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
+		}
+		putBars1mIn5m(node, state, timeMs);
+		SymbolState btcState = states.get(BTC_SYMBOL);
+		Candle btc1m = btcState == null ? null : resolveDecisionAlignedLast1m(btcState, timeMs);
+		if (btc1m != null) {
+			putBar(node, "btcBar1mLast", btc1m, ONE_MIN_MS);
+		}
+		List<String> invalidReasons = new ArrayList<>();
+		if (!baselinesReady || metrics == null) {
+			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
+			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
+		} else {
+			node.put("rawRegimeTag", metrics.rawRegimeTag.name());
+			node.put("activeRegimeTag", metrics.activeRegimeTag.name());
+			ObjectNode metricNode = node.putObject("metrics");
+			putMetric(metricNode, "bbWidth_5m", metrics.bbWidth_5m, invalidReasons, "bbWidth_5m");
+			putMetric(metricNode, "bwEma_5m", metrics.bwEma_5m, invalidReasons, "bwEma_5m");
+			putMetric(metricNode, "bwRatio_5m", metrics.bwRatio5m, invalidReasons, "bwRatio_5m");
+			putMetric(metricNode, "volRatio", metrics.volRatio, invalidReasons, "volRatio");
+			putMetric(metricNode, "volEma_5m", metrics.volEma_5m, invalidReasons, "volEma_5m");
+			putMetric(metricNode, "volRatioOfEma", metrics.volRatioOfEma, invalidReasons, "volRatioOfEma");
+			putMetric(metricNode, "ema20", metrics.ema20_5m, invalidReasons, "ema20");
+			putMetric(metricNode, "ema20DistPct", metrics.ema20DistPct, invalidReasons, "ema20DistPct");
+			putMetric(metricNode, "rsi9", metrics.rsi9_5m, invalidReasons, "rsi9");
+			putMetric(metricNode, "bbLower", metrics.bbLower, invalidReasons, "bbLower");
+			putMetric(metricNode, "bbMiddle", metrics.bbMiddle, invalidReasons, "bbMiddle");
+			putMetric(metricNode, "bbUpper", metrics.bbUpper, invalidReasons, "bbUpper");
+			putMetric(metricNode, "bbPercentB_5m", metrics.bbPercentB_5m, invalidReasons, "bbPercentB_5m");
+			putMetric(metricNode, "ema20_5m", metrics.ema20_5m, invalidReasons, "ema20_5m");
+			putMetric(metricNode, "macdDelta", metrics.macdDelta, invalidReasons, "macdDelta");
+			putMetric(metricNode, "macdAbsEma_5m", metrics.macdAbsEma_5m, invalidReasons, "macdAbsEma_5m");
+			putMetric(metricNode, "macdRatio_5m", metrics.macdRatio5m, invalidReasons, "macdRatio_5m");
+			putMetric(metricNode, "atr14", metrics.atr14, invalidReasons, "atr14");
+			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
+			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
+		}
+		node.put("action", shortOpened ? "ENTER_SHORT" : "NO_ENTRY");
+		node.put("matchedSetup", "SHORT_DUMP_BTC");
+		node.put("blockReason", eval.pass() && !shortOpened ? "ORDER_NOT_OPENED" : (eval.pass() ? "NONE" : String.join("|", eval.failReasons())));
+		node.put("inputsValid", eval.pass());
+		var invalid = node.putArray("inputsInvalidReasons");
+		for (String reason : eval.failReasons()) {
+			invalid.add(reason);
+		}
+		node.put("elit.tpPct", TP_PCT);
+		node.put("elit.slPct", SL_PCT);
+		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
+		node.putNull("elit.takerBuyRatio");
+		node.putNull("elit.imbalance");
+		node.put("elit.isDownTrend", false);
+		node.put("shortEliteMatched", eval.pass());
+		node.put("shortEliteMatchedSetup", eval.pass() ? "SHORT_DUMP_BTC" : "NA");
+		var shortFail = node.putArray("shortEliteFailReasons");
+		for (String reason : eval.failReasons()) {
+			shortFail.add(reason);
+		}
+		node.put("setup", "SHORT_DUMP_BTC");
+		node.put("pass", eval.pass());
+		var failReasons = node.putArray("failReasons");
+		for (String reason : eval.failReasons()) {
+			failReasons.add(reason);
+		}
+		putFiniteOrNull(node, "coinRet1", eval.coinRet1());
+		putFiniteOrNull(node, "btcRet1", eval.btcRet1());
+		putFiniteOrNull(node, "btcClosePos1", eval.btcClosePos1());
+		if (eval.pass()) {
+			node.put("entryPrice", eval.entryPrice());
+			node.put("tpPrice", eval.tpPrice());
+			node.put("slPrice", eval.slPrice());
+		}
+		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
 	}
 
 
-	private void openPosition(SymbolState state,
-			Candle bar5m,
+
+	private boolean openPosition(SymbolState state,
+			double entryPrice,
+			long entryOpenTimeMs,
 			Side side,
 			String matchedSetup,
 			RegimeTag activeRegimeTag) {
 		double tickSize = resolveTickSize(state.symbol);
+		var filters = symbolFilterService.getFilters(state.symbol);
 		String bracketId = UUID.randomUUID().toString();
-		double estimatedEntryPrice = bar5m.close();
-		double qty = Math.max(props.paperNotionalUsd() / Math.max(estimatedEntryPrice, 1e-9), 1e-9);
-		double entryPrice = estimatedEntryPrice;
+		double rawQty = Math.max(props.paperNotionalUsd() / Math.max(entryPrice, 1e-9), 1e-9);
+		double qty = floorToStep(rawQty, filters == null || filters.stepSize() == null ? null : filters.stepSize().doubleValue());
+		double minQty = filters == null || filters.minQty() == null ? 0.0 : filters.minQty().doubleValue();
+		double minNotional = filters == null || filters.minNotional() == null ? 0.0 : filters.minNotional().doubleValue();
+		if (qty < minQty || (qty * entryPrice) < minNotional || qty <= 0.0) {
+			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=INPUTS_NOT_READY qty={} minQty={} notional={} minNotional={}",
+					state.symbol, qty, minQty, qty * entryPrice, minNotional);
+			return false;
+		}
 		String entryOrderClientId = "ELITE_ENTRY_" + state.symbol + "_" + bracketId;
 		Long entryOrderId = null;
 
 		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			if (side != Side.LONG) {
-				LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-				return;
-			}
-			String entrySide = "BUY";
+			String entrySide = side == Side.SHORT ? "SELL" : "BUY";
 			OrderResponse entryResponse = orderClient.placeMarketOrder(
 					state.symbol,
 					entrySide,
@@ -475,7 +667,7 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 					entryOrderClientId).block();
 			if (entryResponse == null || entryResponse.orderId() == null) {
 				LOGGER.warn("EVENT=ENTRY_FAILED symbol={} side={} reason=NULL_RESPONSE", state.symbol, side);
-				return;
+				return false;
 			}
 			entryOrderId = entryResponse.orderId();
 			if (entryResponse.avgPrice() != null && entryResponse.avgPrice().doubleValue() > 0.0) {
@@ -487,52 +679,42 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		double slRaw;
 		double tpPrice;
 		double slPrice;
-		if (side != Side.LONG) {
-			LOGGER.warn("EVENT=ENTRY_SKIPPED symbol={} reason=SHORT_DISABLED", state.symbol);
-			return;
+		if (side == Side.SHORT) {
+			tpRaw = entryPrice * (1.0 - TP_PCT);
+			slRaw = entryPrice * (1.0 + SL_PCT);
+			tpPrice = roundDown(tpRaw, tickSize);
+			slPrice = roundUp(slRaw, tickSize);
+		} else {
+			tpRaw = entryPrice * (1.0 + TP_PCT);
+			slRaw = entryPrice * (1.0 - SL_PCT);
+			tpPrice = roundDown(tpRaw, tickSize);
+			slPrice = roundDown(slRaw, tickSize);
 		}
-		tpRaw = entryPrice * (1.0 + TP_PCT);
-		slRaw = entryPrice * (1.0 - SL_PCT);
-		tpPrice = roundUp(tpRaw, tickSize);
-		slPrice = roundDown(slRaw, tickSize);
+		if (side == Side.SHORT) {
+			if (!(tpPrice < entryPrice)) {
+				tpPrice = roundDown(Math.max(entryPrice - tickSize, tickSize), tickSize);
+			}
+			if (!(slPrice > entryPrice)) {
+				slPrice = roundUp(entryPrice + tickSize, tickSize);
+			}
+		} else {
+			if (!(tpPrice > entryPrice)) {
+				tpPrice = roundUp(entryPrice + tickSize, tickSize);
+			}
+			if (!(slPrice < entryPrice)) {
+				slPrice = roundDown(Math.max(entryPrice - tickSize, tickSize), tickSize);
+			}
+		}
 
 		Long slOrderId = null;
 		Long tpOrderId = null;
 		String slClientOrderId = "ELITE_SL_" + state.symbol + "_" + bracketId;
 		String tpClientOrderId = "ELITE_TP_" + state.symbol + "_" + bracketId;
-		if (props.mode() == EliteV1Properties.Mode.LIVE) {
-			String exitSide = "SELL";
-			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
-					state.symbol,
-					exitSide,
-					BigDecimal.valueOf(slPrice),
-					"MARK_PRICE",
-					slClientOrderId).block();
-			OrderResponse tpResponse = orderClient.placeTakeProfitMarketClosePositionOrder(
-					state.symbol,
-					exitSide,
-					BigDecimal.valueOf(tpPrice),
-					"MARK_PRICE",
-					tpClientOrderId).block();
-			if (slResponse == null || slResponse.orderId() == null || tpResponse == null || tpResponse.orderId() == null) {
-				LOGGER.warn("EVENT=BRACKET_PLACE_FAIL symbol={} bracketId={}", state.symbol, bracketId);
-				return;
-			}
-			slOrderId = slResponse.orderId();
-			tpOrderId = tpResponse.orderId();
-			LOGGER.info("EVENT=BRACKET_PLACED symbol={} bracketId={} slStop={} tpStop={} slOrderId={} tpOrderId={}",
-					state.symbol,
-					bracketId,
-					slPrice,
-					tpPrice,
-					slOrderId,
-					tpOrderId);
-		}
 
 		state.positionSide = side;
 		state.entryPrice = entryPrice;
 		state.qty = qty;
-		state.entryTimeMs = bar5m.closeTime();
+		state.entryTimeMs = entryOpenTimeMs;
 		state.tpPrice = tpPrice;
 		state.slPrice = slPrice;
 		state.tpHitTimeMs = null;
@@ -542,17 +724,54 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.bracketId = bracketId;
 		state.entryOrderId = entryOrderId;
 		state.entryClientOrderId = entryOrderClientId;
-		state.slOrderId = slOrderId;
+		state.slOrderId = null;
 		state.slClientOrderId = slClientOrderId;
-		state.tpOrderId = tpOrderId;
+		state.tpOrderId = null;
 		state.tpClientOrderId = tpClientOrderId;
 		state.entriesToday++;
 		globalOpenPositions.incrementAndGet();
+		if (state.dayKey == null) {
+			state.dayKey = Instant.ofEpochMilli(entryOpenTimeMs).atZone(zoneId).toLocalDate();
+		}
+
+		if (props.mode() == EliteV1Properties.Mode.LIVE) {
+			String exitSide = side == Side.SHORT ? "BUY" : "SELL";
+			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(slPrice),
+					"MARK_PRICE",
+					slClientOrderId).block();
+			OrderResponse tpResponse = orderClient.placeReduceOnlyLimitOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(qty),
+					BigDecimal.valueOf(tpPrice),
+					null,
+					"GTC",
+					tpClientOrderId).block();
+			if (slResponse == null || slResponse.orderId() == null || tpResponse == null || tpResponse.orderId() == null) {
+				LOGGER.error("EVENT=BRACKET_PLACE_FAIL_UNPROTECTED symbol={} bracketId={} entryOrderId={} side={} qty={} entryPrice={} tpPrice={} slPrice={}",
+						state.symbol,
+						bracketId,
+						entryOrderId,
+						side,
+						qty,
+						entryPrice,
+						tpPrice,
+						slPrice);
+			} else {
+				slOrderId = slResponse.orderId();
+				tpOrderId = tpResponse.orderId();
+				state.slOrderId = slOrderId;
+				state.tpOrderId = tpOrderId;
+			}
+		}
 
 		ObjectNode node = objectMapper.createObjectNode();
 		node.put("type", "ENTRY");
 		node.put("symbol", state.symbol);
-		node.put("time", Instant.ofEpochMilli(bar5m.closeTime()).toString());
+		node.put("time", Instant.ofEpochMilli(entryOpenTimeMs).toString());
 		node.put("side", side.name());
 		node.put("entryPrice", entryPrice);
 		node.put("qty", qty);
@@ -566,21 +785,106 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("elit.tpPct", TP_PCT);
 		node.put("elit.slPct", SL_PCT);
 		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
-		if (entryOrderId != null) {
-			node.put("entryOrderId", entryOrderId);
-		}
-		if (slOrderId != null) {
-			node.put("slOrderId", slOrderId);
-		}
-		if (tpOrderId != null) {
-			node.put("tpOrderId", tpOrderId);
-		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
+		return true;
 	}
 
-	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
-		if (state.positionSide == Side.NONE || state.bracketId == null || state.slOrderId == null || state.tpOrderId == null) {
+
+
+	private void tryPlaceMissingLiveBrackets(SymbolState state) {
+		if (props.mode() != EliteV1Properties.Mode.LIVE || state.positionSide == Side.NONE || state.bracketId == null) {
+			return;
+		}
+		String exitSide = state.positionSide == Side.SHORT ? "BUY" : "SELL";
+		if (state.slOrderId == null) {
+			OrderResponse slResponse = orderClient.placeStopMarketClosePositionOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(state.slPrice),
+					"MARK_PRICE",
+					state.slClientOrderId).block();
+			if (slResponse != null && slResponse.orderId() != null) {
+				state.slOrderId = slResponse.orderId();
+			}
+		}
+		if (state.tpOrderId == null) {
+			OrderResponse tpResponse = orderClient.placeReduceOnlyLimitOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(state.qty),
+					BigDecimal.valueOf(state.tpPrice),
+					null,
+					"GTC",
+					state.tpClientOrderId).block();
+			if (tpResponse != null && tpResponse.orderId() != null) {
+				state.tpOrderId = tpResponse.orderId();
+			}
+		}
+		if (state.slOrderId == null || state.tpOrderId == null) {
+			LOGGER.error("EVENT=BRACKET_RECOVERY_FAIL symbol={} bracketId={} hasSl={} hasTp={}",
+					state.symbol,
+					state.bracketId,
+					state.slOrderId != null,
+					state.tpOrderId != null);
+		}
+	}
+
+
+	private boolean forceLiveTimeoutExit(SymbolState state, Candle bar) {
+		if (props.mode() != EliteV1Properties.Mode.LIVE || state.positionSide == Side.NONE) {
 			return false;
+		}
+		try {
+			String exitSide = state.positionSide == Side.SHORT ? "BUY" : "SELL";
+			String timeoutClientId = "ELITE_TO_" + state.symbol + "_" + state.bracketId;
+			OrderResponse closeResponse = orderClient.placeReduceOnlyMarketOrder(
+					state.symbol,
+					exitSide,
+					BigDecimal.valueOf(state.qty),
+					null,
+					timeoutClientId).block();
+			if (closeResponse == null || closeResponse.orderId() == null) {
+				LOGGER.error("EVENT=LIVE_TIMEOUT_CLOSE_FAIL symbol={} bracketId={} side={} qty={}",
+						state.symbol,
+						state.bracketId,
+						state.positionSide,
+						state.qty);
+				return false;
+			}
+			if (state.slOrderId != null) {
+				try { orderClient.cancelOrder(state.symbol, state.slOrderId).block(); } catch (Exception ignored) {}
+			}
+			if (state.tpOrderId != null) {
+				try { orderClient.cancelOrder(state.symbol, state.tpOrderId).block(); } catch (Exception ignored) {}
+			}
+			double exitPrice = closeResponse.avgPrice() != null && closeResponse.avgPrice().doubleValue() > 0.0
+					? closeResponse.avgPrice().doubleValue()
+					: bar.close();
+			exitPosition(state, ExitReason.TIMEOUT_36B, exitPrice, bar.closeTime(),
+					new ExitEvaluation(ExitReason.TIMEOUT_36B, "NONE", "TIMEOUT_36B_LIVE", null, true));
+			return true;
+		} catch (Exception ex) {
+			LOGGER.error("EVENT=LIVE_TIMEOUT_CLOSE_EXCEPTION symbol={} bracketId={} message={}",
+					state.symbol,
+					state.bracketId,
+					ex.getMessage());
+			return false;
+		}
+	}
+
+
+	private boolean checkLiveBracketExit(SymbolState state, Candle oneMinuteBar) {
+		if (state.positionSide == Side.NONE || state.bracketId == null) {
+			return false;
+		}
+		if ((oneMinuteBar.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
+			return forceLiveTimeoutExit(state, oneMinuteBar);
+		}
+		if (state.slOrderId == null || state.tpOrderId == null) {
+			tryPlaceMissingLiveBrackets(state);
+			if (state.slOrderId == null || state.tpOrderId == null) {
+				return false;
+			}
 		}
 		Map<Long, BinanceFuturesOrderClient.OpenOrder> openOrders = orderClient.fetchOpenOrders(state.symbol).block();
 		if (openOrders == null) {
@@ -635,24 +939,29 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (state == null || oneMinuteBar == null) {
 			return;
 		}
-		if (state.positionSide == Side.NONE || state.bracketId == null || state.positionSide != Side.LONG) {
+		if (state.positionSide == Side.NONE || state.bracketId == null) {
 			return;
 		}
 		// no-op: paper exits are evaluated on final 5m bars via checkPaperExitOnFiveMinute
 	}
 
 	private boolean checkPaperExitOnFiveMinute(SymbolState state, Candle bar5m) {
-		if (state == null || bar5m == null || state.positionSide != Side.LONG || state.bracketId == null) {
+		if (state == null || bar5m == null || state.positionSide == Side.NONE || state.bracketId == null) {
 			return false;
 		}
-		if (bar5m.low() <= state.slPrice) {
-			exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
-					new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
-			return true;
-		}
-		if (bar5m.high() >= state.tpPrice) {
-			exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
-					new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
+		long fromCloseMs = bar5m.closeTime() - (4L * ONE_MIN_MS);
+		for (Candle bar1m : state.last1m) {
+			if (bar1m.closeTime() < fromCloseMs || bar1m.closeTime() > bar5m.closeTime()) {
+				continue;
+			}
+			ExitReason touched = resolveTouchExit(state.positionSide, state.tpPrice, state.slPrice, bar1m, props.conflictResolution());
+			if (touched == null) {
+				continue;
+			}
+			boolean sl = touched == ExitReason.STOP_LOSS;
+			double exitPrice = sl ? state.slPrice : state.tpPrice;
+			exitPosition(state, touched, exitPrice, bar1m.closeTime(),
+					new ExitEvaluation(touched, sl ? "SL_FIRST" : "TP_FIRST", sl ? "SL_1M" : "TP_1M", bar1m.closeTime(), false));
 			return true;
 		}
 		if ((bar5m.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
@@ -678,9 +987,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("qty", state.qty);
 		node.put("realizedPnl", pnl);
 		node.put("exitReason", reason.name());
-		if (state.entryOrderId != null) { node.put("entryOrderId", state.entryOrderId); }
-		if (state.slOrderId != null) { node.put("slOrderId", state.slOrderId); }
-		if (state.tpOrderId != null) { node.put("tpOrderId", state.tpOrderId); }
 		node.put("tpPrice", state.tpPrice);
 		node.put("slPrice", state.slPrice);
 		if (state.tpHitTimeMs != null) {
@@ -696,15 +1002,6 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		node.put("firstHit", evaluation == null ? "NONE" : evaluation.firstHit);
 		node.put("exitTrigger", evaluation == null ? "TIMEOUT_36B" : evaluation.exitTrigger);
 		node.put("elit.timeoutLoss", evaluation != null && evaluation.timeoutLoss);
-		if (evaluation != null && evaluation.ambiguityRule != null) {
-			node.put("ambiguityRule", evaluation.ambiguityRule);
-		}
-		if (state.tpHitBar1m != null) {
-			putHitBar(node, "tpHitBar1m", state.tpHitBar1m);
-		}
-		if (state.slHitBar1m != null) {
-			putHitBar(node, "slHitBar1m", state.slHitBar1m);
-		}
 		writer.write(tradePath(state.symbol, state.dayKey), node.toString(), true);
 
 		state.positionSide = Side.NONE;
@@ -721,34 +1018,8 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		state.tpClientOrderId = null;
 		globalOpenPositions.updateAndGet(v -> Math.max(0, v - 1));
 
-		// Devre kesici: SL kapanışı sayacını güncelle
-		if (reason == ExitReason.STOP_LOSS || reason == ExitReason.SL_ORDER_FILLED) {
-			long now = exitTimeMs;
-			recentSlTimesMs.addLast(now);
-			// 20 dakika dışına çıkanları temizle
-			while (!recentSlTimesMs.isEmpty() && now - recentSlTimesMs.peekFirst() > CB_WINDOW_MS) {
-				recentSlTimesMs.pollFirst();
-			}
-			// 4 SL → 4 saat cooldown
-			if (recentSlTimesMs.size() >= CB_SL_COUNT) {
-				circuitBreakerUntilMs = now + CB_COOLDOWN_MS;
-				recentSlTimesMs.clear();
-				LOGGER.warn("CIRCUIT_BREAKER_TRIGGERED: 20dk icinde 4 SL. Tum semboller {} UTC'ye kadar kapali.",
-						java.time.Instant.ofEpochMilli(circuitBreakerUntilMs));
-			}
-		}
 	}
 
-
-	private static void putHitBar(ObjectNode parent, String field, HitSnapshot c) {
-		ObjectNode b = parent.putObject(field);
-		b.put("open", c.open());
-		b.put("high", c.high());
-		b.put("low", c.low());
-		b.put("close", c.close());
-		b.put("volume", c.volume());
-		b.put("closeTimeMs", c.closeTimeMs());
-	}
 
 
 	private void writeDecision(SymbolState state,
@@ -782,20 +1053,13 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		putOrderflow(node, bar5m);
 		putLiquidity(node, state.symbol, timeMs);
 		node.put("liquidityHealthAgeMs", resolveLiquidityHealthAgeMs());
-		Candle last1m = state.last1m.peekLast();
+		Candle last1m = resolveDecisionAlignedLast1m(state, timeMs);
 		if (last1m != null) {
 			putBar(node, "bar1mLast", last1m, ONE_MIN_MS);
 		}
-
-		String effectiveAction = action;
-		String effectiveMatchedSetup = matchedSetup;
-		String effectiveBlockReason = blockReason;
+		putBars1mIn5m(node, state, timeMs);
 		List<String> invalidReasons = new ArrayList<>();
-
-		if (!baselinesReady) {
-			effectiveAction = "INPUTS_NOT_READY";
-			effectiveMatchedSetup = null;
-			effectiveBlockReason = "INPUTS_NOT_READY";
+		if (!baselinesReady || metrics == null) {
 			applyWarmupNotReadyFields(node, 0, state.seen1mCloses, requiredWarmup5m, state.seen5mCloses);
 			node.with("warmup").put("baselinesSeeded", state.indicators.baselineIndicatorsSeeded());
 		} else {
@@ -823,43 +1087,102 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 			putMetric(metricNode, "atrEma_5m", metrics.atrEma_5m, invalidReasons, "atrEma_5m");
 			putMetric(metricNode, "atrRatio_5m", metrics.atrRatio5m, invalidReasons, "atrRatio_5m");
 		}
-
-		node.put("action", effectiveAction);
-		node.put("matchedSetup", effectiveMatchedSetup);
-		node.put("blockReason", resolveDecisionBlockReason(effectiveAction, effectiveBlockReason));
 		LongSetupEval eval = longSetupEval == null ? LongSetupEval.empty() : longSetupEval;
-		if ("INPUTS_NOT_READY".equals(effectiveAction)) {
-			node.put("inputsValid", false);
-			if (!node.has("inputsInvalidReasons")) {
-				var invalid = node.putArray("inputsInvalidReasons");
-				invalid.add("WARMUP");
-			}
-		} else {
-			node.put("inputsValid", eval.signal());
-			var invalid = node.putArray("inputsInvalidReasons");
-			if (eval.blockReason() != null && !eval.blockReason().isBlank() && !"ELIT_V1_LONG_MATCH".equals(eval.blockReason())) {
-				for (String reason : eval.blockReason().split("\\|")) {
-					if (!reason.isBlank()) {
-						invalid.add(reason);
-					}
-				}
-			}
+		node.put("action", eval.signal() ? "ENTER_LONG" : action);
+		node.put("matchedSetup", eval.signal() ? "BASELINE_IMPULSE_RECLAIM" : matchedSetup);
+		node.put("blockReason", eval.signal() ? "NONE" : resolveDecisionBlockReason(action, eval.blockReason() == null ? blockReason : eval.blockReason()));
+		node.put("inputsValid", eval.signal());
+		var invalid = node.putArray("inputsInvalidReasons");
+		for (String reason : eval.failReasons()) {
+			invalid.add(reason);
 		}
 		node.put("elit.tpPct", TP_PCT);
 		node.put("elit.slPct", SL_PCT);
 		node.put("elit.lookaheadBars", LOOKAHEAD_BARS);
-		if (eval.takerBuyRatio != null && Double.isFinite(eval.takerBuyRatio)) {
-			node.put("elit.takerBuyRatio", eval.takerBuyRatio);
-		} else {
-			node.putNull("elit.takerBuyRatio");
+		node.putNull("elit.takerBuyRatio");
+		node.putNull("elit.imbalance");
+		node.put("elit.isDownTrend", false);
+		node.put("shortEliteMatched", false);
+		node.putNull("shortEliteMatchedSetup");
+		node.putArray("shortEliteFailReasons");
+		node.put("setup", "BASELINE_IMPULSE_RECLAIM");
+		node.put("pass", eval.signal());
+		var failReasons = node.putArray("failReasons");
+		for (String reason : eval.failReasons()) {
+			failReasons.add(reason);
 		}
-		if (eval.imbalance != null && Double.isFinite(eval.imbalance)) {
-			node.put("elit.imbalance", eval.imbalance);
-		} else {
-			node.putNull("elit.imbalance");
+		putFiniteOrNull(node, "ret1m", eval.ret1m());
+		putFiniteOrNull(node, "range1m", eval.range1m());
+		putFiniteOrNull(node, "closePos1m", eval.closePos1m());
+		putFiniteOrNull(node, "lowerWickRatio", eval.lowerWickRatio());
+		putFiniteOrNull(node, "bbWidth_5m", eval.bbWidth5m());
+		putFiniteOrNull(node, "range5m", eval.range5m());
+		putFiniteOrNull(node, "high1h", eval.high1h());
+		putFiniteOrNull(node, "fromHigh_1h", eval.fromHigh1h());
+		putFiniteOrNull(node, "btcRet1m", eval.btcRet1m());
+		if (eval.signal()) {
+			node.put("entryPrice", eval.entryPrice());
+			node.put("tpPrice", eval.tpPrice());
+			node.put("slPrice", eval.slPrice());
 		}
-		node.put("elit.isDownTrend", eval.isDownTrend);
 		writer.write(decisionPath(state.symbol, dayFromTimeMs), node.toString(), false);
+	}
+
+
+	private void putBars1mIn5m(ObjectNode node, SymbolState state, long closeTimeMs) {
+		long fromCloseMs = closeTimeMs - (4L * ONE_MIN_MS);
+		var bars = node.putArray("bars1mIn5m");
+		for (Candle c : state.last1m) {
+			if (c.closeTime() < fromCloseMs || c.closeTime() > closeTimeMs) {
+				continue;
+			}
+			ObjectNode b = bars.addObject();
+			b.put("open", c.open());
+			b.put("high", c.high());
+			b.put("low", c.low());
+			b.put("close", c.close());
+			b.put("volume", c.volume());
+			b.put("closeTimeMs", c.closeTime());
+			b.put("openTimeMs", c.closeTime() - (ONE_MIN_MS - 1));
+		}
+	}
+
+	private double resolveSpreadPct(String symbol) {
+		var snap = bookTickerStreamWatcher.getSnapshot(symbol);
+		if (snap == null) {
+			return Double.NaN;
+		}
+		double bid = snap.bestBidPrice();
+		double ask = snap.bestAskPrice();
+		double mid = (bid + ask) / 2.0;
+		if (mid <= 0.0) {
+			return Double.NaN;
+		}
+		return (ask - bid) / mid;
+	}
+
+
+	private static void putFiniteOrNull(ObjectNode node, String key, double value) {
+		if (Double.isFinite(value)) {
+			node.put(key, value);
+		} else {
+			node.putNull(key);
+		}
+	}
+
+	private Candle resolveDecisionAlignedLast1m(SymbolState state, long decisionCloseTimeMs) {
+		if (state == null || state.last1m.isEmpty()) {
+			return null;
+		}
+		for (var it = state.last1m.descendingIterator(); it.hasNext(); ) {
+			Candle candle = it.next();
+			if (candle != null
+					&& candle.closeTime() <= decisionCloseTimeMs
+					&& (decisionCloseTimeMs - candle.closeTime()) < ONE_MIN_MS) {
+				return candle;
+			}
+		}
+		return null;
 	}
 
 
@@ -1080,6 +1403,17 @@ private Path decisionPath(String symbol, LocalDate day) {
 				.doubleValue();
 	}
 
+	static double floorToStep(double raw, Double stepSize) {
+		if (stepSize == null || !Double.isFinite(stepSize) || stepSize <= 0.0) {
+			return raw;
+		}
+		BigDecimal step = BigDecimal.valueOf(stepSize);
+		return BigDecimal.valueOf(raw)
+				.divide(step, 0, RoundingMode.FLOOR)
+				.multiply(step)
+				.doubleValue();
+	}
+
 	static RegimeTag rawRegime(double bwRatio, double macdRatio, double chopBwRatioMax, double chopMacdRatioMax) {
 		// CHOP: her iki koşul düşük olmalı (orijinal mantık korundu)
 		if (bwRatio < chopBwRatioMax && macdRatio < chopMacdRatioMax) {
@@ -1241,17 +1575,42 @@ private Path decisionPath(String symbol, LocalDate day) {
 		}
 	}
 
-	private record LongSetupEval(boolean signal, String blockReason, Double takerBuyRatio, Double imbalance, boolean isDownTrend) {
+	private record LongSetupEval(boolean signal,
+			String blockReason,
+			List<String> failReasons,
+			double ret1m,
+			double range1m,
+			double closePos1m,
+			double lowerWickRatio,
+			double bbWidth5m,
+			double range5m,
+			double high1h,
+			double fromHigh1h,
+			double btcRet1m,
+			double entryPrice,
+			double tpPrice,
+			double slPrice) {
 		private static LongSetupEval empty() {
-			return new LongSetupEval(false, null, null, null, false);
+			return new LongSetupEval(false, null, List.of(), Double.NaN, Double.NaN, Double.NaN, Double.NaN,
+					Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
 		}
 	}
 
+	private record ShortSetupEval(boolean pass,
+			List<String> failReasons,
+			double coinRet1,
+			double btcRet1,
+			double btcClosePos1,
+			double entryPrice,
+			double tpPrice,
+			double slPrice) {
+	}
 
 	private static final class SymbolState {
 		private final String symbol;
 		private long seen1mCloses;
 		private long seen5mCloses;
+		private long lastEvaluated5mCloseTimeMs = -1L;
 		private boolean baselinesReady;
 		private boolean warmupDoneLogged;
 		private long nextWarmupProgressLogAt1m = 10;

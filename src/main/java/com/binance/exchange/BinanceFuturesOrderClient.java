@@ -117,6 +117,41 @@ public class BinanceFuturesOrderClient {
 		return placeTriggeredClosePositionOrder(symbol, side, stopPrice, "TAKE_PROFIT_MARKET", workingType, clientOrderId);
 	}
 
+	public Mono<OrderResponse> placeReduceOnlyLimitOrder(String symbol,
+			String side,
+			BigDecimal quantity,
+			BigDecimal price,
+			String positionSide,
+			String timeInForce,
+			String clientOrderId) {
+		if (properties.apiKey() == null || properties.apiKey().isBlank()
+				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
+			return Mono.error(new IllegalStateException(
+					"Binance API key/secret is not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."));
+		}
+		return executeOrder(() -> {
+			long timestamp = timeSyncService.currentTimestampMillis();
+			String resolvedClientOrderId = clientOrderId == null || clientOrderId.isBlank()
+					? UUID.randomUUID().toString()
+					: clientOrderId;
+			String resolvedTimeInForce = timeInForce == null || timeInForce.isBlank() ? "GTC" : timeInForce;
+			String payload = String.format(
+					"symbol=%s&side=%s&type=LIMIT&quantity=%s&price=%s&timeInForce=%s&reduceOnly=true&recvWindow=%d&timestamp=%d&newClientOrderId=%s",
+					symbol,
+					side,
+					quantity.toPlainString(),
+					price.toPlainString(),
+					resolvedTimeInForce,
+					RECV_WINDOW_MS,
+					timestamp,
+					resolvedClientOrderId);
+			if (positionSide != null && !positionSide.isBlank()) {
+				payload = payload + "&positionSide=" + positionSide;
+			}
+			return payload;
+		});
+	}
+
 	public Mono<Void> cancelOrder(String symbol, long orderId) {
 		if (properties.apiKey() == null || properties.apiKey().isBlank()
 				|| properties.secretKey() == null || properties.secretKey().isBlank()) {
