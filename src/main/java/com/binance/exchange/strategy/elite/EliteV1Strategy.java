@@ -949,28 +949,20 @@ private static final double VOL_RATIO_OF_EMA_MAX = 0.83;
 		if (state == null || bar5m == null || state.positionSide == Side.NONE || state.bracketId == null) {
 			return false;
 		}
-		if (state.positionSide == Side.LONG) {
-			if (bar5m.low() <= state.slPrice) {
-				exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
-						new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
-				return true;
+		long fromCloseMs = bar5m.closeTime() - (4L * ONE_MIN_MS);
+		for (Candle bar1m : state.last1m) {
+			if (bar1m.closeTime() < fromCloseMs || bar1m.closeTime() > bar5m.closeTime()) {
+				continue;
 			}
-			if (bar5m.high() >= state.tpPrice) {
-				exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
-						new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
-				return true;
+			ExitReason touched = resolveTouchExit(state.positionSide, state.tpPrice, state.slPrice, bar1m, props.conflictResolution());
+			if (touched == null) {
+				continue;
 			}
-		} else if (state.positionSide == Side.SHORT) {
-			if (bar5m.high() >= state.slPrice) {
-				exitPosition(state, ExitReason.STOP_LOSS, state.slPrice, bar5m.closeTime(),
-						new ExitEvaluation(ExitReason.STOP_LOSS, "SL_FIRST", "SL", null, false));
-				return true;
-			}
-			if (bar5m.low() <= state.tpPrice) {
-				exitPosition(state, ExitReason.TAKE_PROFIT, state.tpPrice, bar5m.closeTime(),
-						new ExitEvaluation(ExitReason.TAKE_PROFIT, "TP_FIRST", "TP", null, false));
-				return true;
-			}
+			boolean sl = touched == ExitReason.STOP_LOSS;
+			double exitPrice = sl ? state.slPrice : state.tpPrice;
+			exitPosition(state, touched, exitPrice, bar1m.closeTime(),
+					new ExitEvaluation(touched, sl ? "SL_FIRST" : "TP_FIRST", sl ? "SL_1M" : "TP_1M", bar1m.closeTime(), false));
+			return true;
 		}
 		if ((bar5m.closeTime() - state.entryTimeMs) >= LOOKAHEAD_MS) {
 			exitPosition(state, ExitReason.TIMEOUT_36B, bar5m.close(), bar5m.closeTime(),
